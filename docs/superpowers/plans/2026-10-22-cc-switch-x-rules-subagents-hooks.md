@@ -320,7 +320,38 @@ fn an_older_render_is_still_recognised_as_ours() {
 - `scan::rules(store, index, agent, home, base) -> Result<ScanReport, AppError>`:读 `<rules_dir>/*.md`,用 `merge_body_into_team` 反推 canonical,新文件建条目、已存在的只比正文；`ScanReport { imported, updated, skipped_foreign }`。
 - 命令:`set_rule_enabled`、`scan_rules`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
+
+#### Task 3 执行记录（2026-10-22）
+
+- `rules::deploy(store, index, agent, rule_id, home, base) -> Deployed`，
+  `Deployed::{Written(ApplyReport), Foreign}`。**去掉了示例里的 `Already`**：
+  「什么都没写」已经由 `ApplyReport.skipped` 表达，再加一个变体就是两处真相各说各话。
+- `rules::remove(...) -> Removed`，`Removed::{Ours, Foreign, Absent}`（无 payload；
+  skills 那个 `Removed::Ours(LinkKind)` 带方式是因为删除方式各不相同）。
+- **落盘与取消都走 `ApplyService`**，为此给 `Action` 加了 `Remove`（目标文件应当不存在）：
+  删前一样备份、一样进 `runs`、失败一样回滚，`revert_last` 能把删掉的规则文件找回来
+  （`reverting_a_removal_brings_the_file_back` 钉住这条）。绕开流水线自己写删除路径就会丢掉
+  备份与逐项报告，spec 6 的账对不上。
+- **归属判定**（`is_ours`）两条依据，都不成立就是 `Foreign`：
+  ① 台账里该条目的 `targetPath + hash` 与盘上字节相等；② 盘上字节等于当前 canonical 的
+  任一已知渲染（含 `previous_renders`）。用户手改过的自家文件算 `Foreign` —— 那是漂移
+  （Task 8）要报告的东西，不该在 disable 里被静默删掉。
+- `needs_restart` 对规则恒为 `true`（重新加载语义没有实测依据）→ 状态记 `Written` 而非 `Effective`。
+- `services::scan::rules(...) -> ScanReport { imported, updated, unchanged, skipped: Vec<SkippedFile> }`。
+  示例里的 `skipped_foreign` 换成带 `reason` 的列表：解析失败、扩展名不是 `.md`、
+  文件名推不出合法 ID（纯中文被 `slug` 判空）、两个文件撞同一个 ID —— 四种都得点名，
+  「静默丢文件」是导入器最坏的失败方式。另加 `unchanged` 计数，因为**幂等要能被断言**：
+  deploy 完立刻扫一遍必须 `(0,0,1)`。
+- 命令：`set_rule_enabled` 返回实测标签（`written` / `removed` / `absent`），`Foreign` 报
+  `InvalidInput`（与 skills 一致，UI 能看到到底动没动）；`scan_rules` 返回 `ScanReport`。
+  `commands::agents::{descriptor_for, override_base}` 导出给两个新命令复用。
+- **能力闸的现状**：没有任何 agent 的 Rule 是 `verified`（Task 1 把 qoder-cn 降下来了），
+  所以 `set_rule_enabled` / `scan_rules` 对真实用户一律 `Unsupported`。这是有意的：
+  升 `verified` 只能由真机写入换来，而真机写入走 tests 里的临时配置根（Task 11），
+  不靠放宽面板闸门来「先验证了再说」。
+- 门禁：`cargo test` 152 通过（本任务 +17）、`cargo fmt --check` 干净、
+  `cargo clippy --all-targets` 仍只剩 Plan 2 那条遗留告警。
 
 ```rust
 #[test]
@@ -352,7 +383,7 @@ fn scanning_a_tool_rule_becomes_a_canonical_rule_with_the_same_body() {
 }
 ```
 
-- [ ] **Step 2–5:** 红 → 实现 → 绿 → 提交 `git commit -m "feat: 添加 Rules 落盘与原生扫描导入"`。
+- [x] **Step 2–5:** 红 → 实现 → 绿 → 提交 `git commit -m "feat: 添加 Rules 落盘与原生扫描导入"`。
 
 ---
 

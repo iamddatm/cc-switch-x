@@ -40,6 +40,8 @@ pub fn run() {
             commands::import::import_apply,
             commands::import::import_preview,
             commands::import::revert_last,
+            commands::rules::scan_rules,
+            commands::rules::set_rule_enabled,
             commands::settings::get_settings,
             commands::settings::set_theme,
             commands::settings::set_store_root,

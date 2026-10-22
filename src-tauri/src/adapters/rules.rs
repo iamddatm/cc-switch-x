@@ -5,10 +5,17 @@
 //! 三段式 render / body_equals / merge_body_into_team，加 `previous_renders`
 //! 认出早期版本写的文件，否则改了渲染格式就再也不能安全替换自家旧产物。
 
+use crate::adapters::ledger;
+use crate::adapters::paths::expand_root;
 use crate::domain::agent::AgentDescriptor;
 use crate::domain::frontmatter::split_frontmatter;
-use crate::domain::rule::{render_canonical, Rule, RuleFrontmatter, RuleTrigger};
-use crate::domain::DomainError;
+use crate::domain::rule::{parse_rule, render_canonical, Rule, RuleFrontmatter, RuleTrigger};
+use crate::domain::{AssetKind, AssetType, DomainError};
+use crate::error::AppError;
+use crate::index::{sha256_hex, Index};
+use crate::services::apply::{Action, ApplyReport, ApplyService, PlanItem};
+use crate::store::Store;
+use std::path::{Path, PathBuf};
 
 /// 渲染一个工具形态的规则文件。失败只可能是 canonical 序列化本身出错。
 pub type Render = fn(&Rule) -> Result<String, DomainError>;
@@ -256,6 +263,190 @@ pub fn rule_from_tool_file(id: &str, tool_text: &str) -> Result<Rule, DomainErro
     })
 }
 
+// ─── 落盘与卸载 ─────────────────────────────────────────────
+
+/// 我们写的规则文件里没有归属标记（正文是 agent 要读的内容，不能污染），
+/// 所以「是不是我们写的」只能看：① 台账记过的字节指纹；② 当前 canonical 的
+/// 任一已知渲染（含早期渲染）逐字节相等。都不成立就是别人的文件。
+const RENDERER_VERSION: u32 = 1;
+
+/// 规则的重新加载语义没有实测依据，按「要重启」处理，不把未知报成安全。
+const NEEDS_RESTART: bool = true;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Deployed {
+    Written(ApplyReport),
+    /// 目标位置上是不认识的内容，一个字节都没动
+    Foreign,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removed {
+    Ours,
+    Foreign,
+    Absent,
+}
+
+fn declared_rules_dir(agent: &AgentDescriptor) -> Result<&str, AppError> {
+    agent
+        .paths
+        .rules_dir
+        .as_deref()
+        .ok_or_else(|| AppError::Unsupported(format!("{} 没有 markdown 规则落点", agent.id)))
+}
+
+pub fn rules_dir(
+    agent: &AgentDescriptor,
+    home: &Path,
+    base_override: Option<&Path>,
+) -> Result<PathBuf, AppError> {
+    Ok(expand_root(declared_rules_dir(agent)?, base_override, home))
+}
+
+pub fn target_path(
+    agent: &AgentDescriptor,
+    rule_id: &str,
+    home: &Path,
+    base_override: Option<&Path>,
+) -> Result<PathBuf, AppError> {
+    let extension = format_for_agent(agent).map_or(".md", |format| format.extension);
+    Ok(rules_dir(agent, home, base_override)?.join(format!("{rule_id}{extension}")))
+}
+
+fn plan_item(
+    agent: &AgentDescriptor,
+    rule_id: &str,
+    target_path: PathBuf,
+    contents: Vec<u8>,
+    action: Action,
+) -> PlanItem {
+    let marker = match action {
+        Action::Remove => '-',
+        _ => '+',
+    };
+    PlanItem {
+        agent_id: agent.id.clone(),
+        asset_type: AssetType::Rule,
+        asset_id: rule_id.to_string(),
+        action,
+        target_path,
+        contents,
+        diff: vec![format!(
+            "{marker} {}/{}",
+            declared_rules_dir(agent).unwrap_or("rules"),
+            rule_id
+        )],
+        needs_restart: NEEDS_RESTART,
+    }
+}
+
+fn read_if_exists(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
+    if path.exists() {
+        Ok(Some(std::fs::read(path)?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// 盘上这份字节是不是我们落的。canonical 真源可能已被删除，那时只认台账。
+fn is_ours(
+    store: &Store,
+    agent: &AgentDescriptor,
+    rule_id: &str,
+    path: &Path,
+    current: &[u8],
+) -> Result<bool, AppError> {
+    let ledger = ledger::load(store, &agent.id)?;
+    if ledger
+        .get(AssetKind::Rule, rule_id)
+        .map(|entry| entry.target_path == path && entry.hash == sha256_hex(current))
+        .unwrap_or(false)
+    {
+        return Ok(true);
+    }
+    let canonical = match store.read(AssetType::Rule, rule_id) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(false),
+    };
+    let text = String::from_utf8(canonical)
+        .map_err(|_| AppError::InvalidInput("真源里的规则不是 UTF-8".into()))?;
+    let rule = parse_rule(rule_id, &text)?;
+    Ok(delivered_renders(agent)
+        .iter()
+        .filter_map(|render| render(&rule).ok())
+        .any(|rendered| rendered.as_bytes() == current))
+}
+
+pub fn deploy(
+    store: &Store,
+    index: &mut Index,
+    agent: &AgentDescriptor,
+    rule_id: &str,
+    home: &Path,
+    base_override: Option<&Path>,
+) -> Result<Deployed, AppError> {
+    let canonical = store.read(AssetType::Rule, rule_id)?;
+    let text = String::from_utf8(canonical)
+        .map_err(|_| AppError::InvalidInput("真源里的规则不是 UTF-8".into()))?;
+    let rule = parse_rule(rule_id, &text)?;
+    let rendered = render_rule(agent, &rule)?;
+    let path = target_path(agent, rule_id, home, base_override)?;
+
+    if let Some(current) = read_if_exists(&path)? {
+        if !is_ours(store, agent, rule_id, &path, &current)? {
+            return Ok(Deployed::Foreign);
+        }
+    }
+    let report = ApplyService::apply(
+        store,
+        index,
+        &[plan_item(
+            agent,
+            rule_id,
+            path.clone(),
+            rendered.as_bytes().to_vec(),
+            Action::Enable,
+        )],
+    )?;
+    ledger::record(
+        store,
+        &agent.id,
+        AssetKind::Rule,
+        rule_id,
+        &path,
+        &sha256_hex(rendered.as_bytes()),
+        RENDERER_VERSION,
+    )?;
+    Ok(Deployed::Written(report))
+}
+
+/// 取消落盘。只删得出「是我们落的」文件；用户手改过的自家文件也算 Foreign，
+/// 那是漂移（Task 8）该报告的东西，不该在这里被静默删掉。
+pub fn remove(
+    store: &Store,
+    index: &mut Index,
+    agent: &AgentDescriptor,
+    rule_id: &str,
+    home: &Path,
+    base_override: Option<&Path>,
+) -> Result<Removed, AppError> {
+    let path = target_path(agent, rule_id, home, base_override)?;
+    let Some(current) = read_if_exists(&path)? else {
+        ledger::forget(store, &agent.id, AssetKind::Rule, rule_id)?;
+        return Ok(Removed::Absent);
+    };
+    if !is_ours(store, agent, rule_id, &path, &current)? {
+        return Ok(Removed::Foreign);
+    }
+    ApplyService::apply(
+        store,
+        index,
+        &[plan_item(agent, rule_id, path, Vec::new(), Action::Remove)],
+    )?;
+    ledger::forget(store, &agent.id, AssetKind::Rule, rule_id)?;
+    Ok(Removed::Ours)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,5 +618,259 @@ mod tests {
     fn an_unparsable_frontmatter_is_an_error_not_an_empty_rule() {
         let broken = "---\ntrigger: [unclosed\n---\n\n正文\n";
         assert!(rule_from_tool_file("style", broken).is_err());
+    }
+}
+
+#[cfg(test)]
+mod deploy_tests {
+    use super::{deploy, remove, target_path, verbatim_render, Deployed, Removed};
+    use crate::adapters::ledger;
+    use crate::domain::agent::{builtin_agents, AgentDescriptor};
+    use crate::domain::rule::{render_canonical, Rule, RuleFrontmatter};
+    use crate::domain::{AssetKind, AssetType};
+    use crate::index::Index;
+    use crate::store::Store;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    struct Fixture {
+        /// 只在 Drop 时保住临时目录，测试结束前不能让它被删掉。
+        _dir: tempfile::TempDir,
+        store: Store,
+        index: Index,
+        home: PathBuf,
+        agent: AgentDescriptor,
+    }
+
+    fn qoder_cn() -> AgentDescriptor {
+        builtin_agents()
+            .into_iter()
+            .find(|a| a.id == "qoder-cn")
+            .unwrap()
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let index = Index::open(&dir.path().join("index.db")).unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        Fixture {
+            _dir: dir,
+            store,
+            index,
+            home,
+            agent: qoder_cn(),
+        }
+    }
+
+    impl Fixture {
+        fn rules_dir(&self) -> PathBuf {
+            self.home.join(".qoder-cn/rules")
+        }
+
+        fn target(&self) -> PathBuf {
+            target_path(&self.agent, "style", &self.home, None).unwrap()
+        }
+
+        fn seed_rule(&self, paths: &[&str]) -> Rule {
+            let rule = Rule {
+                id: "style".into(),
+                meta: RuleFrontmatter {
+                    name: "style".into(),
+                    description: "写法".into(),
+                    paths: paths.iter().map(|p| p.to_string()).collect(),
+                    trigger: None,
+                },
+                body: "正文\n".into(),
+            };
+            self.store
+                .write(
+                    AssetType::Rule,
+                    "style",
+                    render_canonical(&rule).unwrap().as_bytes(),
+                )
+                .unwrap();
+            rule
+        }
+
+        fn write_target(&self, text: &str) {
+            std::fs::create_dir_all(self.rules_dir()).unwrap();
+            std::fs::write(self.target(), text).unwrap();
+        }
+    }
+
+    #[test]
+    fn deploy_creates_the_dir_and_only_removes_what_it_delivered() {
+        let mut fx = fixture();
+        fx.seed_rule(&["src/**"]);
+        std::fs::create_dir_all(fx.rules_dir()).unwrap();
+        std::fs::write(fx.rules_dir().join("another.md"), "用户自己的规则").unwrap();
+
+        let deployed =
+            deploy(&fx.store, &mut fx.index, &fx.agent, "style", &fx.home, None).unwrap();
+        assert!(matches!(deployed, Deployed::Written(_)));
+        assert!(fx.rules_dir().join("style.md").is_file());
+        assert!(
+            fx.rules_dir().join("style.md").exists(),
+            "目录原本不存在时应由 deploy 建出来"
+        );
+
+        let removed = remove(&fx.store, &mut fx.index, &fx.agent, "style", &fx.home, None).unwrap();
+        assert_eq!(removed, Removed::Ours);
+        assert!(!fx.target().exists());
+        assert_eq!(
+            std::fs::read_to_string(fx.rules_dir().join("another.md")).unwrap(),
+            "用户自己的规则",
+            "别人写的规则文件必须活过我们的 disable"
+        );
+    }
+
+    #[test]
+    fn a_foreign_file_with_the_same_name_is_never_overwritten() {
+        let mut fx = fixture();
+        fx.seed_rule(&["src/**"]);
+        fx.write_target("---\ntrigger: manual\n---\n\n别人的");
+
+        let deployed =
+            deploy(&fx.store, &mut fx.index, &fx.agent, "style", &fx.home, None).unwrap();
+        assert_eq!(deployed, Deployed::Foreign);
+        assert!(fx.target().is_file());
+        assert!(
+            std::fs::read_to_string(fx.target())
+                .unwrap()
+                .contains("别人的"),
+            "同名外来文件一个字节都不能动"
+        );
+        assert_eq!(
+            remove(&fx.store, &mut fx.index, &fx.agent, "style", &fx.home, None).unwrap(),
+            Removed::Foreign
+        );
+        assert!(fx.target().is_file());
+    }
+
+    #[test]
+    fn a_hand_edited_copy_is_not_deleted_and_says_why() {
+        let mut fx = fixture();
+        fx.seed_rule(&["src/**"]);
+        deploy(&fx.store, &mut fx.index, &fx.agent, "style", &fx.home, None).unwrap();
+        fx.write_target("---\ntrigger: glob\nglob: src/**\n---\n\n用户加了条款");
+
+        assert_eq!(
+            remove(&fx.store, &mut fx.index, &fx.agent, "style", &fx.home, None).unwrap(),
+            Removed::Foreign,
+            "改过的正文既不等台账指纹也不等任何已知渲染，不是我们能删的"
+        );
+        assert!(fx.target().is_file());
+        // 再落盘也一样被挡住（漂移处置是 Task 8 的事，这里不静默覆盖）
+        assert_eq!(
+            deploy(&fx.store, &mut fx.index, &fx.agent, "style", &fx.home, None).unwrap(),
+            Deployed::Foreign
+        );
+        assert!(std::fs::read_to_string(fx.target())
+            .unwrap()
+            .contains("用户加了条款"));
+    }
+
+    #[test]
+    fn our_own_previous_write_is_replaced_without_confirmation() {
+        let mut fx = fixture();
+        fx.seed_rule(&["src/**"]);
+        deploy(&fx.store, &mut fx.index, &fx.agent, "style", &fx.home, None).unwrap();
+        // 真源改了范围 → 重新落盘要能替换自家文件
+        fx.seed_rule(&["src/**", "docs/**"]);
+        let deployed =
+            deploy(&fx.store, &mut fx.index, &fx.agent, "style", &fx.home, None).unwrap();
+        assert!(matches!(deployed, Deployed::Written(_)));
+        assert!(std::fs::read_to_string(fx.target())
+            .unwrap()
+            .contains("glob: src/**, docs/**"));
+    }
+
+    #[test]
+    fn an_older_render_of_ours_is_recognised_and_replaced() {
+        let mut fx = fixture();
+        let rule = fx.seed_rule(&["src/**"]);
+        // 早期版本是逐字抄 canonical，没有 trigger 行
+        let legacy = verbatim_render(&rule).unwrap();
+        fx.write_target(&legacy);
+
+        let deployed =
+            deploy(&fx.store, &mut fx.index, &fx.agent, "style", &fx.home, None).unwrap();
+        assert!(
+            matches!(deployed, Deployed::Written(_)),
+            "旧渲染必须认得出是自己家的，否则永远换不掉"
+        );
+        assert_ne!(std::fs::read_to_string(fx.target()).unwrap(), legacy);
+    }
+
+    #[test]
+    fn deploy_records_the_ledger_and_marks_the_state_written() {
+        let mut fx = fixture();
+        fx.seed_rule(&["src/**"]);
+        deploy(&fx.store, &mut fx.index, &fx.agent, "style", &fx.home, None).unwrap();
+
+        let table = ledger::load(&fx.store, "qoder-cn").unwrap();
+        let entry = table
+            .get(AssetKind::Rule, "style")
+            .expect("落盘后必须留下台账条目");
+        assert_eq!(entry.target_path, fx.target());
+        assert_eq!(entry.rendered_by, 1);
+        let row = fx
+            .index
+            .agent_states()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.asset_type == AssetType::Rule && row.asset_id == "style")
+            .expect("落盘必须留下四态记录");
+        assert_eq!(
+            row.state,
+            crate::domain::AssetState::Written,
+            "重新加载语义没实测 → 只能说已写入，不能说已生效"
+        );
+
+        remove(&fx.store, &mut fx.index, &fx.agent, "style", &fx.home, None).unwrap();
+        assert!(ledger::load(&fx.store, "qoder-cn")
+            .unwrap()
+            .get(AssetKind::Rule, "style")
+            .is_none());
+    }
+
+    #[test]
+    fn removing_an_absent_file_is_absent_not_an_error() {
+        let mut fx = fixture();
+        fx.seed_rule(&["src/**"]);
+        assert_eq!(
+            remove(&fx.store, &mut fx.index, &fx.agent, "style", &fx.home, None).unwrap(),
+            Removed::Absent
+        );
+    }
+
+    #[test]
+    fn reverting_a_removal_brings_the_file_back() {
+        let mut fx = fixture();
+        fx.seed_rule(&["src/**"]);
+        deploy(&fx.store, &mut fx.index, &fx.agent, "style", &fx.home, None).unwrap();
+        let written = std::fs::read(fx.target()).unwrap();
+        remove(&fx.store, &mut fx.index, &fx.agent, "style", &fx.home, None).unwrap();
+        assert!(!fx.target().exists());
+
+        crate::services::apply::ApplyService::revert_last(&mut fx.index).unwrap();
+        assert_eq!(std::fs::read(fx.target()).unwrap(), written);
+    }
+
+    #[test]
+    fn an_agent_without_a_rules_target_is_refused() {
+        let mut fx = fixture();
+        fx.agent = builtin_agents()
+            .into_iter()
+            .find(|a| a.id == "codex")
+            .unwrap();
+        fx.seed_rule(&["src/**"]);
+        let error = deploy(&fx.store, &mut fx.index, &fx.agent, "style", &fx.home, None);
+        assert!(
+            error.is_err(),
+            "Codex 的 rules 目录是执行策略 DSL，不能往里写 markdown"
+        );
     }
 }

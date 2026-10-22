@@ -11,6 +11,10 @@ pub enum Action {
     Enable,
     Disable,
     Refresh,
+    /// 目标文件应当不存在（整文件型资产的取消：rules / subagents）。
+    /// 与 Disable 的区别是 Disable 写回合并后的内容，Remove 删文件——删之前同样备份，
+    /// 所以取消操作也能被 revert_last 还原。
+    Remove,
 }
 
 /// 一条已经渲染好的写入意图。`contents` 由适配器算出（含键级合并的结果），
@@ -85,6 +89,25 @@ impl ApplyService {
         let mut skipped = 0usize;
         for slot in 0..work.len() {
             let item = &work[slot].0;
+            if item.action == Action::Remove {
+                if !item.target_path.exists() {
+                    skipped += 1;
+                    continue;
+                }
+                if let Err(error) = std::fs::remove_file(&item.target_path) {
+                    let failure = format!("删除 {} 失败：{error}", item.target_path.display());
+                    Self::restore(index, &work, &touched)?;
+                    return Err(AppError::InvalidInput(failure));
+                }
+                if item.target_path.exists() {
+                    let failure = format!("删除 {} 后文件仍在", item.target_path.display());
+                    Self::restore(index, &work, &touched)?;
+                    return Err(AppError::InvalidInput(failure));
+                }
+                touched.push(slot);
+                written += 1;
+                continue;
+            }
             if std::fs::read(&item.target_path)
                 .map(|current| current == item.contents)
                 .unwrap_or(false)
@@ -110,7 +133,7 @@ impl ApplyService {
         // 3. 记录四态与执行历史
         for (item, _) in &work {
             let state = match item.action {
-                Action::Disable => AssetState::Off,
+                Action::Disable | Action::Remove => AssetState::Off,
                 _ if item.needs_restart => AssetState::Written,
                 _ => AssetState::Effective,
             };

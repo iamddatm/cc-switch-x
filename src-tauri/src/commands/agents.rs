@@ -14,7 +14,7 @@ use tauri::State;
 
 /// 每个写入入口都要带上要动的资产类型，能力表按类型把关：
 /// 未实测的落点连命令都进不来，而不是靠面板自觉。
-fn descriptor(agent_id: &str, kind: AssetKind) -> Result<AgentDescriptor, AppError> {
+pub fn descriptor_for(agent_id: &str, kind: AssetKind) -> Result<AgentDescriptor, AppError> {
     builtin_agents()
         .into_iter()
         .find(|agent| agent.id == agent_id)
@@ -27,7 +27,7 @@ fn descriptor(agent_id: &str, kind: AssetKind) -> Result<AgentDescriptor, AppErr
         })
 }
 
-fn override_base(state: &AppState, agent_id: &str) -> Result<Option<PathBuf>, AppError> {
+pub(crate) fn override_base(state: &AppState, agent_id: &str) -> Result<Option<PathBuf>, AppError> {
     Ok(load_state(&state.store, agent_id)?.base_override)
 }
 
@@ -43,7 +43,7 @@ pub fn set_mcp_enabled(
     agent_id: String,
     enabled: bool,
 ) -> Result<ApplyReport, AppError> {
-    let descriptor = descriptor(&agent_id, AssetKind::Mcp)?;
+    let descriptor = descriptor_for(&agent_id, AssetKind::Mcp)?;
     let canonical = state.store.read(AssetType::Mcp, &id)?;
     let server: McpServer = serde_json::from_slice(&canonical)?;
     let base = override_base(&state, &agent_id)?;
@@ -86,7 +86,7 @@ pub fn set_skill_enabled(
     agent_id: String,
     enabled: bool,
 ) -> Result<String, AppError> {
-    let descriptor = descriptor(&agent_id, AssetKind::Skill)?;
+    let descriptor = descriptor_for(&agent_id, AssetKind::Skill)?;
     let base = override_base(&state, &agent_id)?;
     let label = if enabled {
         match skills::deploy(&state.store, &descriptor, &id, &state.home, base.as_deref())? {
@@ -129,7 +129,7 @@ pub fn activate_prompt(
     confirm: Option<bool>,
     save_existing_as: Option<String>,
 ) -> Result<ActivateOutcome, AppError> {
-    let descriptor = descriptor(&agent_id, AssetKind::Prompt)?;
+    let descriptor = descriptor_for(&agent_id, AssetKind::Prompt)?;
     let base = override_base(&state, &agent_id)?;
     let takeover = match save_existing_as {
         Some(new_id) => Takeover::SaveExistingAs(new_id),
