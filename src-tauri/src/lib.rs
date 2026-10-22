@@ -42,6 +42,8 @@ pub fn run() {
             commands::import::revert_last,
             commands::rules::scan_rules,
             commands::rules::set_rule_enabled,
+            commands::subagents::scan_subagents,
+            commands::subagents::set_subagent_enabled,
             commands::settings::get_settings,
             commands::settings::set_theme,
             commands::settings::set_store_root,

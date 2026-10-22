@@ -4,11 +4,19 @@
 //! 映射对齐 teamai-cli 的 `agent-format.ts`（MIT，见 THIRD_PARTY_NOTICES.md）：
 //! 只借字段映射与「literal string」这两个已验证的机制，不复制其代码。
 
+use super::{Deployed, Removed};
+use crate::adapters::ledger;
+use crate::adapters::paths::expand_root;
 use crate::domain::agent::AgentDescriptor;
 use crate::domain::frontmatter::split_frontmatter;
-use crate::domain::subagent::Subagent;
-use crate::domain::DomainError;
+use crate::domain::subagent::{parse_subagent, Subagent};
+use crate::domain::{AssetKind, AssetType, DomainError};
+use crate::error::AppError;
+use crate::index::{sha256_hex, Index};
+use crate::services::apply::{Action, ApplyService, PlanItem};
+use crate::store::Store;
 use serde_json::{Map, Value as JsonValue};
+use std::path::{Path, PathBuf};
 
 /// 渲染结果。只在适配器内部与测试之间流转：面板看到的是落盘后的实际文件，
 /// 不是这份字节，所以不参与序列化。
@@ -397,6 +405,187 @@ pub fn reverse_subagent(
     }
 }
 
+// ─── 落盘与卸载 ─────────────────────────────────────────────
+
+/// 子代理文件里没有归属标记（正文是 agent 要读的提示词），归属只走
+/// `ledger::bytes_are_ours` 那两条依据。渲染格式若改动，递增版本并把旧形态
+/// 加进 `previous_renders`（rules 那边已有先例）。
+const RENDERER_VERSION: u32 = 1;
+
+/// 子代理的热加载语义没有实测依据，按「要重启」处理。
+const NEEDS_RESTART: bool = true;
+
+fn declared_agents_dir(agent: &AgentDescriptor) -> Result<&str, AppError> {
+    agent
+        .paths
+        .agents_dir
+        .as_deref()
+        .ok_or_else(|| AppError::Unsupported(format!("{} 没有子代理落点", agent.id)))
+}
+
+pub fn agents_dir(
+    agent: &AgentDescriptor,
+    home: &Path,
+    base_override: Option<&Path>,
+) -> Result<PathBuf, AppError> {
+    Ok(expand_root(
+        declared_agents_dir(agent)?,
+        base_override,
+        home,
+    ))
+}
+
+/// 落盘文件名用真源 ID，扩展名按 agent 的形状（codex 是 `.toml`）。
+pub fn target_path(
+    agent: &AgentDescriptor,
+    subagent_id: &str,
+    home: &Path,
+    base_override: Option<&Path>,
+) -> Result<PathBuf, AppError> {
+    Ok(agents_dir(agent, home, base_override)?
+        .join(format!("{subagent_id}{}", extension_for(agent))))
+}
+
+fn plan_item(
+    agent: &AgentDescriptor,
+    subagent_id: &str,
+    target_path: PathBuf,
+    contents: Vec<u8>,
+    action: Action,
+) -> PlanItem {
+    let marker = match action {
+        Action::Remove => '-',
+        _ => '+',
+    };
+    PlanItem {
+        agent_id: agent.id.clone(),
+        asset_type: AssetType::Subagent,
+        asset_id: subagent_id.to_string(),
+        action,
+        target_path,
+        contents,
+        diff: vec![format!(
+            "{marker} {}/{}",
+            declared_agents_dir(agent).unwrap_or("agents"),
+            subagent_id
+        )],
+        needs_restart: NEEDS_RESTART,
+    }
+}
+
+/// 真源可能已被删除或改坏；那种情况下归属只认台账。
+fn read_canonical(store: &Store, subagent_id: &str) -> Option<Subagent> {
+    let bytes = store.read(AssetType::Subagent, subagent_id).ok()?;
+    let text = String::from_utf8(bytes).ok()?;
+    parse_subagent(&text).ok()
+}
+
+fn is_ours(
+    store: &Store,
+    agent: &AgentDescriptor,
+    subagent_id: &str,
+    path: &Path,
+    current: &[u8],
+) -> Result<bool, AppError> {
+    let candidates: Vec<Result<String, DomainError>> = match read_canonical(store, subagent_id) {
+        Some(sub) => vec![render_subagent(agent, &sub).map(|rendered| rendered.content)],
+        None => Vec::new(),
+    };
+    ledger::bytes_are_ours(
+        store,
+        &agent.id,
+        AssetKind::Subagent,
+        subagent_id,
+        path,
+        current,
+        candidates,
+    )
+}
+
+fn read_if_exists(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
+    if path.exists() {
+        Ok(Some(std::fs::read(path)?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn deploy(
+    store: &Store,
+    index: &mut Index,
+    agent: &AgentDescriptor,
+    subagent_id: &str,
+    home: &Path,
+    base_override: Option<&Path>,
+) -> Result<Deployed, AppError> {
+    let canonical = store.read(AssetType::Subagent, subagent_id)?;
+    let text = String::from_utf8(canonical)
+        .map_err(|_| AppError::InvalidInput("真源里的子代理不是 UTF-8".into()))?;
+    let sub = parse_subagent(&text)?;
+    let rendered = render_subagent(agent, &sub)?;
+    let bytes = rendered.content.into_bytes();
+    let path = target_path(agent, subagent_id, home, base_override)?;
+
+    if let Some(current) = read_if_exists(&path)? {
+        if !is_ours(store, agent, subagent_id, &path, &current)? {
+            return Ok(Deployed::Foreign);
+        }
+    }
+    let report = ApplyService::apply(
+        store,
+        index,
+        &[plan_item(
+            agent,
+            subagent_id,
+            path.clone(),
+            bytes.clone(),
+            Action::Enable,
+        )],
+    )?;
+    ledger::record(
+        store,
+        &agent.id,
+        AssetKind::Subagent,
+        subagent_id,
+        &path,
+        &sha256_hex(&bytes),
+        RENDERER_VERSION,
+    )?;
+    Ok(Deployed::Written(report))
+}
+
+/// 取消落盘。内置的与用户自己写的子代理都不在台账里，一律不动。
+pub fn remove(
+    store: &Store,
+    index: &mut Index,
+    agent: &AgentDescriptor,
+    subagent_id: &str,
+    home: &Path,
+    base_override: Option<&Path>,
+) -> Result<Removed, AppError> {
+    let path = target_path(agent, subagent_id, home, base_override)?;
+    let Some(current) = read_if_exists(&path)? else {
+        ledger::forget(store, &agent.id, AssetKind::Subagent, subagent_id)?;
+        return Ok(Removed::Absent);
+    };
+    if !is_ours(store, agent, subagent_id, &path, &current)? {
+        return Ok(Removed::Foreign);
+    }
+    ApplyService::apply(
+        store,
+        index,
+        &[plan_item(
+            agent,
+            subagent_id,
+            path,
+            Vec::new(),
+            Action::Remove,
+        )],
+    )?;
+    ledger::forget(store, &agent.id, AssetKind::Subagent, subagent_id)?;
+    Ok(Removed::Ours)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,5 +867,325 @@ mod tests {
         assert_eq!(parsed, spec());
         let rendered = render_subagent(&agent("claude"), &parsed).unwrap();
         assert!(rendered.content.contains("name: reviewer"));
+    }
+}
+
+#[cfg(test)]
+mod deploy_tests {
+    use super::{deploy, remove, target_path};
+    use crate::adapters::ledger;
+    use crate::adapters::{Deployed, Removed};
+    use crate::domain::agent::{builtin_agents, AgentDescriptor};
+    use crate::domain::subagent::{parse_subagent, render_canonical, Subagent};
+    use crate::domain::{AssetKind, AssetType};
+    use crate::index::Index;
+    use crate::store::Store;
+    use serde_json::{Map, Value as JsonValue};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn spec() -> Subagent {
+        Subagent {
+            name: "reviewer".into(),
+            description: "代码审查".into(),
+            instructions: "先看 diff 再看测试".into(),
+            model: None,
+            tools: vec!["Read".into(), "Grep".into()],
+            tool_extras: JsonValue::Object(Map::new()),
+            targets: vec!["claude".into()],
+        }
+    }
+
+    struct Fixture {
+        /// 只在 Drop 时保住临时目录。
+        _dir: TempDir,
+        store: Store,
+        index: Index,
+        home: PathBuf,
+        agent: AgentDescriptor,
+    }
+
+    fn fixture(id: &str) -> Fixture {
+        let dir = TempDir::new().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let index = Index::open(&dir.path().join("index.db")).unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let agent = builtin_agents().into_iter().find(|a| a.id == id).unwrap();
+        Fixture {
+            _dir: dir,
+            store,
+            index,
+            home,
+            agent,
+        }
+    }
+
+    impl Fixture {
+        fn target(&self) -> PathBuf {
+            target_path(&self.agent, "reviewer", &self.home, None).unwrap()
+        }
+
+        fn agents_dir(&self) -> PathBuf {
+            self.target().parent().unwrap().to_path_buf()
+        }
+
+        fn seed(&self) {
+            self.store
+                .write(
+                    AssetType::Subagent,
+                    "reviewer",
+                    render_canonical(&spec()).unwrap().as_bytes(),
+                )
+                .unwrap();
+        }
+
+        fn write_foreign(&self, name: &str, text: &str) {
+            std::fs::create_dir_all(self.agents_dir()).unwrap();
+            std::fs::write(self.agents_dir().join(name), text).unwrap();
+        }
+    }
+
+    #[test]
+    fn deploy_uses_the_tool_extension() {
+        let mut markdown = fixture("qoder-cn");
+        markdown.seed();
+        deploy(
+            &markdown.store,
+            &mut markdown.index,
+            &markdown.agent,
+            "reviewer",
+            &markdown.home,
+            None,
+        )
+        .unwrap();
+        assert!(
+            markdown.target().ends_with("reviewer.md"),
+            "{:?}",
+            markdown.target()
+        );
+        let written = std::fs::read_to_string(markdown.target()).unwrap();
+        assert!(written.contains("先看 diff 再看测试"), "{written}");
+
+        let mut toml = fixture("codex");
+        toml.seed();
+        deploy(
+            &toml.store,
+            &mut toml.index,
+            &toml.agent,
+            "reviewer",
+            &toml.home,
+            None,
+        )
+        .unwrap();
+        assert!(
+            toml.target().ends_with("reviewer.toml"),
+            "{:?}",
+            toml.target()
+        );
+        assert!(
+            std::fs::read_to_string(toml.target())
+                .unwrap()
+                .contains("developer_instructions"),
+            "Codex 那边必须是 TOML"
+        );
+    }
+
+    #[test]
+    fn removing_a_subagent_keeps_the_builtin_list() {
+        let mut fx = fixture("claude");
+        fx.seed();
+        // 内置的与用户自己写的子代理都不在我们台账里
+        fx.write_foreign(
+            "helper.md",
+            "---\nname: helper\ndescription: 内置\n---\n\n别人的提示词\n",
+        );
+
+        deploy(
+            &fx.store,
+            &mut fx.index,
+            &fx.agent,
+            "reviewer",
+            &fx.home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            remove(
+                &fx.store,
+                &mut fx.index,
+                &fx.agent,
+                "reviewer",
+                &fx.home,
+                None
+            )
+            .unwrap(),
+            Removed::Ours
+        );
+        assert!(!fx.target().exists());
+        let untouched = fx.agents_dir().join("helper.md");
+        assert!(untouched.is_file(), "取消一个资产不能连带清掉别人的文件");
+        assert!(std::fs::read_to_string(untouched)
+            .unwrap()
+            .contains("别人的提示词"));
+    }
+
+    #[test]
+    fn a_foreign_file_with_the_same_name_is_never_touched() {
+        let mut fx = fixture("claude");
+        fx.seed();
+        fx.write_foreign(
+            "reviewer.md",
+            "---\nname: reviewer\ndescription: 用户自己写的\n---\n\n用户的提示词\n",
+        );
+
+        assert_eq!(
+            deploy(
+                &fx.store,
+                &mut fx.index,
+                &fx.agent,
+                "reviewer",
+                &fx.home,
+                None
+            )
+            .unwrap(),
+            Deployed::Foreign
+        );
+        assert_eq!(
+            remove(
+                &fx.store,
+                &mut fx.index,
+                &fx.agent,
+                "reviewer",
+                &fx.home,
+                None
+            )
+            .unwrap(),
+            Removed::Foreign
+        );
+        assert!(std::fs::read_to_string(fx.target())
+            .unwrap()
+            .contains("用户的提示词"));
+    }
+
+    #[test]
+    fn a_hand_edited_copy_is_neither_redeployable_nor_removable() {
+        let mut fx = fixture("qoder-cn");
+        fx.seed();
+        deploy(
+            &fx.store,
+            &mut fx.index,
+            &fx.agent,
+            "reviewer",
+            &fx.home,
+            None,
+        )
+        .unwrap();
+        std::fs::write(fx.target(), "用户在 Qoder 那边改了提示词\n").unwrap();
+
+        assert_eq!(
+            deploy(
+                &fx.store,
+                &mut fx.index,
+                &fx.agent,
+                "reviewer",
+                &fx.home,
+                None
+            )
+            .unwrap(),
+            Deployed::Foreign,
+            "改过的内容要留给漂移报告处置，不能在这里静默覆盖"
+        );
+        assert_eq!(
+            remove(
+                &fx.store,
+                &mut fx.index,
+                &fx.agent,
+                "reviewer",
+                &fx.home,
+                None
+            )
+            .unwrap(),
+            Removed::Foreign
+        );
+    }
+
+    #[test]
+    fn deploy_records_the_ledger_and_marks_the_state_written() {
+        let mut fx = fixture("codex");
+        fx.seed();
+        deploy(
+            &fx.store,
+            &mut fx.index,
+            &fx.agent,
+            "reviewer",
+            &fx.home,
+            None,
+        )
+        .unwrap();
+
+        let table = ledger::load(&fx.store, "codex").unwrap();
+        let entry = table.get(AssetKind::Subagent, "reviewer").unwrap();
+        assert_eq!(entry.target_path, fx.target());
+        assert_eq!(entry.rendered_by, 1);
+        let row = fx
+            .index
+            .agent_states()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.asset_type == AssetType::Subagent)
+            .unwrap();
+        assert_eq!(row.state, crate::domain::AssetState::Written);
+
+        // 改真源再落一次：自家文件可以替换
+        let mut edited = spec();
+        edited.instructions = "改过的指令".into();
+        fx.store
+            .write(
+                AssetType::Subagent,
+                "reviewer",
+                render_canonical(&edited).unwrap().as_bytes(),
+            )
+            .unwrap();
+        assert!(matches!(
+            deploy(
+                &fx.store,
+                &mut fx.index,
+                &fx.agent,
+                "reviewer",
+                &fx.home,
+                None
+            )
+            .unwrap(),
+            Deployed::Written(_)
+        ));
+        assert!(std::fs::read_to_string(fx.target())
+            .unwrap()
+            .contains("改过的指令"));
+    }
+
+    #[test]
+    fn an_agent_without_an_agents_target_is_refused() {
+        let mut fx = fixture("gemini");
+        fx.seed();
+        let error = deploy(
+            &fx.store,
+            &mut fx.index,
+            &fx.agent,
+            "reviewer",
+            &fx.home,
+            None,
+        );
+        assert!(matches!(
+            error.unwrap_err(),
+            crate::error::AppError::Unsupported(_)
+        ));
+    }
+
+    #[test]
+    fn the_canonical_targets_field_survives_a_render() {
+        // targets 只存在于真源侧，渲染与反推都不能它弄丢（扫描那边有专门的断言）
+        let parsed = parse_subagent(&render_canonical(&spec()).unwrap()).unwrap();
+        assert_eq!(parsed.targets, vec!["claude".to_string()]);
     }
 }

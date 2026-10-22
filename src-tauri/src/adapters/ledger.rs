@@ -1,5 +1,6 @@
 use crate::domain::AssetKind;
 use crate::error::AppError;
+use crate::index::sha256_hex;
 use crate::store::atomic::write_atomic;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -115,6 +116,34 @@ pub fn forget(
         return Ok(());
     }
     save(store, agent_id, &ledger)
+}
+
+/// 「盘上这份字节是不是我们落的」——Global Constraints 允许的两条依据都在这里，
+/// rules 与 subagents 共用同一份判定，免得两处各自放宽。
+///
+/// ① 台账记过这个路径上的这份字节；② 这份字节等于 `candidates` 里的某一个
+/// （调用方传「当前 canonical 的全部已知渲染」，含早期渲染）。都不成立就是别人的内容。
+/// `candidates` 传空表示真源已不在（这时只认台账）。
+pub fn bytes_are_ours(
+    store: &Store,
+    agent_id: &str,
+    kind: AssetKind,
+    asset_id: &str,
+    path: &Path,
+    current: &[u8],
+    candidates: impl IntoIterator<Item = Result<String, crate::domain::DomainError>>,
+) -> Result<bool, AppError> {
+    let recorded = load(store, agent_id)?
+        .get(kind, asset_id)
+        .map(|entry| entry.target_path == path && entry.hash == sha256_hex(current))
+        .unwrap_or(false);
+    if recorded {
+        return Ok(true);
+    }
+    Ok(candidates
+        .into_iter()
+        .filter_map(Result::ok)
+        .any(|rendered| rendered.as_bytes() == current))
 }
 
 #[cfg(test)]

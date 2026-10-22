@@ -13,7 +13,7 @@ use crate::domain::rule::{parse_rule, render_canonical, Rule, RuleFrontmatter, R
 use crate::domain::{AssetKind, AssetType, DomainError};
 use crate::error::AppError;
 use crate::index::{sha256_hex, Index};
-use crate::services::apply::{Action, ApplyReport, ApplyService, PlanItem};
+use crate::services::apply::{Action, ApplyService, PlanItem};
 use crate::store::Store;
 use std::path::{Path, PathBuf};
 
@@ -266,26 +266,13 @@ pub fn rule_from_tool_file(id: &str, tool_text: &str) -> Result<Rule, DomainErro
 // ─── 落盘与卸载 ─────────────────────────────────────────────
 
 /// 我们写的规则文件里没有归属标记（正文是 agent 要读的内容，不能污染），
-/// 所以「是不是我们写的」只能看：① 台账记过的字节指纹；② 当前 canonical 的
-/// 任一已知渲染（含早期渲染）逐字节相等。都不成立就是别人的文件。
+/// 所以归属只能靠 `ledger::bytes_are_ours` 那两条依据。
 const RENDERER_VERSION: u32 = 1;
 
 /// 规则的重新加载语义没有实测依据，按「要重启」处理，不把未知报成安全。
 const NEEDS_RESTART: bool = true;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Deployed {
-    Written(ApplyReport),
-    /// 目标位置上是不认识的内容，一个字节都没动
-    Foreign,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Removed {
-    Ours,
-    Foreign,
-    Absent,
-}
+use super::{Deployed, Removed};
 
 fn declared_rules_dir(agent: &AgentDescriptor) -> Result<&str, AppError> {
     agent
@@ -356,25 +343,30 @@ fn is_ours(
     path: &Path,
     current: &[u8],
 ) -> Result<bool, AppError> {
-    let ledger = ledger::load(store, &agent.id)?;
-    if ledger
-        .get(AssetKind::Rule, rule_id)
-        .map(|entry| entry.target_path == path && entry.hash == sha256_hex(current))
-        .unwrap_or(false)
-    {
-        return Ok(true);
-    }
-    let canonical = match store.read(AssetType::Rule, rule_id) {
-        Ok(bytes) => bytes,
-        Err(_) => return Ok(false),
+    let candidates: Vec<Result<String, DomainError>> = match read_canonical(store, rule_id) {
+        Some(rule) => delivered_renders(agent)
+            .into_iter()
+            .map(move |render| render(&rule))
+            .collect(),
+        None => Vec::new(),
     };
-    let text = String::from_utf8(canonical)
-        .map_err(|_| AppError::InvalidInput("真源里的规则不是 UTF-8".into()))?;
-    let rule = parse_rule(rule_id, &text)?;
-    Ok(delivered_renders(agent)
-        .iter()
-        .filter_map(|render| render(&rule).ok())
-        .any(|rendered| rendered.as_bytes() == current))
+    ledger::bytes_are_ours(
+        store,
+        &agent.id,
+        AssetKind::Rule,
+        rule_id,
+        path,
+        current,
+        candidates,
+    )
+}
+
+/// 真源可能已被删除或改坏；那种情况下归属只认台账（`bytes_are_ours` 的空 candidates 分支）。
+/// 落盘路径不用它——那里读不到真源是错误，得如实报出去。
+fn read_canonical(store: &Store, rule_id: &str) -> Option<Rule> {
+    let bytes = store.read(AssetType::Rule, rule_id).ok()?;
+    let text = String::from_utf8(bytes).ok()?;
+    parse_rule(rule_id, &text).ok()
 }
 
 pub fn deploy(

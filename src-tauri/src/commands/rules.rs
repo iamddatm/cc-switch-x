@@ -1,4 +1,5 @@
-use crate::adapters::rules::{self, Deployed, Removed};
+use crate::adapters::rules;
+use crate::adapters::{Deployed, Removed};
 use crate::commands::agents::{descriptor_for, override_base};
 use crate::domain::{AssetKind, AssetType};
 use crate::error::AppError;

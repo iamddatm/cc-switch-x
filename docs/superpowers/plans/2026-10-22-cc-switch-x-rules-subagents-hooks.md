@@ -474,7 +474,33 @@ fn tool_private_fields_land_in_tool_extras_and_come_back() {
 复用 Task 3 的 deploy/remove/scan 形状,差异只在扩展名与目录(`agents_dir`)。**必须新增的断言**:同一 agent 目录里别人的 `.md`(不是我们的渲染)不被扫描器抢注成资产 —— 扫描时若文件带 `tool_extras` 之外的未知键或 frontmatter 不合 canonical,记入 `skipped_foreign` 并给出原因。
 
 - [ ] Step 1 失败测试:`deploy_uses_the_tool_extension`(codex 出 `.toml`、qoder 出 `.md`)、`scan_skips_files_that_are_not_ours`、`removing_a_subagent_keeps_the_builtin_list`(内置 agent 不在我们台账里,一律不动)。
-- [ ] Step 2–5:红 → 实现 → 绿 → 提交 `git commit -m "feat: 添加 Subagents 落盘与扫描导入"`。
+- [x] Step 2–5:红 → 实现 → 绿 → 提交 `git commit -m "feat: 添加 Subagents 落盘与扫描导入"`。
+
+#### Task 5 执行记录（2026-10-22）
+
+- **`services/scan.rs` 抽出共用骨架**：私有 `trait FileAsset`（目录、扩展名、
+  `canonical_text`、`matches_existing`）+ 一份 `scan_assets`，rules 与 subagents 各交一个实现。
+  两类资产的扫描流程逐行相同（找文件 → 推 ID → 撞名 → 反推 canonical → 与既有真源比 →
+  写真源 + 记索引），差异只在四个映射点；复制 50 行的话，「不静默丢文件」这类约束
+  以后改一处必漏一处。
+- `Deployed` / `Removed` 上移到 `adapters/mod.rs`（两类整文件资产共用同一套结果语义），
+  归属判定上移到 `ledger::bytes_are_ours`（两条依据写在 Global Constraints 里，就该只有一处实现）。
+- **`targets` 是真源侧独有字段**：`canonical_text(existing = Some(_))` 反推后把 `targets` 带回来，
+  `matches_existing` 比较前先补上同一份 `targets`——否则每次扫都把「什么都没变」报成 `updated`，
+  并且会把用户设的部署目标抹掉（`a_source_only_field_is_not_losing_its_values_on_rescan` 钉住这两点）。
+- **示例里 `scan_skips_files_that_are_not_ours` 的落地口径**：不是「凡不是我们落的一律不导入」
+  （那会让扫描等于只能导入自己写的文件，失去 spec 7.3「采纳磁盘」的意义），而是三条一起成立：
+  ① 反推不出合法 canonical 的文件（缺 description / 正文为空 / TOML 语法坏 / 扩展名不对 /
+  文件名推不出 ID / 撞 ID）→ 点名跳过并给原因，绝不半个字段地导入；
+  ② 真源已存在但读不出来 → 跳过并点名，**不**当成「没有真源」直接覆盖；
+  ③ `remove` 只删得出自家落盘的文件，内置的 `helper.md` 一律不动
+  （`removing_a_subagent_keeps_the_builtin_list`）。rules 那边口径相同。
+- 命令 `set_subagent_enabled` / `scan_subagents` 与 rules 同形：同一能力闸
+  （`descriptor_for(agent_id, AssetKind::Subagent)`），返回实测标签，`Foreign` 报错。
+- Codex 侧扫描验证到一处真实差异：`.toml` 里没有 `tools`，反推出来 `tools` 必须是空列表而不是
+  猜一个；私有字段（如 `model_reasoning_effort`）落在 `tool_extras.codex`。
+- 门禁：`cargo test` 176 通过（本任务 +13）、`cargo fmt --check` 干净、
+  `cargo clippy --all-targets` 只剩那条 Plan 2 遗留告警。前端本任务无改动（面板在 Task 10）。
 
 ---
 
