@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 pub struct LocalAgentState {
     /// 覆盖 `~` 锚点；真机验证与非常规安装位置用。
     pub base_override: Option<PathBuf>,
+    /// 上次部署 skill **实测**用到的方式（不是配置意图）。
+    pub link_kind: Option<crate::adapters::skills::LinkKind>,
 }
 
 /// 给前端的一份 agent 现状（列表 + 矩阵表头用）。
@@ -42,15 +44,29 @@ pub fn load_state(store: &Store, agent_id: &str) -> Result<LocalAgentState, AppE
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
 }
 
-pub fn save_override(store: &Store, agent_id: &str, base: Option<&Path>) -> Result<(), AppError> {
-    let state = LocalAgentState {
-        base_override: base.map(Path::to_path_buf),
-    };
+fn write_state(store: &Store, agent_id: &str, state: &LocalAgentState) -> Result<(), AppError> {
     write_atomic(
         &state_path(store, agent_id),
-        &serde_json::to_vec_pretty(&state)?,
+        &serde_json::to_vec_pretty(state)?,
     )?;
     Ok(())
+}
+
+/// 只改 baseOverride，保留已经记下的 link 方式（反之亦然）。
+pub fn save_override(store: &Store, agent_id: &str, base: Option<&Path>) -> Result<(), AppError> {
+    let mut state = load_state(store, agent_id)?;
+    state.base_override = base.map(Path::to_path_buf);
+    write_state(store, agent_id, &state)
+}
+
+pub fn save_link_kind(
+    store: &Store,
+    agent_id: &str,
+    kind: crate::adapters::skills::LinkKind,
+) -> Result<(), AppError> {
+    let mut state = load_state(store, agent_id)?;
+    state.link_kind = Some(kind);
+    write_state(store, agent_id, &state)
 }
 
 /// 检测只看配置根在不在；覆盖生效与否完全由 `local/agents/<id>.json` 决定。

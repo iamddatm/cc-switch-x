@@ -498,9 +498,14 @@ fn unresolved_secret_fails_the_item() { /* canonical 引用指向不存在的密
 **Files:** Create `src-tauri/src/adapters/{skills,prompt}.rs`
 
 **Interfaces:**
-- `LinkKind::{Symlink, Junction, Copy}`；`skills::deploy(store, target_root, agent, id) -> Result<LinkKind, AppError>`（降级链 symlink → junction → copy，结果写回 `local/agents/<id>.json` 的 `link_kind`）
-- `skills::remove(...)`：只删「指向我们真源目录」的链接或我们复制的目录；实体目录非自家创建则保留并报告 `Adopted`。
-- `prompt::activate(store, target_root, agent, prompt_id, takeover: Takeover) -> Result<ActivateOutcome, AppError>`，`Takeover::{Confirm, SaveExistingAs(String)}`；目标文件已存在且指纹不是我们上次写入 → 返回 `ActivateOutcome::NeedsConfirmation`（不写盘）。
+- `LinkKind::{Symlink, Junction, Copy}`；`skills::deploy(store, agent, skill_id, home, base_override) -> Result<Deployed, AppError>`，`Deployed::{Linked(LinkKind), Already, Foreign}`；`skills::remove(...) -> Result<Removed, AppError>`，`Removed::{Ours(LinkKind), Foreign, Absent}`。
+  - **不走 Task 3 的流水线**：部署的是目录链接而不是字节写入，`PlanItem` 装不下；幂等与归属由下面的标记机制保证。
+  - 降级链 symlink → junction → copy；junction 无 std 支持，走 `cmd /C mklink /J`。实测用到的方式写进 `local/agents/<id>.json` 的 `linkKind`，UI 显示的是它而不是配置意图。
+  - 归属判定：链接用 `read_link` 比对真源目录；copy 无法靠链接判断，落地时在目录里写 `.ccswitchx` 标记（内容是真源路径），**没有标记的目录一律视为别人的**，`remove` 返回 `Foreign` 不动它。
+- `prompt::activate(store, index, agent, prompt_id, takeover, home, base_override) -> Result<ActivateOutcome, AppError>`，`ActivateOutcome::{Activated, AlreadyActive, NeedsConfirmation}`；`Takeover::{Confirm, SaveExistingAs(new_id)}`。
+  - **写进目标文件的是 prompt 正文**，不是整个 canonical：frontmatter 是真源元数据，混进 `CLAUDE.md` 等于往提示词里塞垃圾。
+  - 归属指纹写 `state/applied/<agent>.json`（`{promptId, hash}`）：目标文件哈希等于它 → 是我们写的，可直接替换；不等 → 外来内容，`Confirm` 只返回 `NeedsConfirmation` **一个字节都不写**，`SaveExistingAs` 先把旧内容用 `render_prompt` 存成新 prompt 再覆盖。
+  - `deactivate` 只在指纹匹配时删文件，别人的内容留着。
 
 - [ ] **Step 1: 写失败测试**
 
