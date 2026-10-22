@@ -14,6 +14,7 @@ pub fn expand_root(declared: &str, base_override: Option<&Path>, home: &Path) ->
 mod tests {
     use super::*;
     use crate::domain::agent::{builtin_agents, AgentDescriptor, McpTarget};
+    use crate::domain::is_known_agent;
     use tempfile::tempdir;
 
     fn agent(id: &str) -> AgentDescriptor {
@@ -85,6 +86,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn pi_declares_only_the_asset_types_it_actually_has() {
+        let pi = agent("pi");
+        assert!(pi.supports.mcp && pi.supports.skills && pi.supports.prompts);
+        assert!(!pi.supports.rules && !pi.supports.subagents && !pi.supports.hooks);
+        match &pi.paths.mcp {
+            McpTarget::JsonRoot { file, key } => {
+                assert_eq!(file, "~/.pi/agent/mcp.json");
+                assert_eq!(key, "mcpServers");
+            }
+            other => panic!("pi 的 MCP 落点被改成了 {other:?}"),
+        }
+        assert_eq!(pi.paths.prompt_file, "~/.pi/agent/AGENTS.md");
+        assert!(
+            is_known_agent("pi"),
+            "cc-switch 的 enabled_pi 列与 pi 的 prompt 行必须认得，否则导入会丢条目"
+        );
     }
 
     #[test]

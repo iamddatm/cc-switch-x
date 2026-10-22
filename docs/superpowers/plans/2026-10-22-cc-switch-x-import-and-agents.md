@@ -36,6 +36,7 @@
 | Qoder CN CLI：`~/.qoder-cn/settings.json` 顶层 `mcpServers`，`requiresRestart:true`、`mergeStrategy:"shallow_merge"`；`rules/*.md` 用 `trigger: always_on\|glob\|manual\|model_decision` + 逗号裸值 `glob:`；`agents/*.md`；`skills/`；提示词 `AGENTS.md` | 子代理读二进制内默认档 | 待复核（Task 10 真机 diff） |
 | Qoder 国际版 IDE：`~/.qoder/mcp.json` 只有 `{"mcpServers":{}}`；hooks 在 `~/.qoder/settings.json` | 子代理实测本机文件 | 未实测（IDE 究竟读 `mcp.json` 还是 `settings.json.mcpServers` 属 spec A2b，**首版只写 `mcp.json` 并在 UI 标注需实测确认**） |
 | Gemini：只有 `GEMINI.md`、`settings.json.mcpServers`、`skills/` | 子代理实测本机文件 | 待复核 |
+| Pi Coding Agent：agent dir `~/.pi/agent`；提示词 `AGENTS.md`、skills `skills/`、MCP `mcp.json` 顶层 `mcpServers`；**没有** rules / subagents / hooks 落点（`prompts/` 是斜杠命令模板，不是全局提示词） | pi 包内 `docs/configuration.md` + `dist/extensions/mcp/config.js`；`AGENTS.md` 与 cc-switch 的 pi 行 sha1 一致 | 已验证（MCP 尚未真机写入验证） |
 | teamai-cli 的 `DEFAULT_TOOL_PATHS`（`src/types.ts:400`）与 `AgentSpec`（`src/resources/agent-format.ts:76`）可作落点/字段参考 | 仓库内代码 | 已验证 |
 
 ## Global Constraints（继承 Plan 1，另加）
@@ -606,7 +607,7 @@ test("activating a prompt over foreign content asks for confirmation", async () 
 
 | 验证项 | 结果 |
 |---|---|
-| 真实 cc-switch 导入（`cargo test --test import_local_ccswitch -- --ignored`） | 5 MCP / 5 prompts(4 成功 1 失败) / 81 skills；源库里的明文凭据在产物 `assets/**` 与 `index.db` 中全部搜不到；`cc-switch.db` 逐字节不变 |
+| 真实 cc-switch 导入（`cargo test --test import_local_ccswitch -- --ignored`） | 5 MCP / 5 prompts / 81 skills，`failed` 全空；源库里的明文凭据在产物 `assets/**` 与 `index.db` 中全部搜不到；`cc-switch.db` 逐字节不变 |
 | UI 导入向导 | 预览显示「MCP 5 条」等计数与「有记录但文件缺失」；执行后显示「cc-switch 数据保持原样」 |
 | Claude MCP 键级合并（真机） | 勾选后沙箱 `.claude.json` 多出 `mcpServers.playwright`（密钥已解析成明文），`permissions` / `statusLine` / `mcpServers.theirs` 与键序不变；取消勾选只删掉 `playwright` |
 | Skills 分发（真机） | 实测 `LinkKind = symlink`，`~/.claude/skills/<id>` 是指向真源目录的 SymbolicLink；矩阵 `agents/claude.json` 记下 35 个 skill 与 4 条 MCP、`activePrompt` |

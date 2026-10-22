@@ -207,6 +207,6 @@ mod tests {
         let store = Store::init(dir.path().join("store")).unwrap();
         let status = detect_all(&store, &dir.path().join("home")).unwrap();
         assert!(!status.iter().find(|s| s.id == "qoder").unwrap().verified);
-        assert_eq!(status.iter().filter(|s| s.verified).count(), 4);
+        assert_eq!(status.iter().filter(|s| s.verified).count(), 5);
     }
 }

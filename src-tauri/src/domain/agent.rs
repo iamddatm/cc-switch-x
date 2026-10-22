@@ -180,6 +180,38 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
             verified: false,
         },
         AgentDescriptor {
+            id: "pi".into(),
+            display_name: "Pi Coding Agent".into(),
+            // 证据：pi 自带 docs/configuration.md（agent dir = ~/.pi/agent）
+            // 与 dist/extensions/mcp/config.js（读 <agentDir>/mcp.json 的 mcpServers）。
+            // 提示词落点已用 sha1 与 cc-switch 的 pi 行比对一致。
+            config_root: "~/.pi/agent".into(),
+            supports: AgentCapabilities {
+                mcp: true,
+                skills: true,
+                prompts: true,
+                // pi 没有 markdown 规则目录
+                rules: false,
+                // pi 的子代理是 TS extension，不是声明式资产
+                subagents: false,
+                hooks: false,
+                sessions: true,
+            },
+            paths: AgentPaths {
+                mcp: McpTarget::JsonRoot {
+                    file: "~/.pi/agent/mcp.json".into(),
+                    key: "mcpServers".into(),
+                },
+                skills_dir: "~/.pi/agent/skills".into(),
+                prompt_file: "~/.pi/agent/AGENTS.md".into(),
+                rules_dir: None,
+                agents_dir: None,
+                hooks: HooksTarget::Unsupported,
+            },
+            mcp_needs_restart: None,
+            verified: true,
+        },
+        AgentDescriptor {
             id: "qoder-cn".into(),
             display_name: "Qoder CN".into(),
             config_root: "~/.qoder-cn".into(),
