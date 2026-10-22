@@ -1,9 +1,9 @@
 //! 会话发现、增量扫描与 provider 状态。
 
 use crate::adapters::paths::expand_root;
-use crate::domain::session::{ParsedSession, SessionProviderStatus};
+use crate::domain::session::{ParsedSession, SessionDetail, SessionProviderStatus, SessionSummary};
 use crate::error::AppError;
-use crate::index::Index;
+use crate::index::{Index, SessionFilter, SessionMatch, SessionSearchHit};
 use crate::services::agents::load_state;
 use crate::sessions::{discover_provider, providers, SessionProvider};
 use crate::store::Store;
@@ -38,6 +38,73 @@ pub struct SessionFileWarning {
     pub file: String,
     pub line: usize,
     pub message: String,
+}
+
+pub const DEFAULT_SESSION_LIMIT: u32 = 50;
+
+pub fn list_sessions(
+    index: &Index,
+    agent_id: Option<&str>,
+    query: Option<&str>,
+    offset: Option<u32>,
+    limit: Option<u32>,
+) -> Result<Vec<SessionSummary>, AppError> {
+    let offset = offset.unwrap_or(0);
+    let limit = limit.unwrap_or(DEFAULT_SESSION_LIMIT);
+    if let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) {
+        let fetch = limit.saturating_add(offset);
+        return Ok(index
+            .search_sessions(query, fetch)?
+            .into_iter()
+            .map(|hit| hit.session)
+            .filter(|session| agent_id.is_none_or(|agent| session.agent_id == agent))
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect());
+    }
+    Ok(index.list_sessions(&SessionFilter {
+        agent_id: agent_id.map(str::to_string),
+        offset,
+        limit,
+    })?)
+}
+
+pub fn get_session(
+    index: &Index,
+    agent_id: &str,
+    session_id: &str,
+    offset: Option<u32>,
+    limit: Option<u32>,
+) -> Result<SessionDetail, AppError> {
+    Ok(index.session_detail(
+        agent_id,
+        session_id,
+        offset.unwrap_or(0),
+        limit.unwrap_or(DEFAULT_SESSION_LIMIT),
+    )?)
+}
+
+pub fn search_sessions(
+    index: &Index,
+    query: &str,
+    limit: Option<u32>,
+) -> Result<Vec<SessionSearchHit>, AppError> {
+    Ok(index.search_sessions(query, limit.unwrap_or(DEFAULT_SESSION_LIMIT))?)
+}
+
+pub fn search_in_session(
+    index: &Index,
+    agent_id: &str,
+    session_id: &str,
+    query: &str,
+    limit: Option<u32>,
+) -> Result<Vec<SessionMatch>, AppError> {
+    Ok(index.search_in_session(
+        agent_id,
+        session_id,
+        query,
+        limit.unwrap_or(DEFAULT_SESSION_LIMIT),
+    )?)
 }
 
 pub fn scan_all(
@@ -315,15 +382,25 @@ mod tests {
         }
     }
 
-    fn claude_json_with_cwd(cwd: &str, role: &str, text: &str, timestamp: &str) -> String {
+    fn claude_json_with_id(
+        cwd: &str,
+        session_id: &str,
+        role: &str,
+        text: &str,
+        timestamp: &str,
+    ) -> String {
         serde_json::json!({
             "type": role,
-            "sessionId": "s1",
+            "sessionId": session_id,
             "cwd": cwd,
             "timestamp": timestamp,
             "message": {"role": role, "content": [{"type": "text", "text": text}]}
         })
         .to_string()
+    }
+
+    fn claude_json_with_cwd(cwd: &str, role: &str, text: &str, timestamp: &str) -> String {
+        claude_json_with_id(cwd, "s1", role, text, timestamp)
     }
 
     fn claude_json(role: &str, text: &str, timestamp: &str) -> String {
@@ -353,6 +430,74 @@ mod tests {
             claude_json("user", "工具调用", "2026-10-20T10:00:00Z"),
             claude_json("assistant", "完成", "2026-10-20T10:01:00Z"),
         ])
+    }
+
+    fn sandbox_with_two_sessions() -> Sandbox {
+        let fx = sandbox_with_lines(&[claude_json("user", "工具调用", "2026-10-20T10:00:00Z")]);
+        let second = fx.home.join(".claude/projects/p2/s2.jsonl");
+        std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+        std::fs::write(
+            &second,
+            format!(
+                "{}\n",
+                claude_json_with_id("D:/repo2", "s2", "user", "第二会话", "2026-10-20T11:00:00Z")
+            ),
+        )
+        .unwrap();
+        fx
+    }
+
+    #[test]
+    fn list_sessions_filters_by_agent_query_and_paginates() {
+        let mut fx = sandbox_with_two_sessions();
+        fx.scan();
+        let first = list_sessions(&fx.index, Some("claude"), None, None, Some(1)).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].session_id, "s2");
+        let second = list_sessions(&fx.index, Some("claude"), None, Some(1), Some(1)).unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].session_id, "s1");
+        assert!(list_sessions(&fx.index, Some("pi"), None, None, None)
+            .unwrap()
+            .is_empty());
+        let query = list_sessions(&fx.index, None, Some("工具调用"), None, None).unwrap();
+        assert_eq!(query.len(), 1);
+        assert_eq!(query[0].session_id, "s1");
+    }
+
+    #[test]
+    fn get_session_paginates_and_reports_the_total() {
+        let lines: Vec<String> = (0..5)
+            .map(|index| {
+                let role = if index % 2 == 0 { "user" } else { "assistant" };
+                claude_json(
+                    role,
+                    &format!("消息{index}"),
+                    &format!("2026-10-20T10:0{index}:00Z"),
+                )
+            })
+            .collect();
+        let mut fx = sandbox_with_lines(&lines);
+        fx.scan();
+        let detail = get_session(&fx.index, "claude", "s1", Some(1), Some(2)).unwrap();
+        assert_eq!(detail.total, 5);
+        assert_eq!(detail.messages.len(), 2);
+        assert_eq!(detail.messages[0].seq, 1);
+        assert_eq!(detail.messages[1].seq, 2);
+        let error = get_session(&fx.index, "claude", "nope", None, None).unwrap_err();
+        assert!(error.to_string().contains("未找到：nope"), "{error}");
+    }
+
+    #[test]
+    fn search_services_return_snippets_and_in_session_matches() {
+        let mut fx = sandbox_with_claude_session();
+        fx.scan();
+        let hits = search_sessions(&fx.index, "完成", Some(10)).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.contains("完成"), "{}", hits[0].snippet);
+        let matches = search_in_session(&fx.index, "claude", "s1", "工具", Some(10)).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].index, 0);
     }
 
     #[test]

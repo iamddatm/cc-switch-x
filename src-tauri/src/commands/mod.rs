@@ -4,5 +4,6 @@ pub mod drift;
 pub mod hooks;
 pub mod import;
 pub mod rules;
+pub mod sessions;
 pub mod settings;
 pub mod subagents;
