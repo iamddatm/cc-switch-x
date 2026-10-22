@@ -5,6 +5,8 @@ pub mod claude;
 pub mod codex;
 pub mod gemini;
 pub mod grokbuild;
+pub mod hermes;
+pub mod mcode;
 pub mod openclaw;
 pub mod opencode;
 pub mod pi;

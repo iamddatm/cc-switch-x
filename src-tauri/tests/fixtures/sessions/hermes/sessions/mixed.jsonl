@@ -1,0 +1,4 @@
+{"type":"init","id":"h2","title":"Hermes JSONL","cwd":"D:/hrepo2","timestamp":"2026-10-20T10:00:00Z"}
+{"role":"user","content":"扁平问题","timestamp":"2026-10-20T10:01:00Z"}
+{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"嵌套回答"}],"reasoning":"想一下","tool_calls":[{"id":"c1","function":{"name":"terminal","arguments":"{\"command\":\"ls\"}"}}]},"timestamp":"2026-10-20T10:02:00Z"}
+{"role":"tool","tool_call_id":"c1","content":"结果","timestamp":"2026-10-20T10:03:00Z"}

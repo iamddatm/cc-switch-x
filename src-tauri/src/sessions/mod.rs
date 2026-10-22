@@ -50,16 +50,6 @@ pub(crate) fn walk_files(root: &Path, keep: &dyn Fn(&Path) -> bool) -> Vec<PathB
     out
 }
 
-fn has_extension(path: &Path, extensions: &[&str]) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| extensions.iter().any(|want| want.eq_ignore_ascii_case(ext)))
-}
-
-fn discover_jsonl(root: &Path, _override_active: bool) -> Vec<PathBuf> {
-    walk_files(root, &|path| has_extension(path, &["jsonl"]))
-}
-
 static PROVIDERS: &[SessionProvider] = &[
     SessionProvider {
         agent_id: "claude",
@@ -102,8 +92,8 @@ static PROVIDERS: &[SessionProvider] = &[
         display_name: "Hermes",
         roots: &["~/.hermes", "~/AppData/Local/hermes"],
         verified: false,
-        discover: discover_jsonl,
-        parse: None,
+        discover: providers::hermes::discover_hermes,
+        parse: Some(providers::hermes::parse_hermes_all),
         resume: None,
     },
     SessionProvider {
@@ -111,9 +101,9 @@ static PROVIDERS: &[SessionProvider] = &[
         display_name: "MiniMax Code",
         roots: &["~/.minimax"],
         verified: false,
-        discover: discover_jsonl,
-        parse: None,
-        resume: None,
+        discover: providers::mcode::discover_mcode,
+        parse: Some(providers::mcode::parse_mcode_all),
+        resume: Some(providers::mcode::resume_mcode),
     },
     SessionProvider {
         agent_id: "openclaw",
