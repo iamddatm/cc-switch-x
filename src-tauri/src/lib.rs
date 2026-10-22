@@ -1,5 +1,6 @@
 pub mod domain;
 pub mod index;
+pub mod settings;
 pub mod store;
 
 #[tauri::command]
