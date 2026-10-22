@@ -4,3 +4,8 @@
 
 html, body, #root { height: 100%; }
 body { margin: 0; font-family: system-ui, "Microsoft YaHei", sans-serif; }
+
+/* 深色基线：底色与正文色在 html.dark 时整体切换，color-scheme 让原生控件与滚动条跟随 */
+body { background-color: #ffffff; color: #0f172a; }
+html.dark { color-scheme: dark; }
+html.dark body { background-color: #0f172a; color: #e2e8f0; }

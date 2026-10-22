@@ -59,13 +59,13 @@ export function McpPanel() {
     <div className="grid grid-cols-[240px_1fr] gap-6">
       <section>
         <h2 className="mb-3 text-xl font-semibold">MCP</h2>
-        {error && <p className="text-sm text-red-600">{error}</p>}
+        {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
         <ul className="space-y-1">
           {items.map((item) => (
             <li key={item.id}>
               <button
                 type="button"
-                className="w-full rounded px-2 py-1 text-left hover:bg-slate-100"
+                className="w-full rounded px-2 py-1 text-left hover:bg-slate-100 dark:hover:bg-slate-700"
                 onClick={() => setSelected(item.id)}
               >
                 {item.name}
@@ -76,14 +76,14 @@ export function McpPanel() {
         <div className="mt-4 flex gap-2">
           <input
             aria-label="新 MCP ID"
-            className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
+            className="min-w-0 flex-1 rounded border border-slate-300 bg-white px-2 py-1 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
             placeholder="新 MCP ID"
             value={newId}
             onChange={(e) => setNewId(e.target.value)}
           />
           <button
             type="button"
-            className="rounded border border-slate-300 px-2 py-1 text-sm"
+            className="rounded border border-slate-300 px-2 py-1 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-700"
             onClick={create}
           >
             新建
@@ -96,24 +96,24 @@ export function McpPanel() {
             <div className="mb-3 flex gap-2">
               <button
                 type="button"
-                className="rounded bg-slate-800 px-3 py-1.5 text-sm text-white"
+                className="rounded bg-slate-800 px-3 py-1.5 text-sm text-white dark:bg-slate-600"
                 onClick={save}
               >
                 保存
               </button>
               <button
                 type="button"
-                className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700"
+                className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700 dark:border-red-800 dark:text-red-300"
                 onClick={remove}
               >
                 删除
               </button>
             </div>
-            {saveError && <p className="mb-2 text-sm text-red-600">{saveError}</p>}
+            {saveError && <p className="mb-2 text-sm text-red-600 dark:text-red-400">{saveError}</p>}
             <JsonEditor value={content} onChange={setContent} />
           </>
         ) : (
-          <p className="text-sm text-slate-500">选择左侧 MCP 服务器进行编辑。</p>
+          <p className="text-sm text-slate-500 dark:text-slate-400">选择左侧 MCP 服务器进行编辑。</p>
         )}
       </section>
     </div>

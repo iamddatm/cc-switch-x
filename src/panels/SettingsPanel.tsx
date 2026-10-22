@@ -43,14 +43,14 @@ export function SettingsPanel() {
   return (
     <div className="max-w-2xl space-y-8">
       <h2 className="text-xl font-semibold">Settings</h2>
-      {error && <p className="text-sm text-red-600">{error}</p>}
+      {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
       <section>
         <label className="mb-2 block text-sm font-medium" htmlFor="theme">
           主题
         </label>
         <select
           id="theme"
-          className="rounded border border-slate-300 px-3 py-1.5"
+          className="rounded border border-slate-300 bg-white px-3 py-1.5 text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
           value={settings?.theme ?? "system"}
           onChange={(e) => void changeTheme(e.target.value as Theme)}
         >
@@ -66,19 +66,19 @@ export function SettingsPanel() {
         <div className="flex gap-2">
           <input
             id="store-root"
-            className="flex-1 rounded border border-slate-300 px-3 py-1.5 font-mono text-sm"
+            className="flex-1 rounded border border-slate-300 bg-white px-3 py-1.5 font-mono text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
             value={storeRoot}
             onChange={(e) => setStoreRoot(e.target.value)}
           />
           <button
             type="button"
-            className="rounded bg-slate-800 px-3 py-1.5 text-sm text-white"
+            className="rounded bg-slate-800 px-3 py-1.5 text-sm text-white dark:bg-slate-600"
             onClick={saveStoreRoot}
           >
             保存存储位置
           </button>
         </div>
-        {message && <p className="mt-2 text-sm text-green-700">{message}</p>}
+        {message && <p className="mt-2 text-sm text-green-700 dark:text-green-400">{message}</p>}
       </section>
     </div>
   );

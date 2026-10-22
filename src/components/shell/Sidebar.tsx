@@ -13,7 +13,7 @@ const ITEMS: { pane: Pane; label: string }[] = [
 
 export function Sidebar({ pane, onSelect }: { pane: Pane; onSelect: (pane: Pane) => void }) {
   return (
-    <nav className="w-48 border-r border-slate-200 bg-slate-50 p-3">
+    <nav className="w-48 border-r border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800">
       <div className="mb-4 px-2 text-lg font-semibold">CC Switch X</div>
       <ul className="space-y-1">
         {ITEMS.map((item) => (
@@ -23,7 +23,9 @@ export function Sidebar({ pane, onSelect }: { pane: Pane; onSelect: (pane: Pane)
               onClick={() => onSelect(item.pane)}
               aria-current={pane === item.pane ? "page" : undefined}
               className={`w-full rounded px-2 py-1.5 text-left text-sm ${
-                pane === item.pane ? "bg-slate-800 text-white" : "hover:bg-slate-200"
+                pane === item.pane
+                  ? "bg-slate-800 text-white dark:bg-slate-600"
+                  : "hover:bg-slate-200 dark:hover:bg-slate-700"
               }`}
             >
               {item.label}

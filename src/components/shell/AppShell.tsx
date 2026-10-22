@@ -1,5 +1,7 @@
-import { useState } from "react";
-import type { Pane } from "../../types";
+import { useEffect, useState } from "react";
+import type { Pane, Theme } from "../../types";
+import { api } from "../../lib/api";
+import { useTheme } from "../../hooks/useTheme";
 import { Sidebar } from "./Sidebar";
 import { HooksPanel } from "../../panels/HooksPanel";
 import { McpPanel } from "../../panels/McpPanel";
@@ -12,6 +14,17 @@ import { SubagentsPanel } from "../../panels/SubagentsPanel";
 
 export function AppShell() {
   const [pane, setPane] = useState<Pane>("mcp");
+  const [theme, setTheme] = useState<Theme>("system");
+
+  // 主题在壳层生效：否则只有打开过 Settings 才会应用已保存的主题。
+  useEffect(() => {
+    void api
+      .getSettings()
+      .then((value) => setTheme(value.theme))
+      .catch((e) => console.warn("读取设置失败，主题保持跟随系统：", e));
+  }, []);
+  useTheme(theme);
+
   const content = {
     mcp: <McpPanel />,
     skill: <SkillsPanel />,
