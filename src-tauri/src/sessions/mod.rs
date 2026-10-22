@@ -7,6 +7,7 @@ use crate::adapters::paths::expand_root;
 use crate::domain::session::{ParsedSession, SessionError, SessionSummary};
 use std::path::{Path, PathBuf};
 
+pub mod export;
 pub mod providers;
 
 pub type ParseFn = fn(&Path) -> Result<Vec<ParsedSession>, SessionError>;

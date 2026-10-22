@@ -252,3 +252,10 @@ export interface SessionScanReport {
   failures: SessionFileFailure[];
   warnings: SessionFileWarning[];
 }
+
+export interface ResumeInfo {
+  agentId: string;
+  sessionId: string;
+  cwd: string | null;
+  command: string;
+}

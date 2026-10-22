@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
+import { save } from "@tauri-apps/plugin-dialog";
 import { api } from "../../lib/api";
 import type {
+  ResumeInfo,
   SessionMatch,
   SessionMessage,
   SessionSummary,
@@ -29,6 +31,12 @@ export function SessionReader({
   const [error, setError] = useState<string | null>(null);
   const [highlightedSeq, setHighlightedSeq] = useState<number | null>(null);
   const [highlightQuery, setHighlightQuery] = useState("");
+  const [resume, setResume] = useState<ResumeInfo | null>(null);
+  const [resumeUnavailable, setResumeUnavailable] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportMessage, setExportMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -110,6 +118,27 @@ export function SessionReader({
   );
 
   useEffect(() => {
+    let cancelled = false;
+    setResume(null);
+    setResumeUnavailable(false);
+    api
+      .sessionResume(session.agentId, session.sessionId)
+      .then((info) => {
+        if (!cancelled) {
+          setResume(info);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setResumeUnavailable(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session.agentId, session.sessionId]);
+
+  useEffect(() => {
     if (highlightedSeq === null) {
       return;
     }
@@ -118,6 +147,47 @@ export function SessionReader({
     );
     target?.scrollIntoView?.({ block: "center" });
   }, [highlightedSeq, messages]);
+
+  const copyResume = async () => {
+    if (!resume) {
+      return;
+    }
+    setActionError(null);
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("当前环境不支持剪贴板");
+      }
+      await navigator.clipboard.writeText(resume.command);
+      setCopied(true);
+    } catch (cause) {
+      setActionError(String(cause));
+    }
+  };
+
+  const exportMarkdown = async () => {
+    setExporting(true);
+    setExportMessage(null);
+    setActionError(null);
+    try {
+      const dest = await save({
+        defaultPath: exportFileName(session.title),
+        filters: [{ name: "Markdown", extensions: ["md"] }],
+      });
+      if (!dest) {
+        return;
+      }
+      const path = await api.exportSessionMarkdown(
+        session.agentId,
+        session.sessionId,
+        dest,
+      );
+      setExportMessage(`已导出到 ${path}`);
+    } catch (cause) {
+      setActionError(String(cause));
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return (
     <section className="space-y-4">
@@ -156,6 +226,48 @@ export function SessionReader({
             上次解析失败：{session.parseError}
           </p>
         )}
+        <div className="flex flex-wrap items-center gap-2 pt-1 text-sm">
+          {resume ? (
+            <>
+              <button
+                type="button"
+                className="rounded border border-slate-300 px-3 py-1.5 hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-700"
+                onClick={() => void copyResume()}
+              >
+                复制恢复命令
+              </button>
+              {copied && <span className="text-emerald-700">已复制</span>}
+            </>
+          ) : resumeUnavailable ? (
+            <span className="text-xs text-slate-500">
+              该会话没有可用的恢复命令。
+            </span>
+          ) : null}
+          <button
+            type="button"
+            className="rounded border border-slate-300 px-3 py-1.5 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:hover:bg-slate-700"
+            disabled={exporting}
+            onClick={() => void exportMarkdown()}
+          >
+            {exporting ? "导出中…" : "导出 Markdown"}
+          </button>
+        </div>
+        {resume && (
+          <code className="block break-all rounded bg-slate-100 px-2 py-1 text-xs dark:bg-slate-800">
+            {resume.command}
+          </code>
+        )}
+        <p className="text-xs text-amber-700">
+          会话可能包含密钥与个人信息，导出文件不受本项目保护。
+        </p>
+        {exportMessage && (
+          <p className="text-sm text-emerald-700">{exportMessage}</p>
+        )}
+        {actionError && (
+          <p role="alert" className="text-sm text-red-700">
+            操作失败：{actionError}
+          </p>
+        )}
       </header>
 
       <SessionSearch
@@ -184,6 +296,11 @@ export function SessionReader({
       )}
     </section>
   );
+}
+
+function exportFileName(title: string): string {
+  const safe = title.replace(/[\\/:*?"<>|]/g, "_").trim();
+  return `${safe || "session"}.md`;
 }
 
 function formatTime(timestamp: number): string {

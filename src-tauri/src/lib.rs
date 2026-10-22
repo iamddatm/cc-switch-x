@@ -27,6 +27,7 @@ pub fn run() {
     };
     let state = state::AppState::init(settings).expect("初始化应用状态失败");
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(state)
         // 启动后先扫一遍落盘（spec 5.4 的触发时机之一）。扫描失败不拦启动：
         // 把原因打到标准错误，面板上的「重新检查」还能手动触发。
@@ -68,12 +69,14 @@ pub fn run() {
             commands::import::revert_last,
             commands::rules::scan_rules,
             commands::rules::set_rule_enabled,
+            commands::sessions::export_session_markdown,
             commands::sessions::get_session,
             commands::sessions::list_sessions,
             commands::sessions::scan_sessions,
             commands::sessions::search_in_session,
             commands::sessions::search_sessions,
             commands::sessions::session_providers,
+            commands::sessions::session_resume,
             commands::subagents::scan_subagents,
             commands::subagents::set_subagent_enabled,
             commands::settings::get_settings,

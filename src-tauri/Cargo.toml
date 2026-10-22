@@ -25,3 +25,5 @@ chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
 # Codex 会把旧会话压成 .jsonl.zst；流式解压，不整文件读入内存
 zstd = "0.13"
+# 会话 Markdown 导出用系统保存对话框选路径
+tauri-plugin-dialog = "2"

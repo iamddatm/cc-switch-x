@@ -12,7 +12,13 @@ vi.mock("../lib/api", () => ({
     searchSessions: vi.fn(),
     getSession: vi.fn(),
     searchInSession: vi.fn(),
+    sessionResume: vi.fn(),
+    exportSessionMarkdown: vi.fn(),
   },
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  save: vi.fn(),
 }));
 
 function provider(
@@ -65,6 +71,13 @@ beforeEach(() => {
     total: 0,
   });
   vi.mocked(api.searchInSession).mockResolvedValue([]);
+  vi.mocked(api.sessionResume).mockResolvedValue({
+    agentId: "claude",
+    sessionId: "s1",
+    cwd: null,
+    command: "claude --resume s1",
+  });
+  vi.mocked(api.exportSessionMarkdown).mockResolvedValue("");
 });
 
 afterEach(cleanup);

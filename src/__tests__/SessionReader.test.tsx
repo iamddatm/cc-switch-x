@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
+import { save } from "@tauri-apps/plugin-dialog";
 import { SessionReader } from "../components/sessions/SessionReader";
 import { api } from "../lib/api";
 import type {
@@ -13,7 +14,13 @@ vi.mock("../lib/api", () => ({
   api: {
     getSession: vi.fn(),
     searchInSession: vi.fn(),
+    sessionResume: vi.fn(),
+    exportSessionMarkdown: vi.fn(),
   },
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  save: vi.fn(),
 }));
 
 const SESSION: SessionSummary = {
@@ -57,6 +64,14 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(api.getSession).mockResolvedValue(detail([]));
   vi.mocked(api.searchInSession).mockResolvedValue([]);
+  vi.mocked(api.sessionResume).mockResolvedValue({
+    agentId: "claude",
+    sessionId: "s1",
+    cwd: "D:/repo",
+    command: 'cd "D:/repo" && claude --resume s1',
+  });
+  vi.mocked(api.exportSessionMarkdown).mockResolvedValue("D:/out/a.md");
+  vi.mocked(save).mockResolvedValue(null);
 });
 
 test("reader_renders_thinking_tool_call_and_tool_result_as_distinct_blocks", async () => {
@@ -174,6 +189,49 @@ test("truncated_message_shows_the_backend_marker", async () => {
   expect(
     await screen.findByText(/已截断，原文 99999 字符/),
   ).toBeInTheDocument();
+});
+
+test("export_asks_for_a_destination_and_reports_the_path", async () => {
+  vi.mocked(save).mockResolvedValue("D:/out/a.md");
+  renderReader();
+
+  fireEvent.click(await screen.findByRole("button", { name: "导出 Markdown" }));
+
+  expect(await screen.findByText("已导出到 D:/out/a.md")).toBeInTheDocument();
+  expect(api.exportSessionMarkdown).toHaveBeenCalledWith(
+    "claude",
+    "s1",
+    "D:/out/a.md",
+  );
+});
+
+test("cancelling_the_save_dialog_does_not_call_the_backend", async () => {
+  vi.mocked(save).mockResolvedValue(null);
+  renderReader();
+
+  fireEvent.click(await screen.findByRole("button", { name: "导出 Markdown" }));
+  await vi.waitFor(() => expect(save).toHaveBeenCalled());
+  expect(api.exportSessionMarkdown).not.toHaveBeenCalled();
+});
+
+test("resume_command_is_copied_and_confirmed", async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", {
+    value: { writeText },
+    configurable: true,
+  });
+  renderReader();
+
+  fireEvent.click(
+    await screen.findByRole("button", { name: "复制恢复命令" }),
+  );
+
+  await vi.waitFor(() =>
+    expect(writeText).toHaveBeenCalledWith(
+      'cd "D:/repo" && claude --resume s1',
+    ),
+  );
+  expect(await screen.findByText("已复制")).toBeInTheDocument();
 });
 
 test("broken_image_falls_back_to_a_placeholder", async () => {

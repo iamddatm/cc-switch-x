@@ -12,6 +12,7 @@ import type {
   ImportSummary,
   ResolveAction,
   ResolveOutcome,
+  ResumeInfo,
   ScanReport,
   SessionDetail,
   SessionMatch,
@@ -86,6 +87,10 @@ export const api = {
     invoke<SessionMatch[]>("search_in_session", { agentId, sessionId, query, limit }),
   sessionProviders: () =>
     invoke<SessionProviderStatus[]>("session_providers"),
+  sessionResume: (agentId: string, sessionId: string) =>
+    invoke<ResumeInfo>("session_resume", { agentId, sessionId }),
+  exportSessionMarkdown: (agentId: string, sessionId: string, dest: string) =>
+    invoke<string>("export_session_markdown", { agentId, sessionId, dest }),
 };
 
 export interface ApplyReport {
