@@ -14,6 +14,7 @@ vi.mock("../lib/api", () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.restoreAllMocks();
   vi.mocked(api.listAssets).mockResolvedValue([
     { assetType: "mcp", id: "pw", name: "Playwright", updatedAt: 1, hash: "h" },
   ]);
@@ -27,6 +28,7 @@ beforeEach(() => {
     updatedAt: 2,
     hash: "h2",
   });
+  vi.mocked(api.deleteAsset).mockResolvedValue(true);
 });
 
 test("lists, edits and saves an MCP server", async () => {
@@ -62,3 +64,28 @@ test("creates a new MCP entry", async () => {
     expect(api.writeAsset).toHaveBeenCalledWith("mcp", "ctx", expect.stringContaining('"id": "ctx"')),
   );
 });
+
+test("deletes the selected MCP entry after confirm", async () => {
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<McpPanel />);
+  fireEvent.click(await screen.findByText("Playwright"));
+  await screen.findByRole("textbox", { name: "JSON 编辑器" });
+  fireEvent.click(screen.getByRole("button", { name: "删除" }));
+  await waitFor(() => expect(api.deleteAsset).toHaveBeenCalledWith("mcp", "pw"));
+  expect(await screen.findByText("选择左侧 MCP 服务器进行编辑。")).toBeInTheDocument();
+});
+
+test("keeps the entry when the delete is cancelled", async () => {
+  vi.spyOn(window, "confirm").mockReturnValue(false);
+  render(<McpPanel />);
+  fireEvent.click(await screen.findByText("Playwright"));
+  await screen.findByRole("textbox", { name: "JSON 编辑器" });
+  fireEvent.click(screen.getByRole("button", { name: "删除" }));
+  await sleep();
+  expect(api.deleteAsset).not.toHaveBeenCalled();
+  expect(screen.getByRole("textbox", { name: "JSON 编辑器" })).toBeInTheDocument();
+});
+
+async function sleep() {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}

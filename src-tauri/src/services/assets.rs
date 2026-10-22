@@ -117,4 +117,41 @@ mod tests {
             .unwrap()
             .is_empty());
     }
+
+    #[test]
+    fn update_backs_up_previous_content_before_overwriting() {
+        let (_dir, store, mut index) = fixture();
+        let v1 = r#"{"id":"pw","name":"Playwright","transport":"stdio","command":"npx"}"#;
+        let v2 = r#"{"id":"pw","name":"Playwright v2","transport":"stdio","command":"npx"}"#;
+        AssetService::write(&store, &mut index, AssetType::Mcp, "pw", v1).unwrap();
+        AssetService::write(&store, &mut index, AssetType::Mcp, "pw", v2).unwrap();
+
+        assert_eq!(
+            String::from_utf8(store.read(AssetType::Mcp, "pw").unwrap()).unwrap(),
+            v2
+        );
+        let backups = collect_files(&store.root().join("backups"));
+        assert_eq!(backups.len(), 1, "改一次应当留下一份旧内容备份");
+        assert_eq!(
+            String::from_utf8(std::fs::read(&backups[0]).unwrap()).unwrap(),
+            v1
+        );
+        let rows = AssetService::list(&store, &index, Some(AssetType::Mcp)).unwrap();
+        assert_eq!(rows[0].name, "Playwright v2");
+    }
+
+    fn collect_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    out.extend(collect_files(&path));
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
 }
