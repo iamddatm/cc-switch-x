@@ -712,7 +712,14 @@ mod cli_write_tests {
         })
     }
 
-    fn succeeds(_: &Path, _: &[String]) -> Result<String, CliError> {
+    /// `mcp get` 命中时按真机形状返回首行 `<name>:`；其余命令退出 0。
+    fn confirms(_: &Path, args: &[String]) -> Result<String, CliError> {
+        if args.get(1).map(String::as_str) == Some("get") {
+            let name = args.last().map(String::as_str).unwrap_or_default();
+            return Ok(format!(
+                "{name}:\n  Scope: User config (available in all your projects)\n"
+            ));
+        }
         Ok("ok".into())
     }
 
@@ -723,7 +730,13 @@ mod cli_write_tests {
             .windows(2)
             .any(|pair| pair[0] == "--scope" && pair[1] == "user")
         {
-            Ok("ok".into())
+            if args.get(1).map(String::as_str) == Some("get") {
+                let name = args.last().map(String::as_str).unwrap_or_default();
+                // 与 confirms 同一个真机形状；这里也要让回读命中
+                Ok(format!("{name}:\n  Scope: User config\n"))
+            } else {
+                Ok("ok".into())
+            }
         } else {
             Err(CliError::Failed {
                 code: None,
@@ -732,13 +745,11 @@ mod cli_write_tests {
         }
     }
 
-    /// 写命令成功，但 `mcp get` 读不到（比如它其实落到了别的 scope）。
+    /// 写命令成功，但 `mcp get` 说没找到 —— **退出码仍是 0**（真机 1.1.76 的行为）。
     fn written_but_not_readable(_: &Path, args: &[String]) -> Result<String, CliError> {
         if args.get(1).map(String::as_str) == Some("get") {
-            return Err(CliError::Failed {
-                code: Some(1),
-                message: "not found".into(),
-            });
+            let name = args.last().map(String::as_str).unwrap_or_default();
+            return Ok(format!("Server \"{name}\" not found in user settings.\n"));
         }
         Ok("ok".into())
     }
@@ -812,7 +823,7 @@ mod cli_write_tests {
     #[test]
     fn read_back_reports_effective_only_when_the_cli_confirms_it() {
         let mut confirmed = fixture();
-        enable(&mut confirmed, channel(succeeds));
+        enable(&mut confirmed, channel(confirms));
         assert_eq!(
             state_of(&confirmed),
             crate::domain::AssetState::Effective,
@@ -838,7 +849,7 @@ mod cli_write_tests {
     fn a_cli_write_is_backed_up_before_it_runs_and_can_be_reverted() {
         let mut fx = fixture();
         let before = std::fs::read_to_string(&fx.target).unwrap();
-        let report = enable(&mut fx, channel(succeeds));
+        let report = enable(&mut fx, channel(confirms));
 
         let backed_up = std::fs::read_to_string(
             report
@@ -906,11 +917,11 @@ mod cli_write_tests {
             .unwrap()
             .contains("playwright"));
 
-        // fake CLI 报删除成功，但 mcp get 仍读得到（succeeds 对所有调用都返回 Ok）
+        // fake CLI 报删除成功，但 mcp get 仍读得到（confirms 对 get 返回命中形状）
         let target = WriteTarget {
             home: &fx.home,
             base_override: None,
-            channel: channel(succeeds),
+            channel: channel(confirms),
         };
         let report = write_disable(
             &fx.store,

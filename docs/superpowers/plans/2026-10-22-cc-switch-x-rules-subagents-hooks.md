@@ -784,13 +784,29 @@ fn an_untracked_file_is_never_drift() {
   锁序反转，两个命令并发时能死锁。
 - 为消掉 `too_many_arguments`，引入 `adapters::paths::WriteTarget { home, base_override, channel }`
   把「往哪儿写、能不能走 CLI」打包；`write_enable` 从 8 个参数降到 6 个。
-- **Step 6（真机写一次 `qoderclicn mcp add-json --scope user` 来确证 A1）没有执行**：
-  它要往真实的 `~/.qoder-cn/settings.json` 写东西，按约定需要用户点头。未点头之前
-  `qoder-cn` 的 MCP 仍是 `verified` 但 `mcp_needs_restart = Some(true)`，
-  A1（IDE/CLI 到底读哪一份）继续挂「待确证」。
-- 门禁：`cargo test` 232 通过（本任务 +15：cli 8 + mcp CLI 7）、`pnpm test` 23 通过、
-  `pnpm build` 通过、`cargo fmt --check` 干净、`cargo clippy` 只剩 Plan 2 那条遗留告警。
-- [ ] **Step 6(真机,需用户点头)**:在临时配置根 + 临时 store 下跑一次 `qoderclicn mcp add-json --scope user`,diff `~/.qoder-cn/settings.json` 确认字段位置(A1),再把这条升为 `verified`。不点头就不做。
+- **Step 6 已执行（2026-10-22，沙箱真机）**：`qoderclicn` 自带 `--config-dir <dir>`
+  （`--help`：「Use a custom user-level config root for this run」），所以不必往真实的
+  `~/.qoder-cn/settings.json` 写东西。实测（1.1.76）：
+  - `qoderclicn --config-dir <临时根> mcp add-json --scope user probe-ccsx '{...}'`
+    → 落在 `<临时根>/settings.json` 顶层 `mcpServers`；
+    `mcp get --scope user` 的 `Location:` 也指回这份文件；
+    `mcp remove --scope user` 删的是同一条，删完文件里留下 `"mcpServers": {}`（CLI 不清理空对象）。
+  - 真实 `~/.qoder-cn/settings.json` 哈希前后一致（`e4d0d399…`），全程没有碰用户配置。
+  - 结论：**A1 的 CLI 侧成立**（用户级 MCP = `settings.json.mcpServers`）；
+    IDE 是否与 CLI 共用同一份配置仍属 A11/A2b，不随这条升档。
+- **同一轮真机抓到并修掉一个回读缺陷**：`mcp get` 未命中时**退出码仍是 0**
+  （输出 `Server "<name>" not found in user settings.`）。原先 `mcp_present` 只看退出码，
+  会把「没写进 user scope」报成 `Effective`；删除后也会一直判「仍读得到」而误走文件回落。
+  现在只认命中输出里的 `<name>:` 行（`get_output_reports_present`），输出格式变化一律按
+  未命中处理（保守方向）；假执行器改用真机输出形状，新增
+  `an_exit_zero_not_found_is_not_a_confirmation` 与
+  `a_found_server_is_recognised_by_its_heading_line_only` 两条回归测试。
+- `qoder-cn` 的 MCP 早在 Task 1 就是 `verified=true`，本轮不涉及升档；
+  `mcp_needs_restart` 仍为 `Some(true)`（热加载语义没有实测依据）。
+- 门禁（补跑）：`cargo test` 234 通过（含 3 条沙箱链路）、`cargo fmt --check` 干净、
+  `cargo clippy --all-targets` 只剩 Plan 2 那条遗留告警。
+- [x] **Step 6（沙箱真机）**：用 `--config-dir` 在临时用户级配置根完成写入 / 回读 / 删除，
+  确认 A1 的落点；真实配置零改动。
 
 ---
 

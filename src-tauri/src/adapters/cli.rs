@@ -48,6 +48,15 @@ pub fn remove_mcp_args(name: &str) -> Vec<String> {
     ]
 }
 
+/// `mcp get` 未命中时**退出码仍是 0**（真机 1.1.76 实测：输出
+/// `Server "<name>" not found in user settings.`）。所以判断「在不在」不能看退出码，
+/// 只认命中输出里那行 `<name>:`；格式一旦变了就当成没命中 —— 宁可说「只算已写入」，
+/// 不能把没生效说成生效。
+pub fn get_output_reports_present(name: &str, stdout: &str) -> bool {
+    let expected = format!("{name}:");
+    stdout.lines().any(|line| line.trim() == expected)
+}
+
 /// 回读也钉在 user scope：不带 `--scope` 时任意 scope 命中都算「存在」，会把没生效说成生效。
 pub fn get_mcp_args(name: &str) -> Vec<String> {
     vec![
@@ -136,10 +145,12 @@ impl QoderCli {
         (self.run)(&self.program, &uninstall_skill_args(name))
     }
 
-    /// 成功退出即「CLI 认为它在 user scope 里存在」。这就是回读的全部含义 ——
-    /// 我们不用它的输出猜配置内容。
+    /// 只有输出里出现 `<name>:` 才算「CLI 认为它在 user scope 里存在」。
+    /// 退出码不能当依据：未命中也是 0（见 `get_output_reports_present`）。
     pub fn mcp_present(&self, name: &str) -> bool {
-        (self.run)(&self.program, &get_mcp_args(name)).is_ok()
+        (self.run)(&self.program, &get_mcp_args(name))
+            .map(|stdout| get_output_reports_present(name, &stdout))
+            .unwrap_or(false)
     }
 }
 
@@ -346,6 +357,20 @@ mod tests {
         assert_eq!(args.last().unwrap(), "demo");
     }
 
+    /// 真机 1.1.76 的命中形状（首行是 `<name>:`）。
+    fn get_reports_present(_: &Path, args: &[String]) -> Result<String, CliError> {
+        let name = args.last().map(String::as_str).unwrap_or_default();
+        Ok(format!(
+            "{name}:\n  Scope: User config (available in all your projects)\n  Type: stdio\n"
+        ))
+    }
+
+    /// 真机 1.1.76 的未命中形状：**退出码 0**，文字说 not found。
+    fn get_reports_absent(_: &Path, args: &[String]) -> Result<String, CliError> {
+        let name = args.last().map(String::as_str).unwrap_or_default();
+        Ok(format!("Server \"{name}\" not found in user settings.\n"))
+    }
+
     #[test]
     fn a_failing_cli_surfaces_as_an_error_not_a_silent_success() {
         let error = cli(fail).add_mcp("n", "{}").unwrap_err();
@@ -353,7 +378,30 @@ mod tests {
         assert!(error.to_string().contains("boom"), "{error}");
         // 回读也一样：失败就是「没确认」，不是「已生效」
         assert!(!cli(fail).mcp_present("n"));
-        assert!(cli(echo).mcp_present("n"));
+        // 退出 0 但输出只是 argv 回显：同样不算命中
+        assert!(!cli(echo).mcp_present("n"));
+        assert!(cli(get_reports_present).mcp_present("n"));
+    }
+
+    #[test]
+    fn an_exit_zero_not_found_is_not_a_confirmation() {
+        // 这条是 A1 真机复核时抓到的：`mcp get` 未命中也是 0，
+        // 只看退出码会把「没写进去」报成「已生效」。
+        assert!(!cli(get_reports_absent).mcp_present("definitely-absent"));
+        assert!(!get_output_reports_present(
+            "definitely-absent",
+            "Server \"definitely-absent\" not found in user settings.\n"
+        ));
+    }
+
+    #[test]
+    fn a_found_server_is_recognised_by_its_heading_line_only() {
+        let out =
+            "probe-ccsx:\n  Scope: User config (available in all your projects)\n  Command: echo\n";
+        assert!(get_output_reports_present("probe-ccsx", out));
+        // 名字必须整行相等：前缀相同的别的服务器不能被认成命中
+        assert!(!get_output_reports_present("probe", out));
+        assert!(!get_output_reports_present("probe-ccsx", "ok"));
     }
 
     #[test]
