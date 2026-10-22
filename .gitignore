@@ -10,3 +10,6 @@ local/
 backups/
 logs/
 state/
+# Agy 会话夹具复刻真实目录（.system_generated/logs/），排除项要穿透上面的 logs/ 规则
+!src-tauri/tests/fixtures/sessions/agy/**/logs/
+!src-tauri/tests/fixtures/sessions/agy/**/logs/**
