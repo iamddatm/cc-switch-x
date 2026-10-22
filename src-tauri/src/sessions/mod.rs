@@ -5,6 +5,7 @@
 
 use crate::adapters::paths::expand_root;
 use crate::domain::session::{ParsedSession, SessionError, SessionSummary};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub mod export;
@@ -165,6 +166,8 @@ pub fn provider(agent_id: &str) -> Option<&'static SessionProvider> {
 }
 
 /// 按注册表的根发现候选文件；展开与去重都在这里，provider 只回答「这个根下有哪些文件」。
+/// 保留 provider 自己给出的顺序（例如 Hermes 的 `state.db` 优先于 JSONL），
+/// 只用 HashSet 去重；各 provider 的 discover 已保证内部顺序稳定。
 pub fn discover_provider(
     provider: &SessionProvider,
     home: &Path,
@@ -175,8 +178,8 @@ pub fn discover_provider(
         let expanded = expand_root(root, base_override, home);
         files.extend((provider.discover)(&expanded, base_override.is_some()));
     }
-    files.sort();
-    files.dedup();
+    let mut seen = HashSet::new();
+    files.retain(|path| seen.insert(path.clone()));
     files
 }
 

@@ -210,7 +210,8 @@ fn parse_summary_db(path: &Path) -> Result<Vec<ParsedSession>, SessionError> {
             title: truncate_chars(title.trim(), TITLE_MAX_CHARS),
             project_path,
             created_at: None,
-            updated_at: parse_summary_timestamp(&modified).unwrap_or(0),
+            updated_at: parse_summary_timestamp(&modified)
+                .unwrap_or_else(|| file_mtime_millis(path)),
             messages: Vec::new(),
             warnings: Vec::new(),
         });
@@ -472,6 +473,31 @@ mod tests {
         assert_eq!(sessions[0].project_path.as_deref(), Some(project.as_path()));
         assert!(sessions[0].messages.is_empty());
         assert!(sessions[0].updated_at > 0);
+    }
+
+    #[test]
+    fn agy_summary_without_a_parseable_time_uses_file_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("conversation_summaries.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE conversation_summaries(
+                conversation_id TEXT, title TEXT, workspace_uris TEXT,
+                preview TEXT, last_modified_time TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversation_summaries VALUES ('abc-123','T','', '', 'not-a-time')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let sessions = parse_agy_all(&db).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].updated_at > 0, "{}", sessions[0].updated_at);
     }
 
     #[test]

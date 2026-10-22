@@ -270,6 +270,9 @@ fn scan_provider(
             if let Some(current) = chosen.get(&id) {
                 if candidate_wins(&candidate.parsed, &current.parsed) {
                     record_duplicate(report, provider.agent_id, &current.file, &id);
+                    // 同轮替换的候选还没经过索引查询；继承被替换者的
+                    // existed，否则老会话会被误报成 added。
+                    candidate.existed = current.existed || candidate.existed;
                     chosen.insert(id, candidate);
                 } else {
                     record_duplicate(report, provider.agent_id, &candidate.file, &id);
@@ -366,6 +369,7 @@ mod tests {
     use super::*;
     use crate::index::SessionFilter;
     use crate::services::agents::save_override;
+    use rusqlite::Connection;
     use std::path::PathBuf;
 
     struct Sandbox {
@@ -695,6 +699,107 @@ mod tests {
             .iter()
             .any(|message| message.content == "保留的问题"));
         assert!(detail.session.parse_error.is_some());
+    }
+
+    #[test]
+    fn hermes_prefers_state_db_over_jsonl_when_duplicates_tie() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let home = dir.path().join("home");
+        save_override(&store, "hermes", Some(&home)).unwrap();
+        let mut index = Index::open(&dir.path().join("index.db")).unwrap();
+
+        let data_dir = home.join(".hermes");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let conn = Connection::open(data_dir.join("state.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id TEXT PRIMARY KEY, title TEXT, cwd TEXT,
+                 started_at REAL, last_activity_at REAL
+             );
+             CREATE TABLE messages (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT,
+                 role TEXT, content TEXT, tool_calls TEXT, tool_call_id TEXT,
+                 tool_name TEXT, timestamp REAL,
+                 active INTEGER NOT NULL DEFAULT 1,
+                 compacted INTEGER NOT NULL DEFAULT 0,
+                 reasoning TEXT
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions VALUES
+             ('h1','数据库标题','D:/db','2026-10-20T10:00:00Z','2026-10-20T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp)
+             VALUES ('h1','user','数据库消息','2026-10-20T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let transcript = data_dir.join("sessions/h1.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            concat!(
+                "{\"type\":\"init\",\"id\":\"h1\",\"title\":\"JSONL 标题\",\"cwd\":\"D:/jsonl\",\"timestamp\":\"2026-10-20T10:00:00Z\"}\n",
+                "{\"role\":\"user\",\"content\":\"JSONL 消息\",\"timestamp\":\"2026-10-20T10:00:00Z\"}\n"
+            ),
+        )
+        .unwrap();
+
+        let report = scan_all(&store, &mut index, &home).unwrap();
+        assert!(
+            report
+                .failures
+                .iter()
+                .any(|failure| failure.reason.contains("会话 ID 重复")),
+            "{report:?}"
+        );
+        let detail = index.session_detail("hermes", "h1", 0, 10).unwrap();
+        assert!(
+            detail.session.title.contains("数据库"),
+            "{}",
+            detail.session.title
+        );
+        assert!(detail.session.source_path.ends_with("state.db"));
+        assert!(detail
+            .messages
+            .iter()
+            .any(|message| message.content.contains("数据库消息")));
+    }
+
+    #[test]
+    fn a_duplicate_winner_is_counted_as_updated_on_rescan() {
+        let mut fx = sandbox_with_lines(&[claude_json("user", "较旧", "2026-10-20T11:00:00Z")]);
+        let second = fx.home.join(".claude/projects/p2/s1.jsonl");
+        std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+        std::fs::write(
+            &second,
+            format!("{}\n", claude_json("user", "较新", "2026-10-20T09:00:00Z")),
+        )
+        .unwrap();
+        let first = fx.scan();
+        assert_eq!(first.added, 1, "{first:?}");
+
+        // 两个文件都改内容强制重解析；这次 p2 的时间更新，成为同轮胜者。
+        std::fs::write(
+            &fx.session_file,
+            format!("{}\n", claude_json("user", "较旧", "2026-10-20T09:00:00Z")),
+        )
+        .unwrap();
+        std::fs::write(
+            &second,
+            format!("{}\n", claude_json("user", "较新", "2026-10-20T12:00:00Z")),
+        )
+        .unwrap();
+        let rescan = fx.scan();
+        assert_eq!(rescan.added, 0, "{rescan:?}");
+        assert_eq!(rescan.updated, 1, "{rescan:?}");
     }
 
     #[test]

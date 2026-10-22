@@ -346,16 +346,18 @@ function providerReason(provider: SessionProviderStatus): string {
   if (!provider.parseReady) {
     return "解析器未接入";
   }
+  // 环境变量根（XDG/HERMES_HOME 等）可能不在声明根里，但文件确实发现了；
+  // 先看实际发现结果，避免把「有文件」误报成「目录不存在」。
+  if (provider.sessionCount > 0) {
+    return `已索引 ${provider.sessionCount} 个会话`;
+  }
+  if (provider.foundFiles > 0) {
+    return "已发现文件，尚未解析出会话";
+  }
   if (!provider.rootExists) {
     return "目录不存在";
   }
-  if (provider.foundFiles === 0) {
-    return "未发现文件";
-  }
-  if (provider.sessionCount === 0) {
-    return "已发现文件，尚未解析出会话";
-  }
-  return `已索引 ${provider.sessionCount} 个会话`;
+  return "未发现文件";
 }
 
 function formatTime(timestamp: number): string {

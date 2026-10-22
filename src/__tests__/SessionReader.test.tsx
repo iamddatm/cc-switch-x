@@ -244,6 +244,25 @@ test("resume_command_is_copied_and_confirmed", async () => {
   expect(await screen.findByText("已复制")).toBeInTheDocument();
 });
 
+test("agy_summary_only_session_explains_why_it_is_empty", async () => {
+  const agySession: SessionSummary = {
+    ...SESSION,
+    agentId: "agy",
+    sessionId: "abc-123",
+  };
+  vi.mocked(api.getSession).mockResolvedValue({
+    session: agySession,
+    messages: [],
+    total: 0,
+  });
+
+  render(
+    <SessionReader session={agySession} agentName="Agy" onBack={() => {}} />,
+  );
+
+  expect(await screen.findByText(/只有摘要索引/)).toBeInTheDocument();
+});
+
 test("broken_image_falls_back_to_a_placeholder", async () => {
   vi.mocked(api.getSession).mockResolvedValue(
     detail([message(0, "image", "data:image/png;base64,bad")]),

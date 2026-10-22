@@ -7,6 +7,7 @@ export interface SessionTimelineProps {
   loading: boolean;
   highlightedSeq: number | null;
   query: string;
+  emptyHint?: string;
   onLoadMore: () => void;
 }
 
@@ -16,12 +17,15 @@ export function SessionTimeline({
   loading,
   highlightedSeq,
   query,
+  emptyHint,
   onLoadMore,
 }: SessionTimelineProps) {
   return (
     <div className="space-y-2">
       {messages.length === 0 && (
-        <p className="text-sm text-slate-500">这个会话没有可读消息。</p>
+        <p className="text-sm text-slate-500">
+          {emptyHint ?? "这个会话没有可读消息。"}
+        </p>
       )}
       {messages.map((message) => (
         <SessionMessageView

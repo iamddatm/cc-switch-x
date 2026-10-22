@@ -127,6 +127,25 @@ test("empty_state_names_each_provider_and_why_it_has_no_sessions", async () => {
   expect(screen.getByText(/\.claude\/projects/)).toBeInTheDocument();
 });
 
+test("files_found_through_an_env_root_are_not_reported_as_missing", async () => {
+  vi.mocked(api.sessionProviders).mockResolvedValue([
+    provider({
+      agentId: "opencode",
+      displayName: "OpenCode",
+      roots: ["C:/Users/me/.local/share/opencode"],
+      rootExists: false,
+      foundFiles: 1,
+      sessionCount: 0,
+    }),
+  ]);
+
+  render(<SessionsPanel />);
+
+  await screen.findByText("OpenCode");
+  expect(screen.getByText("已发现文件，尚未解析出会话")).toBeInTheDocument();
+  expect(screen.queryByText("目录不存在")).not.toBeInTheDocument();
+});
+
 test("unverified_provider_sessions_carry_a_warning_badge", async () => {
   vi.mocked(api.listSessions).mockResolvedValue([
     session({ title: "未实测会话" }),

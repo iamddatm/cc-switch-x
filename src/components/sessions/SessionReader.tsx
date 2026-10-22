@@ -294,6 +294,11 @@ export function SessionReader({
           loading={loading}
           highlightedSeq={highlightedSeq}
           query={highlightQuery}
+          emptyHint={
+            session.agentId === "agy" && total === 0
+              ? "该会话只有摘要索引，原始对话记录已不存在。"
+              : undefined
+          }
           onLoadMore={() => void loadMore()}
         />
       )}
