@@ -4,6 +4,7 @@ use crate::commands::agents::{descriptor_for, override_base};
 use crate::domain::{AssetKind, AssetType};
 use crate::error::AppError;
 use crate::import::update_matrix;
+use crate::services::drift;
 use crate::services::scan::{self as scan_service, ScanReport};
 use crate::state::AppState;
 use tauri::State;
@@ -24,7 +25,9 @@ pub fn set_subagent_enabled(
             .index
             .lock()
             .map_err(|_| AppError::InvalidInput("index 锁失败".into()))?;
+        // 有未解决的漂移时不许直接覆盖；取消落盘不拦（remove 自己会拒绝动不认识的内容）
         if enabled {
+            drift::ensure_no_open_drift(&index, AssetKind::Subagent, &id, &agent_id)?;
             match subagents::deploy(
                 &state.store,
                 &mut index,

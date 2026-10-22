@@ -27,6 +27,8 @@ pub enum AppError {
     InvalidInput(String),
     #[error("暂不支持：{0}")]
     Unsupported(String),
+    #[error("有未解决的漂移：{0}")]
+    DriftUnresolved(String),
 }
 
 impl serde::Serialize for AppError {

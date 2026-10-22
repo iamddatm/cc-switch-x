@@ -10,7 +10,7 @@ pub mod secret;
 pub mod subagent;
 
 pub use agent::{is_known_agent, AssetKind, AssetSupport, CapabilityStatus, SupportMap};
-pub use asset::{AssetState, AssetSummary, AssetType};
+pub use asset::{AssetState, AssetSummary, AssetType, DriftKind};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DomainError {

@@ -4,6 +4,7 @@ use crate::commands::agents::{descriptor_for, override_base};
 use crate::domain::{AssetKind, AssetType};
 use crate::error::AppError;
 use crate::import::update_matrix;
+use crate::services::drift;
 use crate::services::scan::{self as scan_service, ScanReport};
 use crate::state::AppState;
 use tauri::State;
@@ -24,7 +25,10 @@ pub fn set_rule_enabled(
             .index
             .lock()
             .map_err(|_| AppError::InvalidInput("index 锁失败".into()))?;
+        // 有未解决的漂移时不许直接覆盖：先让用户在「采纳磁盘 / 重刷真源」里点一个。
+        // 取消落盘不拦——那个方向上 remove 自己会拒绝动不认识的内容。
         if enabled {
+            drift::ensure_no_open_drift(&index, AssetKind::Rule, &id, &agent_id)?;
             match rules::deploy(
                 &state.store,
                 &mut index,

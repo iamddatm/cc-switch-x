@@ -27,6 +27,25 @@ pub fn run() {
     let state = state::AppState::init(settings).expect("初始化应用状态失败");
     tauri::Builder::default()
         .manage(state)
+        // 启动后先扫一遍落盘（spec 5.4 的触发时机之一）。扫描失败不拦启动：
+        // 把原因打到标准错误，面板上的「重新检查」还能手动触发。
+        .setup(|app| {
+            use tauri::Manager;
+            let app_state = app.state::<state::AppState>();
+            let Ok(mut index) = app_state.index.lock() else {
+                eprintln!("跳过漂移检查：index 锁已被 panic 污染，请用面板上的「重新检查」");
+                return Ok(());
+            };
+            match services::drift::rescan(&app_state.store, &mut index) {
+                Ok(records) if !records.is_empty() => eprintln!(
+                    "检测到 {} 处落盘漂移，请在面板里逐条选择「采纳磁盘」或「重刷真源」",
+                    records.len()
+                ),
+                Ok(_) => {}
+                Err(error) => eprintln!("启动时的漂移检查失败：{error}"),
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             ping,
             commands::agents::activate_prompt,
@@ -37,6 +56,9 @@ pub fn run() {
             commands::assets::read_asset,
             commands::assets::write_asset,
             commands::assets::delete_asset,
+            commands::drift::list_drifts,
+            commands::drift::rescan_drift,
+            commands::drift::resolve_drift,
             commands::hooks::foreign_hook_count,
             commands::hooks::hooks_gate_status,
             commands::hooks::set_hook_enabled,

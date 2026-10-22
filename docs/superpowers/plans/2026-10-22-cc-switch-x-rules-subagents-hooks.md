@@ -638,7 +638,7 @@ fn windows_command_is_used_only_on_windows() {
 - **绝不静默覆盖**:`apply` 之前若该目标存在未解决的 drift,必须返回 `Err(AppError::DriftUnresolved)`,让 UI 先问用户。
 - 触发时机:启动后一次 + 手动「重新检查」按钮。文件监听(自动 rescan)不在本计划,列进 Plan 5。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```rust
 #[test]
@@ -684,7 +684,45 @@ fn an_untracked_file_is_never_drift() {
 }
 ```
 
-- [ ] **Step 2–5:** 红 → 实现 → 绿 → 提交 `git commit -m "feat: 添加落盘后的漂移检测与两种处置"`。
+- [x] **Step 2–5:** 红 → 实现 → 绿 → 提交 `git commit -m "feat: 添加落盘后的漂移检测与两种处置"`。
+
+#### Task 8 执行记录（2026-10-22）
+
+- 实际接口：`drift::rescan(store, index)`（**没有 `home` 参数**——台账里记的就是写盘那天
+  展开好的绝对路径，再展开一次等于两处真相）、
+  `drift::resolve(store, index, home, base_override, drift_id, action)`、
+  `drift::ensure_no_open_drift(index, kind, asset_id, agent_id)` /
+  `ensure_no_open_drift_for_agent(index, kind, agent_id)`。
+  示例里那条断言写的是「调用 `set_rule_enabled` 返回 `DriftUnresolved`」——那是 Tauri 命令，
+  要 `State`；测试改成直接钉闸函数，命令层只是 `?` 传出去。
+- **漂移比的是语义，不是字节**：工具侧的 `trigger` / `glob` 是渲染派生物，按字节比会把
+  「用户没改内容」报成漂移，于是每次同步都在自我否定。规则比正文（`rules::body_equals`）、
+  子代理比反推后的 spec（`name` / `targets` 以真源为准，工具侧没有这两项）、
+  提示词比字节（整文件接管，没有派生 frontmatter）。
+  字节级的**归属**判定仍是 `ledger::bytes_are_ours` 的活，两者别混。
+- `AdoptDisk` 的承诺是「落盘文件一个字节都不动」：它把盘上正文收进真源（规则保住 `paths`、
+  子代理保住 `name` / `targets`、提示词保住 meta），再把**盘上这份字节**记成台账的期望；
+  不更新台账的话下一次 rescan 会拿旧指纹再报同一处。
+- `RepushSource` 走 `rules::repush` / `subagents::repush`（= deploy 但跳过 Foreign 检查，
+  共用 `deploy_inner(force)`），仍经过备份 / 回读 / 失败回滚；提示词走
+  `prompt::activate(Takeover::Confirm)`。用户已经点过「重刷」，所以不再追问，但仍然备份。
+- **写命令的闸只拦「覆盖」方向**：`enabled=true` 才查漂移；取消落盘不拦，因为
+  `remove` 自己的归属检查就会拒绝动不认识的内容。附带发现并钉住一条副作用：
+  文件被手改过之后 `remove` 返回 `Foreign`，必须先处置漂移才能取消
+  （`a_hand_edited_file_must_be_resolved_before_it_can_be_removed`）——这是有意的，
+  不是漏洞：那条内容现在既是漂移又是唯一副本，删了就没了。
+- 表设计：`drift` 一个 (资产 × agent) 同时**最多一条未解决**（`resolution IS NULL`），
+  重新检测时替换；处置过的行留着当历史。`rescan` 结束时做一次清理——台账已经忘掉的目标
+  （取消落盘、真源被删）不能留着一条无处可处置的漂移把面板卡住。
+- 启动时机一次：`tauri::Builder::setup` 里跑 `rescan`，**失败只打标准错误不拦启动**
+  （面板上的「重新检查」仍可手动触发）。
+- 真源已经不在了的台账项：算不出期望，跳过不报（`a_deleted_source_asset_is_skipped_...`）。
+  「真源删了但盘上还留着副本」属于清理，不是漂移，留给 Plan 5 与删除路径处理。
+- 门禁：`cargo test` 217 通过（本任务 +13：drift 14 条、含改名后仍在的旧断言）、
+  `pnpm test` 23 通过、`pnpm build` 通过、`cargo fmt --check` 干净、
+  `cargo clippy --all-targets` 只剩 Plan 2 那条遗留告警。
+- **还没做的**：文件监听自动 rescan（Plan 5）；漂移 UI（Task 10）；MCP / hooks 的漂移
+  （它们不在台账里，归属另有机制，spec 5.4 里 cc-switch 整份改写的场景要靠 Plan 5 的指纹对比）。
 
 ---
 

@@ -1,6 +1,6 @@
 mod schema;
 
-use crate::domain::{display_name, AssetState, AssetSummary, AssetType};
+use crate::domain::{display_name, AssetState, AssetSummary, AssetType, DriftKind};
 use crate::store::Store;
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
@@ -16,6 +16,8 @@ pub enum IndexError {
     Store(#[from] crate::store::StoreError),
     #[error("资产解析失败：{0}")]
     Domain(#[from] crate::domain::DomainError),
+    #[error("未找到：{0}")]
+    NotFound(String),
 }
 
 pub struct Index {
@@ -214,6 +216,129 @@ impl Index {
             .execute("UPDATE runs SET reverted=1 WHERE id=?1", [run_id])?;
         Ok(())
     }
+
+    /// 记下（或替换）某个目标唯一那条未解决的漂移，返回记录 id。
+    pub fn record_drift(
+        &mut self,
+        asset_type: AssetType,
+        asset_id: &str,
+        agent_id: &str,
+        kind: DriftKind,
+    ) -> Result<i64, IndexError> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM drift WHERE asset_type=?1 AND asset_id=?2 AND agent_id=?3 AND resolution IS NULL",
+            params![asset_type_key(asset_type), asset_id, agent_id],
+        )?;
+        tx.execute(
+            "INSERT INTO drift (asset_type,asset_id,agent_id,detected_at,kind,resolution) VALUES (?1,?2,?3,?4,?5,NULL)",
+            params![asset_type_key(asset_type), asset_id, agent_id, now_millis(), kind.as_str()],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// 磁盘与期望一致了：只清未解决的那条，历史留在表里可查。
+    pub fn clear_drift(
+        &mut self,
+        asset_type: AssetType,
+        asset_id: &str,
+        agent_id: &str,
+    ) -> Result<(), IndexError> {
+        self.conn.execute(
+            "DELETE FROM drift WHERE asset_type=?1 AND asset_id=?2 AND agent_id=?3 AND resolution IS NULL",
+            params![asset_type_key(asset_type), asset_id, agent_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn resolve_drift(&mut self, drift_id: i64, resolution: &str) -> Result<(), IndexError> {
+        let changed = self.conn.execute(
+            "UPDATE drift SET resolution=?2 WHERE id=?1 AND resolution IS NULL",
+            params![drift_id, resolution],
+        )?;
+        if changed == 0 {
+            return Err(IndexError::NotFound(format!(
+                "没有待解决的漂移记录：{drift_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn open_drifts(&self) -> Result<Vec<DriftRow>, IndexError> {
+        self.query_drifts("SELECT id,asset_type,asset_id,agent_id,detected_at,kind FROM drift WHERE resolution IS NULL ORDER BY id")
+    }
+
+    /// 按 id 取**未解决**的那条。已解决的记录只能作为历史存在，不能被再次处置。
+    pub fn open_drift_by_id(&self, drift_id: i64) -> Result<Option<DriftRow>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,asset_type,asset_id,agent_id,detected_at,kind FROM drift WHERE id=?1 AND resolution IS NULL",
+        )?;
+        let mut rows = stmt.query_map([drift_id], Self::drift_from_row)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn has_open_drift(
+        &self,
+        asset_type: AssetType,
+        asset_id: &str,
+        agent_id: &str,
+    ) -> Result<bool, IndexError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM drift WHERE asset_type=?1 AND asset_id=?2 AND agent_id=?3 AND resolution IS NULL",
+            params![asset_type_key(asset_type), asset_id, agent_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// 某个 agent 的某一类资产上有没有未解决的漂移。
+    /// 提示词用这个而不是按 id 查：一个 agent 只有一个提示词文件，
+    /// 切换激活项同样会覆盖那份被手改过的文件。
+    pub fn has_open_drift_for_agent(
+        &self,
+        asset_type: AssetType,
+        agent_id: &str,
+    ) -> Result<bool, IndexError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM drift WHERE asset_type=?1 AND agent_id=?2 AND resolution IS NULL",
+            params![asset_type_key(asset_type), agent_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    fn query_drifts(&self, sql: &str) -> Result<Vec<DriftRow>, IndexError> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let mut out = Vec::new();
+        for row in stmt.query_map([], Self::drift_from_row)? {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    fn drift_from_row(row: &rusqlite::Row<'_>) -> Result<DriftRow, rusqlite::Error> {
+        let type_key: String = row.get(1)?;
+        let kind_key: String = row.get(5)?;
+        // 列里的类型/形态认不出来时不能编一个默认值，让它作为错误冒出来
+        let asset_type = asset_type_from_key(&type_key)
+            .map_err(|error| rusqlite::Error::InvalidColumnName(error.to_string()))?;
+        let kind = DriftKind::from_db(&kind_key).ok_or_else(|| {
+            rusqlite::Error::InvalidColumnName(format!("未知漂移形态：{kind_key}"))
+        })?;
+        Ok(DriftRow {
+            id: row.get(0)?,
+            asset_type,
+            asset_id: row.get(2)?,
+            agent_id: row.get(3)?,
+            detected_at: row.get(4)?,
+            kind,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,6 +356,18 @@ pub struct RunRow {
     pub id: i64,
     pub backup_dir: PathBuf,
     pub result: String,
+}
+
+/// 一条漂移记录（未解决的那些）。`resolution` 不在这里读：
+/// 已解决的行只是历史，界面与处置只需要当前待解决的那一条。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriftRow {
+    pub id: i64,
+    pub asset_type: AssetType,
+    pub asset_id: String,
+    pub agent_id: String,
+    pub detected_at: i64,
+    pub kind: DriftKind,
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {

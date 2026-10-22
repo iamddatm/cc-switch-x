@@ -13,7 +13,7 @@ use crate::domain::subagent::{parse_subagent, Subagent};
 use crate::domain::{AssetKind, AssetType, DomainError};
 use crate::error::AppError;
 use crate::index::{sha256_hex, Index};
-use crate::services::apply::{Action, ApplyService, PlanItem};
+use crate::services::apply::{Action, ApplyReport, ApplyService, PlanItem};
 use crate::store::Store;
 use serde_json::{Map, Value as JsonValue};
 use std::path::{Path, PathBuf};
@@ -510,14 +510,15 @@ fn read_if_exists(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
     }
 }
 
-pub fn deploy(
+fn deploy_inner(
     store: &Store,
     index: &mut Index,
     agent: &AgentDescriptor,
     subagent_id: &str,
     home: &Path,
     base_override: Option<&Path>,
-) -> Result<Deployed, AppError> {
+    force: bool,
+) -> Result<Option<ApplyReport>, AppError> {
     let canonical = store.read(AssetType::Subagent, subagent_id)?;
     let text = String::from_utf8(canonical)
         .map_err(|_| AppError::InvalidInput("真源里的子代理不是 UTF-8".into()))?;
@@ -526,9 +527,11 @@ pub fn deploy(
     let bytes = rendered.content.into_bytes();
     let path = target_path(agent, subagent_id, home, base_override)?;
 
-    if let Some(current) = read_if_exists(&path)? {
-        if !is_ours(store, agent, subagent_id, &path, &current)? {
-            return Ok(Deployed::Foreign);
+    if !force {
+        if let Some(current) = read_if_exists(&path)? {
+            if !is_ours(store, agent, subagent_id, &path, &current)? {
+                return Ok(None);
+            }
         }
     }
     let report = ApplyService::apply(
@@ -551,7 +554,37 @@ pub fn deploy(
         &sha256_hex(&bytes),
         RENDERER_VERSION,
     )?;
-    Ok(Deployed::Written(report))
+    Ok(Some(report))
+}
+
+pub fn deploy(
+    store: &Store,
+    index: &mut Index,
+    agent: &AgentDescriptor,
+    subagent_id: &str,
+    home: &Path,
+    base_override: Option<&Path>,
+) -> Result<Deployed, AppError> {
+    Ok(
+        match deploy_inner(store, index, agent, subagent_id, home, base_override, false)? {
+            Some(report) => Deployed::Written(report),
+            None => Deployed::Foreign,
+        },
+    )
+}
+
+/// 「重刷真源」：用户已经看过漂移并选了这一项，所以不再被 Foreign 拦住。
+pub fn repush(
+    store: &Store,
+    index: &mut Index,
+    agent: &AgentDescriptor,
+    subagent_id: &str,
+    home: &Path,
+    base_override: Option<&Path>,
+) -> Result<ApplyReport, AppError> {
+    deploy_inner(store, index, agent, subagent_id, home, base_override, true)?.ok_or_else(|| {
+        AppError::InvalidInput(format!("{subagent_id} 的落盘目标无法处理，未做任何改动"))
+    })
 }
 
 /// 取消落盘。内置的与用户自己写的子代理都不在台账里，一律不动。

@@ -8,6 +8,7 @@ use crate::error::AppError;
 use crate::import::update_matrix;
 use crate::services::agents::{detect_all, load_state, AgentStatus};
 use crate::services::apply::{ApplyReport, ApplyService};
+use crate::services::drift;
 use crate::state::AppState;
 use std::path::PathBuf;
 use tauri::State;
@@ -141,6 +142,9 @@ pub fn activate_prompt(
             .index
             .lock()
             .map_err(|_| AppError::InvalidInput("index 锁失败".into()))?;
+        // 提示词是一个 agent 一份文件，所以按 agent + 类型判漂移：换激活哪一条
+        // 同样会覆盖那份被手改过的文件。
+        drift::ensure_no_open_drift_for_agent(&index, AssetKind::Prompt, &agent_id)?;
         prompt::activate(
             &state.store,
             &mut index,

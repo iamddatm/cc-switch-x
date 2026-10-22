@@ -1,0 +1,49 @@
+use crate::commands::agents::override_base;
+use crate::error::AppError;
+use crate::services::drift::{self, DriftRecord, ResolveAction, ResolveOutcome};
+use crate::state::AppState;
+use tauri::State;
+
+/// 重新检查落盘结果（启动后一次 + 面板上的「重新检查」）。**只报告，不动磁盘。**
+#[tauri::command]
+pub fn rescan_drift(state: State<'_, AppState>) -> Result<Vec<DriftRecord>, AppError> {
+    let mut index = state
+        .index
+        .lock()
+        .map_err(|_| AppError::InvalidInput("index 锁失败".into()))?;
+    drift::rescan(&state.store, &mut index)
+}
+
+/// 用户对一条漂移点「采纳磁盘」或「重刷真源」。
+/// `base_override` 从本机状态取：重刷必须落在同一处落点上，否则会写回真实配置根。
+#[tauri::command]
+pub fn resolve_drift(
+    state: State<'_, AppState>,
+    id: i64,
+    action: ResolveAction,
+    agent_id: String,
+) -> Result<ResolveOutcome, AppError> {
+    let base = override_base(&state, &agent_id)?;
+    let mut index = state
+        .index
+        .lock()
+        .map_err(|_| AppError::InvalidInput("index 锁失败".into()))?;
+    drift::resolve(
+        &state.store,
+        &mut index,
+        &state.home,
+        base.as_deref(),
+        id,
+        action,
+    )
+}
+
+/// 当前挂着的所有待解决漂移（不重新检查磁盘）。
+#[tauri::command]
+pub fn list_drifts(state: State<'_, AppState>) -> Result<Vec<DriftRecord>, AppError> {
+    let index = state
+        .index
+        .lock()
+        .map_err(|_| AppError::InvalidInput("index 锁失败".into()))?;
+    drift::open_records(&state.store, &index)
+}

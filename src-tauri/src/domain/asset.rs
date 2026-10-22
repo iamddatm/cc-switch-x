@@ -91,3 +91,31 @@ impl AssetState {
         }
     }
 }
+
+/// 漂移的两种形态（spec 5.4）。**只有我们落过盘的东西才谈漂移**：
+/// 用户自己新建的文件不在台账里，那是漏管，不是漂移。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriftKind {
+    /// 磁盘内容与我们期望的不一致（通常是用户手改）
+    Modified,
+    /// 落盘的文件不见了
+    Missing,
+}
+
+impl DriftKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Modified => "modified",
+            Self::Missing => "missing",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "modified" => Some(Self::Modified),
+            "missing" => Some(Self::Missing),
+            _ => None,
+        }
+    }
+}

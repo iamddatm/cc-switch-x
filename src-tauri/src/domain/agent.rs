@@ -67,6 +67,13 @@ impl AssetKind {
             Self::Session => "session",
         }
     }
+
+    /// 台账里存的 `assetType` 读回能力。认不出来就是数据坏了，必须显式失败。
+    pub fn from_snake_name(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.snake_name() == value)
+    }
 }
 
 /// 某类资产在某个 agent 上的状态。两个维度必须分开：

@@ -13,7 +13,7 @@ use crate::domain::rule::{parse_rule, render_canonical, Rule, RuleFrontmatter, R
 use crate::domain::{AssetKind, AssetType, DomainError};
 use crate::error::AppError;
 use crate::index::{sha256_hex, Index};
-use crate::services::apply::{Action, ApplyService, PlanItem};
+use crate::services::apply::{Action, ApplyReport, ApplyService, PlanItem};
 use crate::store::Store;
 use std::path::{Path, PathBuf};
 
@@ -369,14 +369,16 @@ fn read_canonical(store: &Store, rule_id: &str) -> Option<Rule> {
     parse_rule(rule_id, &text).ok()
 }
 
-pub fn deploy(
+/// `force=false` 时，目标上是不认识的内容就返回 `None`（一个字节不动）。
+fn deploy_inner(
     store: &Store,
     index: &mut Index,
     agent: &AgentDescriptor,
     rule_id: &str,
     home: &Path,
     base_override: Option<&Path>,
-) -> Result<Deployed, AppError> {
+    force: bool,
+) -> Result<Option<ApplyReport>, AppError> {
     let canonical = store.read(AssetType::Rule, rule_id)?;
     let text = String::from_utf8(canonical)
         .map_err(|_| AppError::InvalidInput("真源里的规则不是 UTF-8".into()))?;
@@ -384,9 +386,11 @@ pub fn deploy(
     let rendered = render_rule(agent, &rule)?;
     let path = target_path(agent, rule_id, home, base_override)?;
 
-    if let Some(current) = read_if_exists(&path)? {
-        if !is_ours(store, agent, rule_id, &path, &current)? {
-            return Ok(Deployed::Foreign);
+    if !force {
+        if let Some(current) = read_if_exists(&path)? {
+            if !is_ours(store, agent, rule_id, &path, &current)? {
+                return Ok(None);
+            }
         }
     }
     let report = ApplyService::apply(
@@ -409,7 +413,38 @@ pub fn deploy(
         &sha256_hex(rendered.as_bytes()),
         RENDERER_VERSION,
     )?;
-    Ok(Deployed::Written(report))
+    Ok(Some(report))
+}
+
+pub fn deploy(
+    store: &Store,
+    index: &mut Index,
+    agent: &AgentDescriptor,
+    rule_id: &str,
+    home: &Path,
+    base_override: Option<&Path>,
+) -> Result<Deployed, AppError> {
+    Ok(
+        match deploy_inner(store, index, agent, rule_id, home, base_override, false)? {
+            Some(report) => Deployed::Written(report),
+            None => Deployed::Foreign,
+        },
+    )
+}
+
+/// 「重刷真源」：用户已经看过漂移并选了这一项，所以不再被 Foreign 拦住。
+/// 写入仍走同一条流水线（备份、回读、失败回滚都在）。
+pub fn repush(
+    store: &Store,
+    index: &mut Index,
+    agent: &AgentDescriptor,
+    rule_id: &str,
+    home: &Path,
+    base_override: Option<&Path>,
+) -> Result<ApplyReport, AppError> {
+    deploy_inner(store, index, agent, rule_id, home, base_override, true)?.ok_or_else(|| {
+        AppError::InvalidInput(format!("{rule_id} 的落盘目标无法处理，未做任何改动"))
+    })
 }
 
 /// 取消落盘。只删得出「是我们落的」文件；用户手改过的自家文件也算 Foreign，
