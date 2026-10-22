@@ -7,6 +7,7 @@ pub mod mcp;
 pub mod prompt;
 pub mod rule;
 pub mod secret;
+pub mod session;
 pub mod subagent;
 
 pub use agent::{is_known_agent, AssetKind, AssetSupport, CapabilityStatus, SupportMap};

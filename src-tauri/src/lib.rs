@@ -5,6 +5,7 @@ pub mod error;
 pub mod import;
 pub mod index;
 pub mod services;
+pub mod sessions;
 pub mod settings;
 pub mod state;
 pub mod store;
