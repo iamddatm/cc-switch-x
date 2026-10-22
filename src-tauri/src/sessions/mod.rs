@@ -84,9 +84,9 @@ static PROVIDERS: &[SessionProvider] = &[
         display_name: "Gemini CLI",
         roots: &["~/.gemini/tmp"],
         verified: false,
-        discover: discover_jsonl,
-        parse: None,
-        resume: None,
+        discover: providers::gemini::discover_gemini,
+        parse: Some(providers::gemini::parse_gemini_all),
+        resume: Some(providers::gemini::resume_gemini),
     },
     SessionProvider {
         agent_id: "grokbuild",

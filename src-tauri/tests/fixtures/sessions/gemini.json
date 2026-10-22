@@ -1,0 +1,10 @@
+{
+  "sessionId": "g1",
+  "startTime": "2026-10-20T10:00:00Z",
+  "lastUpdated": "2026-10-20T10:05:00Z",
+  "messages": [
+    { "type": "user", "content": "第一问" },
+    { "type": "gemini", "content": "第一答" },
+    { "type": "user", "content": "第二问" }
+  ]
+}

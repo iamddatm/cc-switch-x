@@ -1,0 +1,8 @@
+{"sessionId":"g1","startTime":"2026-10-20T10:00:00Z","lastUpdated":"2026-10-20T10:05:00Z"}
+{"id":"m1","type":"user","content":"第一问"}
+{"id":"m2","type":"gemini","content":"第一答"}
+{"id":"m3","type":"gemini","content":"要被回退的草稿"}
+{"id":"m4","type":"user","content":"也要被回退"}
+{"$set":{"lastUpdated":"2026-10-20T10:04:00Z"}}
+{"$rewindTo":"m3"}
+{"id":"m5","type":"user","content":"第二问"}
