@@ -24,7 +24,9 @@ pub struct McpRow {
     pub enabled: Vec<(String, bool)>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 同 ID 冲突时的处理策略。前端直接传 `"skip" | "overwrite" | "keepBoth"`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ConflictPolicy {
     Skip,
     Overwrite,

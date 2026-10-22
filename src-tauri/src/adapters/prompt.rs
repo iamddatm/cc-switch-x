@@ -8,16 +8,19 @@ use crate::store::{atomic::write_atomic, Store};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// 目标文件里已有内容、且不是我们上次写的，必须先让用户选一种处置方式。
+/// 目标文件里已有内容、且不是我们上次写的，怎么处置。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Takeover {
-    /// 直接覆盖（用户已确认）
+    /// 默认：先问用户，一个字节都不写
+    Ask,
+    /// 用户已确认，直接覆盖
     Confirm,
     /// 把现有内容另存成一条新 prompt（值为新 ID），再覆盖
     SaveExistingAs(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ActivateOutcome {
     Activated {
         path: PathBuf,
@@ -93,10 +96,11 @@ pub fn activate(
             .unwrap_or(false),
     };
     if !ours {
-        let current = existing.clone().unwrap_or_default();
         match takeover {
-            Takeover::Confirm => return Ok(ActivateOutcome::NeedsConfirmation { path }),
+            Takeover::Ask => return Ok(ActivateOutcome::NeedsConfirmation { path }),
+            Takeover::Confirm => {}
             Takeover::SaveExistingAs(new_id) => {
+                let current = existing.clone().unwrap_or_default();
                 let text = String::from_utf8(current)
                     .map_err(|_| AppError::InvalidInput("现有提示词不是 UTF-8，无法另存".into()))?;
                 let saved = render_prompt(&Prompt {
@@ -245,7 +249,7 @@ mod tests {
             &mut index,
             &descriptor,
             "team",
-            &Takeover::Confirm,
+            &Takeover::Ask,
             &home,
             None,
         )
@@ -256,6 +260,29 @@ mod tests {
             "用户自己写的提示词",
             "没确认之前一个字都不能覆盖"
         );
+    }
+
+    #[test]
+    fn a_confirmed_takeover_overwrites_foreign_content_and_backs_it_up_first() {
+        let (dir, store, mut index, descriptor) = fixture();
+        seed_prompt(&store, "team", "我们的");
+        let home = dir.path().join("home");
+        let target = home.join(".claude/CLAUDE.md");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "用户自己写的提示词").unwrap();
+
+        let outcome = activate(
+            &store,
+            &mut index,
+            &descriptor,
+            "team",
+            &Takeover::Confirm,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert!(matches!(outcome, ActivateOutcome::Activated { .. }));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "我们的");
     }
 
     #[test]
@@ -348,7 +375,7 @@ mod tests {
             &mut index,
             &descriptor,
             "team",
-            &Takeover::Confirm,
+            &Takeover::Ask,
             &home,
             None,
         )

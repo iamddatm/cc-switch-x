@@ -29,10 +29,17 @@ pub fn run() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             ping,
+            commands::agents::activate_prompt,
+            commands::agents::list_agents,
+            commands::agents::set_mcp_enabled,
+            commands::agents::set_skill_enabled,
             commands::assets::list_assets,
             commands::assets::read_asset,
             commands::assets::write_asset,
             commands::assets::delete_asset,
+            commands::import::import_apply,
+            commands::import::import_preview,
+            commands::import::revert_last,
             commands::settings::get_settings,
             commands::settings::set_theme,
             commands::settings::set_store_root,

@@ -15,6 +15,10 @@ pub enum AppError {
     Domain(#[from] DomainError),
     #[error("设置错误：{0}")]
     Settings(#[from] SettingsError),
+    #[error("密钥保管错误：{0}")]
+    Secrets(#[from] crate::store::secrets::SecretsError),
+    #[error("导入错误：{0}")]
+    Import(#[from] crate::import::ImportError),
     #[error("JSON 处理失败：{0}")]
     Json(#[from] serde_json::Error),
     #[error("未找到：{0}")]

@@ -1,5 +1,7 @@
 use crate::adapters::paths::expand_root;
 use crate::domain::agent::builtin_agents;
+use crate::domain::enablement::AgentEnablement;
+use crate::domain::AssetType;
 use crate::error::AppError;
 use crate::store::atomic::write_atomic;
 use crate::store::Store;
@@ -17,6 +19,7 @@ pub struct LocalAgentState {
 }
 
 /// 给前端的一份 agent 现状（列表 + 矩阵表头用）。
+/// 顺带把该 agent 已勾选的资产一起返回，矩阵一次取全，省掉每个资产问一次的往返。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentStatus {
@@ -26,6 +29,18 @@ pub struct AgentStatus {
     pub verified: bool,
     pub mcp_needs_restart: Option<bool>,
     pub mcp_path: PathBuf,
+    pub enabled_mcp: Vec<String>,
+    pub enabled_skills: Vec<String>,
+    pub active_prompt: Option<String>,
+}
+
+/// 读 `agents/<id>.json`；缺失按空矩阵处理，损坏则如实报错（不静默清空真源）。
+pub fn read_matrix(store: &Store, agent_id: &str) -> Result<AgentEnablement, AppError> {
+    let path = store.agent_config_path(agent_id);
+    if !path.exists() {
+        return Ok(AgentEnablement::default());
+    }
+    Ok(serde_json::from_slice(&std::fs::read(&path)?)?)
 }
 
 fn state_path(store: &Store, agent_id: &str) -> PathBuf {
@@ -74,6 +89,7 @@ pub fn detect_all(store: &Store, home: &Path) -> Result<Vec<AgentStatus>, AppErr
     let mut out = Vec::new();
     for descriptor in builtin_agents() {
         let override_base = load_state(store, &descriptor.id)?.base_override;
+        let matrix = read_matrix(store, &descriptor.id)?;
         let config_root = expand_root(&descriptor.config_root, override_base.as_deref(), home);
         let mcp_path = expand_root(descriptor.paths.mcp_file(), override_base.as_deref(), home);
         out.push(AgentStatus {
@@ -83,6 +99,9 @@ pub fn detect_all(store: &Store, home: &Path) -> Result<Vec<AgentStatus>, AppErr
             display_name: descriptor.display_name,
             id: descriptor.id,
             mcp_path,
+            enabled_mcp: matrix.enabled_for(AssetType::Mcp),
+            enabled_skills: matrix.enabled_for(AssetType::Skill),
+            active_prompt: matrix.active_prompt,
         });
     }
     Ok(out)
@@ -133,6 +152,23 @@ mod tests {
         let claude = status.iter().find(|s| s.id == "claude").unwrap();
         assert_eq!(claude.mcp_path, home.join(".claude.json"));
         assert!(!claude.detected);
+    }
+
+    #[test]
+    fn status_carries_the_enablement_matrix_so_the_ui_needs_one_call() {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        crate::import::update_matrix(&store, "claude", |matrix| {
+            matrix.enable(AssetType::Mcp, "pw");
+            matrix.active_prompt = Some("claude-team".into());
+        })
+        .unwrap();
+
+        let status = detect_all(&store, &dir.path().join("home")).unwrap();
+        let claude = status.iter().find(|s| s.id == "claude").unwrap();
+        assert_eq!(claude.enabled_mcp, vec!["pw".to_string()]);
+        assert_eq!(claude.active_prompt.as_deref(), Some("claude-team"));
+        assert!(claude.enabled_skills.is_empty());
     }
 
     #[test]
