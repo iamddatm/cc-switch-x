@@ -13,6 +13,12 @@ import type {
   ResolveAction,
   ResolveOutcome,
   ScanReport,
+  SessionDetail,
+  SessionMatch,
+  SessionProviderStatus,
+  SessionScanReport,
+  SessionSearchHit,
+  SessionSummary,
   Theme,
 } from "../types";
 
@@ -68,6 +74,18 @@ export const api = {
   listDrifts: () => invoke<DriftRecord[]>("list_drifts"),
   resolveDrift: (id: number, action: ResolveAction, agentId: string) =>
     invoke<ResolveOutcome>("resolve_drift", { id, action, agentId }),
+
+  scanSessions: () => invoke<SessionScanReport>("scan_sessions"),
+  listSessions: (agentId?: string, query?: string, offset?: number, limit?: number) =>
+    invoke<SessionSummary[]>("list_sessions", { agentId, query, offset, limit }),
+  getSession: (agentId: string, sessionId: string, offset?: number, limit?: number) =>
+    invoke<SessionDetail>("get_session", { agentId, sessionId, offset, limit }),
+  searchSessions: (query: string, limit?: number) =>
+    invoke<SessionSearchHit[]>("search_sessions", { query, limit }),
+  searchInSession: (agentId: string, sessionId: string, query: string, limit?: number) =>
+    invoke<SessionMatch[]>("search_in_session", { agentId, sessionId, query, limit }),
+  sessionProviders: () =>
+    invoke<SessionProviderStatus[]>("session_providers"),
 };
 
 export interface ApplyReport {

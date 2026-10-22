@@ -169,3 +169,86 @@ export type ActivateOutcome =
   | { kind: "activated"; path: string }
   | { kind: "alreadyActive"; path: string }
   | { kind: "needsConfirmation"; path: string };
+
+// ── 会话（只读本地浏览） ───────────────────────────────────────────
+
+export type SessionRole = "user" | "assistant" | "tool" | "system";
+export type SessionMessageKind =
+  | "text"
+  | "thinking"
+  | "tool_call"
+  | "tool_result"
+  | "image"
+  | "event";
+
+export interface SessionSummary {
+  agentId: string;
+  sessionId: string;
+  title: string;
+  projectPath: string | null;
+  sourcePath: string;
+  createdAt: number | null;
+  updatedAt: number;
+  messageCount: number;
+  parseError: string | null;
+}
+
+export interface SessionMessage {
+  seq: number;
+  role: SessionRole;
+  kind: SessionMessageKind;
+  content: string;
+  toolName: string | null;
+}
+
+export interface SessionDetail {
+  session: SessionSummary;
+  messages: SessionMessage[];
+  total: number;
+}
+
+export interface SessionSearchHit {
+  session: SessionSummary;
+  index: number;
+  seq: number;
+  snippet: string;
+}
+
+export interface SessionMatch {
+  index: number;
+  seq: number;
+  snippet: string;
+}
+
+export interface SessionProviderStatus {
+  agentId: string;
+  displayName: string;
+  verified: boolean;
+  parseReady: boolean;
+  roots: string[];
+  rootExists: boolean;
+  foundFiles: number;
+  sessionCount: number;
+}
+
+export interface SessionFileFailure {
+  agentId: string;
+  file: string;
+  reason: string;
+}
+
+export interface SessionFileWarning {
+  agentId: string;
+  file: string;
+  line: number;
+  message: string;
+}
+
+export interface SessionScanReport {
+  added: number;
+  updated: number;
+  removed: number;
+  unchanged: number;
+  failures: SessionFileFailure[];
+  warnings: SessionFileWarning[];
+}
