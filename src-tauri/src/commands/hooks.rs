@@ -1,5 +1,6 @@
 use crate::adapters::hooks;
 use crate::commands::agents::{descriptor_for, override_base};
+use crate::domain::agent::builtin_agents;
 use crate::domain::hook::Hook;
 use crate::domain::{AssetKind, AssetType};
 use crate::error::AppError;
@@ -57,4 +58,20 @@ pub fn foreign_hook_count(state: State<'_, AppState>, agent_id: String) -> Resul
     let descriptor = descriptor_for(&agent_id, AssetKind::Hook)?;
     let base = override_base(&state, &agent_id)?;
     hooks::foreign_count(&descriptor, &state.home, base.as_deref())
+}
+
+/// 该工具要不要用户自己先打开功能开关（Codex 的 `[features].hooks`）。
+/// `None` = 不需要；`Some` 里带着要改的**绝对路径**与原因，UI 照着显示——我们不代改。
+/// 这是只读查询，所以不受能力闸约束：面板要在「能不能开」之前就告诉用户该做什么。
+#[tauri::command]
+pub fn hooks_gate_status(
+    state: State<'_, AppState>,
+    agent_id: String,
+) -> Result<Option<hooks::HooksNeedUserAction>, AppError> {
+    let descriptor = builtin_agents()
+        .into_iter()
+        .find(|agent| agent.id == agent_id)
+        .ok_or_else(|| AppError::NotFound(format!("注册表里没有 {agent_id}")))?;
+    let base = override_base(&state, &agent_id)?;
+    hooks::check_gate(&descriptor, &state.home, base.as_deref())
 }

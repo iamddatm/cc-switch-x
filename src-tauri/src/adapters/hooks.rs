@@ -36,12 +36,73 @@ pub fn entry_owner(description: &str) -> Option<&str> {
 
 fn json_target(agent: &AgentDescriptor) -> Result<(&str, &str, bool), AppError> {
     match &agent.paths.hooks {
-        HooksTarget::Json { file, key, matcher } => Ok((file.as_str(), key.as_str(), *matcher)),
+        HooksTarget::Json {
+            file, key, matcher, ..
+        } => Ok((file.as_str(), key.as_str(), *matcher)),
         HooksTarget::Unsupported => Err(AppError::Unsupported(format!(
             "{} 没有 hook 落点，未做任何改动",
             agent.id
         ))),
     }
+}
+
+fn gate_of(agent: &AgentDescriptor) -> Option<&crate::domain::agent::HooksGate> {
+    match &agent.paths.hooks {
+        HooksTarget::Json { gate, .. } => gate.as_ref(),
+        HooksTarget::Unsupported => None,
+    }
+}
+
+/// 该工具的 hooks 要用户自己先打开功能开关。**只报告，不代写**：
+/// `[features].hooks` 是用户级功能开关，替他打开等于改他可感知的行为。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HooksNeedUserAction {
+    /// UI 直接显示的绝对路径（不是声明式的 `~/...`）。
+    pub file: PathBuf,
+    pub why: String,
+}
+
+pub fn check_gate(
+    agent: &AgentDescriptor,
+    home: &Path,
+    base_override: Option<&Path>,
+) -> Result<Option<HooksNeedUserAction>, AppError> {
+    let Some(gate) = gate_of(agent) else {
+        return Ok(None);
+    };
+    let path = expand_root(&gate.file, base_override, home);
+    let required = format!("[{}].{} = true", gate.table, gate.key);
+    let needed = |why: String| HooksNeedUserAction {
+        file: path.clone(),
+        why: format!(
+            "请在 {} 里把 {required} 设为 true（我们不代改这个开关）——{why}",
+            path.display()
+        ),
+    };
+
+    let text = match std::fs::read(&path) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Some(needed(format!("文件还不存在（{error}）"))))
+        }
+        Err(error) => return Ok(Some(needed(format!("读不到文件（{error}）")))),
+    };
+    let document = match text.parse::<toml_edit::DocumentMut>() {
+        Ok(document) => document,
+        Err(error) => return Ok(Some(needed(format!("文件解析失败：{error}")))),
+    };
+    let flag = document
+        .get(&gate.table)
+        .and_then(toml_edit::Item::as_table)
+        .and_then(|table| table.get(&gate.key))
+        .and_then(toml_edit::Item::as_value)
+        .and_then(toml_edit::Value::as_bool);
+    Ok(match flag {
+        Some(true) => None,
+        Some(false) => Some(needed("当前明确是 false".into())),
+        None => Some(needed("没有这一项".into())),
+    })
 }
 
 pub fn target_path(
@@ -99,6 +160,19 @@ fn serialize(document: &Value) -> Result<Vec<u8>, AppError> {
     let mut out = serde_json::to_string_pretty(document)?;
     out.push('\n');
     Ok(out.into_bytes())
+}
+
+/// 开关没打开就一个字节都不写，把「要用户做什么」原话报出去。
+/// disable 也一样拦：写了半套只会让 hooks.json 与 config.toml 的状态互相矛盾。
+fn gate_allows_writing(
+    agent: &AgentDescriptor,
+    home: &Path,
+    base_override: Option<&Path>,
+) -> Result<(), AppError> {
+    if let Some(action) = check_gate(agent, home, base_override)? {
+        return Err(AppError::Unsupported(action.why));
+    }
+    Ok(())
 }
 
 /// 只在 `hooks` 子树里增删自己那一条；其余条目与其他顶层键一律不碰。
@@ -187,6 +261,7 @@ pub fn plan_enable(
     base_override: Option<&Path>,
 ) -> Result<PlanItem, AppError> {
     let (_, key, _) = json_target(agent)?;
+    gate_allows_writing(agent, home, base_override)?;
     let entry = render_entry(agent, hook_id, hook)?;
     let path = target_path(agent, home, base_override)?;
     let current = if path.exists() {
@@ -213,6 +288,7 @@ pub fn plan_disable(
     base_override: Option<&Path>,
 ) -> Result<PlanItem, AppError> {
     let (_, key, _) = json_target(agent)?;
+    gate_allows_writing(agent, home, base_override)?;
     let path = target_path(agent, home, base_override)?;
     let current = if path.exists() {
         std::fs::read(&path)?
@@ -669,5 +745,204 @@ mod tests {
         );
         assert_eq!(plan.diff, vec!["+ SessionStart:[ccswitchx:hook:fmt]"]);
         assert_eq!(plan.target_path, box_.base.join(".claude/settings.json"));
+    }
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::*;
+    use crate::domain::agent::builtin_agents;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    fn agent(id: &str) -> AgentDescriptor {
+        builtin_agents().into_iter().find(|a| a.id == id).unwrap()
+    }
+
+    fn hook(event: &str) -> Hook {
+        Hook {
+            name: "fmt".into(),
+            event: event.into(),
+            matcher: "Bash".into(),
+            command: "cargo fmt".into(),
+            command_windows: None,
+            timeout: None,
+        }
+    }
+
+    struct Sandbox {
+        _dir: tempfile::TempDir,
+        home: PathBuf,
+        base: PathBuf,
+    }
+
+    /// Codex 的两个文件：`config.toml`（功能开关，属于用户）与 `hooks.json`（我们写）。
+    fn sandbox(config: Option<&str>) -> Sandbox {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("sandbox");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(base.join(".codex")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        if let Some(config) = config {
+            std::fs::write(base.join(".codex/config.toml"), config).unwrap();
+        }
+        Sandbox {
+            _dir: dir,
+            home,
+            base,
+        }
+    }
+
+    fn plan_enable_in(box_: &Sandbox) -> Result<PlanItem, AppError> {
+        plan_enable(
+            &agent("codex"),
+            "fmt",
+            &hook("SessionStart"),
+            &box_.home,
+            Some(&box_.base),
+        )
+    }
+
+    #[test]
+    fn enabling_a_codex_hook_writes_hooks_json_not_config_toml() {
+        let box_ = sandbox(Some("[features]\nhooks = true\nmodel = \"gpt-5\"\n"));
+        let before = std::fs::read(box_.base.join(".codex/config.toml")).unwrap();
+
+        let plan = plan_enable_in(&box_).unwrap();
+        assert_eq!(plan.target_path, box_.base.join(".codex/hooks.json"));
+        let after: Value = serde_json::from_slice(&plan.contents).unwrap();
+        let entries = after["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{after}");
+        assert_eq!(entries[0]["description"], "[ccswitchx:hook:fmt]");
+        assert_eq!(
+            std::fs::read(box_.base.join(".codex/config.toml")).unwrap(),
+            before,
+            "config.toml 是用户的文件，一个字节都不许动"
+        );
+    }
+
+    #[test]
+    fn codex_entries_carry_no_matcher() {
+        let box_ = sandbox(Some("[features]\nhooks = true\n"));
+        let plan = plan_enable_in(&box_).unwrap();
+        let after: Value = serde_json::from_slice(&plan.contents).unwrap();
+        let entry = &after["hooks"]["SessionStart"][0];
+        assert!(
+            entry.get("matcher").is_none(),
+            "本机 hooks.json 的条目里没有 matcher，写了会被忽略：{entry}"
+        );
+        assert_eq!(entry["hooks"][0]["command"], "cargo fmt");
+    }
+
+    #[test]
+    fn a_missing_features_flag_is_reported_not_written() {
+        let box_ = sandbox(Some("model = \"gpt-5\"\n"));
+        let error = plan_enable_in(&box_).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            matches!(error, AppError::Unsupported(_)),
+            "没打开开关就不能写：{message}"
+        );
+        assert!(message.contains("[features].hooks = true"), "{message}");
+        assert!(
+            message.contains(&box_.base.join(".codex/config.toml").display().to_string()),
+            "报告里必须给出该改哪个文件的绝对路径：{message}"
+        );
+        assert!(
+            !box_.base.join(".codex/hooks.json").exists(),
+            "被拦下时一个文件都不该建出来"
+        );
+    }
+
+    #[test]
+    fn an_absent_config_file_and_an_explicit_false_are_both_reported() {
+        let none = sandbox(None);
+        let message = plan_enable_in(&none).unwrap_err().to_string();
+        assert!(message.contains("文件还不存在"), "{message}");
+
+        let off = sandbox(Some("[features]\nhooks = false\n"));
+        let message = plan_enable_in(&off).unwrap_err().to_string();
+        assert!(message.contains("当前明确是 false"), "{message}");
+    }
+
+    #[test]
+    fn a_broken_config_toml_is_not_assumed_enabled() {
+        let box_ = sandbox(Some("[features\nhooks = true"));
+        let message = plan_enable_in(&box_).unwrap_err().to_string();
+        assert!(message.contains("解析失败"), "{message}");
+        assert!(!box_.base.join(".codex/hooks.json").exists());
+    }
+
+    #[test]
+    fn disabling_is_gated_too() {
+        let box_ = sandbox(Some("model = \"gpt-5\"\n"));
+        let error = plan_disable(
+            &agent("codex"),
+            "fmt",
+            "SessionStart",
+            &box_.home,
+            Some(&box_.base),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, AppError::Unsupported(_)),
+            "开关没打开时写半套只会让两个文件的状态互相矛盾：{error}"
+        );
+    }
+
+    #[test]
+    fn the_gate_only_applies_to_tools_that_declare_one() {
+        let box_ = sandbox(Some("model = \"gpt-5\"\n"));
+        for id in ["claude", "qoder-cn"] {
+            assert_eq!(
+                check_gate(&agent(id), &box_.home, Some(&box_.base)).unwrap(),
+                None,
+                "{id} 没有功能开关这回事"
+            );
+        }
+        assert!(check_gate(&agent("codex"), &box_.home, Some(&box_.base))
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn check_gate_follows_the_base_override() {
+        let box_ = sandbox(Some("[features]\nhooks = true\n"));
+        assert_eq!(
+            check_gate(&agent("codex"), &box_.home, Some(&box_.base)).unwrap(),
+            None
+        );
+        // 没覆盖时看的是真实家目录，那边的开关与我们沙箱无关
+        let reported = check_gate(&agent("codex"), &box_.home, None)
+            .unwrap()
+            .expect("真实 home 下的 config.toml 不该被当成已确认");
+        assert_eq!(
+            reported.file,
+            box_.home.join(".codex/config.toml"),
+            "报告的路径必须是展开后的绝对路径"
+        );
+    }
+
+    #[test]
+    fn an_existing_user_entry_in_hooks_json_is_kept() {
+        let box_ = sandbox(Some("[features]\nhooks = true\n"));
+        std::fs::write(
+            box_.base.join(".codex/hooks.json"),
+            serde_json::to_vec_pretty(&json!({
+                "hooks": {
+                    "SessionStart": [
+                        { "hooks": [{ "type": "command", "command": "echo mine" }] }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let plan = plan_enable_in(&box_).unwrap();
+        let after: Value = serde_json::from_slice(&plan.contents).unwrap();
+        let entries = after["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(entries.len(), 2, "{after}");
+        assert_eq!(entries[0]["hooks"][0]["command"], "echo mine");
     }
 }

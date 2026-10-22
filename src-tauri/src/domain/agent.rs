@@ -125,6 +125,17 @@ pub enum McpTarget {
     TomlTable { file: String, table: String },
 }
 
+/// 该工具的 hooks 要用户自己先打开的功能开关。**我们只检测、不代写**：
+/// `[features].hooks` 是用户级功能开关，改它等于改用户可感知的行为。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HooksGate {
+    /// 开关所在的 TOML 文件（声明式路径，`~/` 开头）。
+    pub file: String,
+    pub table: String,
+    pub key: String,
+}
+
 /// Hooks 一律是「某个 JSON 文件里的某个子树」；Codex 用的是独立的 hooks.json 而非 settings.json。
 /// `matcher=false` 表示该工具的条目里没有 `matcher` 字段（Codex 实测如此），渲染时就不许写它。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +145,7 @@ pub enum HooksTarget {
         file: String,
         key: String,
         matcher: bool,
+        gate: Option<HooksGate>,
     },
     Unsupported,
 }
@@ -246,6 +258,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
                     file: declared("~/.claude", "settings.json"),
                     key: "hooks".into(),
                     matcher: true,
+                    gate: None,
                 },
             },
             mcp_needs_restart: None,
@@ -277,6 +290,11 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
                     key: "hooks".into(),
                     // 本机 hooks.json 的条目里没有 matcher（实测形状）
                     matcher: false,
+                    gate: Some(HooksGate {
+                        file: declared("~/.codex", "config.toml"),
+                        table: "features".into(),
+                        key: "hooks".into(),
+                    }),
                 },
             },
             mcp_needs_restart: None,
@@ -330,6 +348,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
                     file: declared("~/.qoder", "settings.json"),
                     key: "hooks".into(),
                     matcher: true,
+                    gate: None,
                 },
             },
             mcp_needs_restart: None,
@@ -363,6 +382,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
                     file: declared("~/.qoder-cn", "settings.json"),
                     key: "hooks".into(),
                     matcher: true,
+                    gate: None,
                 },
             },
             mcp_needs_restart: Some(true),

@@ -604,6 +604,25 @@ fn windows_command_is_used_only_on_windows() {
 - 断言:`enabling_a_codex_hook_writes_hooks_json_not_config_toml`、`a_missing_features_flag_is_reported_not_written`、`codex_entries_carry_no_matcher`。
 - 提交:`git commit -m "feat: 支持 Codex 的 hooks 落点并显式不代开功能开关"`。
 
+#### Task 7 执行记录（2026-10-22）
+
+- 开关信息放进注册表：`HooksTarget::Json` 增加 `gate: Option<HooksGate { file, table, key }>`，
+  只有 codex 填 `~/.codex/config.toml` 的 `[features].hooks`。渲染代码里**不按 agent id 猜**——
+  「哪个工具要用户开什么开关」是注册表该记的事实，`matcher` 那一项同理（Task 6）。
+- `hooks::check_gate(agent, home, base) -> Result<Option<HooksNeedUserAction>, AppError>`；
+  `HooksNeedUserAction { file: PathBuf（展开后的绝对路径）, why }`。
+  `plan_enable` **与 `plan_disable` 都先过这道闸**：开关没打开时只写一半会让
+  `hooks.json` 与 `config.toml` 的状态互相矛盾，取消操作也一样不碰文件。
+- 四种「确认不了就算没打开」的情况都报告、都不写：配置文件不存在 / 读不到 / 解析失败 /
+  这一项缺失或明确是 `false`。原因文案里带上 `[features].hooks = true` 与文件绝对路径，
+  用户照着做就行；我们**绝不**代改 `config.toml`（那是用户级功能开关）。
+- 只读查询 `hooks_gate_status` 不受能力闸约束（面板要在「能不能开」之前就告诉用户该做什么），
+  但它仍要求 agent 在注册表里认识；写命令 `set_hook_enabled` 照常过 `descriptor_for(..., Hook)`。
+- 新增断言（codex_tests，9 条）：写的是 `hooks.json` 且 `config.toml` 前后**逐字节相同**、
+  条目里没有 `matcher`、被拦下时 `hooks.json` 根本不会被创建、`hooks.json` 里用户已有的条目保住。
+- 门禁：`cargo test` 204 通过（本任务 +9）、`cargo fmt --check` 干净、
+  `cargo clippy --all-targets` 只剩 Plan 2 那条遗留告警。
+
 ---
 
 ### Task 8: 漂移检测(期望指纹 vs 磁盘实际)
