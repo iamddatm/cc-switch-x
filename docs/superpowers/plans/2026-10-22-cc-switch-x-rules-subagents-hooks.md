@@ -224,7 +224,7 @@ mod tests {
 - 渲染产物：`---\ntrigger: glob\nglob: a, b\n---\n\n<正文>\n` 或 `---\ntrigger: always_on\n---\n\n<正文>\n`。`glob` 行**不加引号**(Qoder Desktop 就这么写),`{a,b}` 先展开成独立 glob 再去重。
 - 回推:`merge_body_into_team(tool_file, existing_team_md)` 只把正文换回去,frontmatter 由真源自己保留 —— 这是往返不产生假 diff 的关键。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```rust
 #[test]
@@ -270,9 +270,42 @@ fn an_older_render_is_still_recognised_as_ours() {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败** — FAIL。
-- [ ] **Step 3: 实现**
-- [ ] **Step 4: `cargo test … rules` → PASS**
+- [x] **Step 2: 运行确认失败** — FAIL。
+- [x] **Step 3: 实现**
+- [x] **Step 4: `cargo test … rules` → PASS**
+- [x] **Step 5: 提交** — `git commit -m "feat: 添加 Rules 的 Qoder 渲染与回推"`
+
+#### Task 2 执行记录（2026-10-22）
+
+实际落地的签名，Task 3 按这个引用（与上面示例代码的差异都写在后面）：
+
+- `adapters::rules::render_rule(agent: &AgentDescriptor, rule: &Rule) -> Result<String, DomainError>`
+  —— 示例里那个多余的 `"src/**"` 参数去掉了：渲染的输入只有 agent 与 canonical 规则，
+  glob 从 `rule.meta.paths` 来，不需要第二处真相。
+- `body_equals(tool_text, rule)` / `merge_body_into_team(tool_text, Option<&Rule>)` /
+  `rule_from_tool_file(id, tool_text)` **不带 agent**：三者只做「剥 frontmatter、比正文」，
+  这一步与工具形态无关（`.md` 与将来的 `.mdc` 都一样）；按 agent 分派的只有
+  `render_rule`、`format_for_agent`、`delivered_renders`。少一个参数就少一处「传了但没用」的假签名。
+- `RuleFormat { extension, render, scope_fields, previous_renders }`，`render`/`previous_renders`
+  是 `fn(&Rule) -> Result<String, DomainError>`。今天只有 `QODER_RULE_FORMAT`（qoder 与 qoder-cn 共用），
+  其余 agent `format_for_agent → None`，渲染退成 canonical 逐字抄（`verbatim_render`），
+  同时它也是 qoder 的 `previous_renders[0]`。
+- `domain::rule::render_rule` 改名 **`render_canonical`** 并改成返回 `Result`：
+  原来是 `serde_yaml::to_string(&meta).unwrap_or_default()`，序列化一旦失败会写出
+  「没有 frontmatter 的空文件」，而 rule 的 frontmatter 正是 `name` 的来源。
+- `RuleFrontmatter` 增加 `trigger: Option<RuleTrigger>`（`always_on|glob|manual|model_decision`），
+  `Rule::effective_trigger()` 负责派生。示例没写的两种情形按下面处理，都是为了不产出无效文件：
+  - `trigger: manual` / `model_decision` **透传**，不被 `paths` 反过来改成 glob；
+    `model_decision` 带上 `description`（缺 description 时 Qoder 自己降级成 manual，我们不改写、不假装）。
+  - 显式 `trigger: glob` 但 `paths` 为空 → 渲染成 `always_on`。空 `glob:` 行在 Qoder 侧没有意义。
+  - 认不出的 `trigger` 值在 `parse_rule` 阶段就是 `DomainError::Yaml`，不会静默变成默认值。
+- canonical 正文统一为「trim + 单个结尾换行」（`merge_body_into_team` 与 `rule_from_tool_file` 都这么产出），
+  否则 `render_canonical` 写出的文件有没有尾换行取决于来源，push 时会造出假 diff。
+- `rule_from_tool_file` 从 `glob:` 行反推 `paths`（逗号切分后仍过一遍 brace 展开与去重），
+  这是 Task 3 扫描导入把工具规则变成 canonical 的入口；认不出的 `trigger` 字符串留 `None`
+  交给派生，不硬编成 `always_on`。
+- 门禁：`cargo test` 135 通过（本任务 +17）、`cargo fmt --check` 干净、
+  `cargo clippy --all-targets` 只剩 Task 1 记下的那条 Plan 2 遗留告警。
 - [ ] **Step 5: 提交** — `git commit -m "feat: 添加 Rules 的 Qoder 渲染与回推"`
 
 ---
