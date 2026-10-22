@@ -90,6 +90,7 @@ function sequence(entry: Map<string, Entry>, key: string): string[] {
 
 function unquote(value: string): string {
   const trimmed = value.trim();
+  if (trimmed === "null" || trimmed === "~") return "";
   if (
     (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
     (trimmed.startsWith("'") && trimmed.endsWith("'"))

@@ -86,10 +86,11 @@ test("unverified_capability_shows_no_switch_but_says_why", async () => {
   expect(checkbox).toBeEnabled();
 });
 
-test("foreign_hooks_are_named_and_the_gate_is_shown", async () => {
+test("foreign_hooks_are_named_per_file_and_the_gate_is_shown", async () => {
   await openFmt();
+  // 数量按 agent 分开报：每个 agent 的 hook 文件是不同的一份，加成总数会指错文件
   expect(
-    screen.getByText("该文件里还有 3 条不是本工具写的 hook，我们不会动它们。"),
+    screen.getByText("Claude Code 的 hook 文件里还有 3 条不是本工具写的 hook，我们不会动它们。"),
   ).toBeInTheDocument();
 
   vi.mocked(api.hooksGateStatus).mockResolvedValue({

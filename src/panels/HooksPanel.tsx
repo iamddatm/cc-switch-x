@@ -23,7 +23,7 @@ export function HooksPanel() {
   const [form, setForm] = useState<HookForm>(EMPTY);
   const [newId, setNewId] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
-  const [foreign, setForeign] = useState<Record<string, number>>({});
+  const [foreign, setForeign] = useState<{ agent: string; count: number }[]>([]);
   const [gate, setGate] = useState<HooksNeedUserAction | null>(null);
 
   useEffect(() => {
@@ -40,20 +40,20 @@ export function HooksPanel() {
   // 每个可写的 agent 都要问一次「有多少条不是我们写的」与功能开关状态
   useEffect(() => {
     void (async () => {
-      const counts: Record<string, number> = {};
-      for (const agent of agents) {
-        if (!switchable(agent, "hook")) continue;
+      const entries: { agent: string; count: number }[] = [];
+      for (const item of agents) {
+        if (!switchable(item, "hook")) continue;
         try {
-          counts[agent.id] = await api.foreignHookCount(agent.id);
+          entries.push({ agent: item.displayName, count: await api.foreignHookCount(item.id) });
         } catch {
           // 问不到就不显示那条说明；不能因为一次读取失败把面板写坏
         }
       }
-      setForeign(counts);
+      setForeign(entries);
     })();
     void (async () => {
-      for (const agent of agents) {
-        const status = await api.hooksGateStatus(agent.id).catch(() => null);
+      for (const item of agents) {
+        const status = await api.hooksGateStatus(item.id).catch(() => null);
         if (status) {
           setGate(status);
           return;
@@ -125,10 +125,7 @@ export function HooksPanel() {
         </div>
       </section>
       <section>
-        <HooksSafety
-          foreignCount={Object.values(foreign).reduce((sum, count) => sum + count, 0)}
-          gate={gate}
-        />
+        <HooksSafety counts={foreign} gate={gate} />
         {selected ? (
           <>
             <div className="mb-3 flex gap-2">

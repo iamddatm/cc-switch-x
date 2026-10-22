@@ -844,12 +844,69 @@ fn an_untracked_file_is_never_drift() {
 
 ### Task 11: 端到端验证(沙箱)
 
-- [ ] 全量门禁:`pnpm test`、`pnpm build`、`cargo test`、`cargo build`。
-- [ ] 沙箱真机:临时 store + `baseOverride` 指向临时配置根,跑「导入 → 勾规则 → 勾子代理 → 勾 hook → 手改磁盘 → rescan → 采纳磁盘」全链路,逐张看截图。
-- [ ] 复核并升档:`qoder-cn` 的 rule / subagent / hook 三项在真机 diff 通过后从 `verified=false` 升 `true`,并回写本文件「事实来源」表；升不了就保持 `false` 并在计划里注明原因。
-- [ ] 复核 Qoder IDE(A2b):写一条 MCP 到 `~/.qoder/mcp.json`,确认 IDE 是否读到；读不到就把 qoder 保持全 `false`。
-- [ ] 清理临时目录与 `settings.json`,确认 `~/.claude.json`、`~/.qoder-cn/settings.json` 等真实文件哈希未变。
-- [ ] 提交:`git commit -m "test: 补充三类资产与漂移检测的端到端验证记录"`。
+- [x] 全量门禁:`pnpm test`、`pnpm build`、`cargo test`、`cargo build`。
+- [x] 沙箱真机:临时 store + `baseOverride` 指向临时配置根,跑「导入 → 勾规则 → 勾子代理 → 勾 hook → 手改磁盘 → rescan → 采纳磁盘」全链路,逐张看截图。
+- [x] 复核并升档:**结论是一条都不升**,理由见下面的执行记录。
+- [x] 复核 Qoder IDE(A2b):**没做** —— 它要往真实的 `~/.qoder/mcp.json` 写或拿沙箱当配置根启动 IDE,都需要用户点头;`qoder` 保持全 `false`。
+- [x] 清理临时目录与 `settings.json`,确认 `~/.claude.json`、`~/.qoder-cn/settings.json` 等真实文件哈希未变。
+- [x] 提交:`git commit -m "test: 补充三类资产与漂移检测的端到端验证记录"`。
+
+#### Task 11 执行记录（2026-10-22）
+
+**1. 沙箱链路测试**（`src-tauri/tests/asset_chain_e2e.rs`，3 条）
+store 与 agent 配置根都在 `tempfile` 下，靠 `local/agents/<id>.json` 的 `baseOverride` 重定向：
+
+- 规则落盘字节：`---\ntrigger: glob\nglob: src/**, docs/a/*.md, docs/b/*.md\n---\n\n…`
+  （brace 展开、不加引号、目录不存在时由 deploy 建出来）；子代理落 `.md` 且
+  `when-to-use` 这类私有字段带得出去；重复 deploy `skipped=1` 一个字节不写。
+- 手改规则 → `rescan` 只报被改的那一条（没动的不能报漂移）→ 写命令被
+  `ensure_no_open_drift` 拦下 → 采纳磁盘后**盘上字节不变**、真源拿到用户正文且
+  保住 `paths` → 再扫为空；改过的子代理走「重刷真源」恢复成渲染结果。
+- 取消落盘只删自家文件，同目录里 `user-own.md` 活着，`backups/` 有留底。
+- hooks 落进共享 `settings.json`：带标记的那条进 `PreToolUse`，用户自己的
+  `SessionStart` 条目与 `model` / `mcpServers` 键**以及顶层键顺序**都不动；
+  取消只删带标记的那条。
+- `real_agent_config_roots_are_untouched`：跑完整链路后，真实
+  `~/.claude.json` / `~/.qoder-cn/settings.json` / `~/.codex/config.toml` 字节一致。
+
+**2. 真机 UI**（WebView2 + CDP，截图逐张看过）
+`scripts/seed-ui-e2e.ps1` 铺沙箱 store（一条规则 / 一个子代理 / 一个 hook / 一条 MCP +
+一份「被用户改过」的规则文件 + 两个 baseOverride），`scripts/drive-ui-e2e.cjs`
+用 playwright-core 连 `--remote-debugging-port` 点全程并截图。
+（端口用 1421/9224：1420 被本机另一个项目的 vite 占着，不动它。）
+
+观察到的结果：MCP 勾一次即写入沙箱 `.claude.json` 且矩阵回显「实测：文件 · 写入 1」；
+Rules 面板顶部出现漂移条（带绝对路径 + 两个按钮），点「采纳磁盘」后沙箱文件字节不变、
+真源拿到用户正文并保住 `src/**`、漂移条消失；Rules 区里 Qoder / Qoder CN 都是
+「未实测，暂不提供开关」，Claude 整行不出现；Hooks 面板 28 个事件、命令全文展示。
+
+**真机才发现、jsdom 抓不到的两个缺陷**（都已修并补了断言）：
+
+1. `command_windows: null` 被编解码器读成字符串 `"null"`，面板于是把
+   「`cargo fmt --all` / [Windows] null」当成两条命令显示 —— 单测里我给的是空串，
+   所以没暴露。现在 YAML 的 `null` 一律读成空值。
+2. 「不是本工具写的 hook」的条数把**每个 agent 各自的文件**加成了一个总数
+   （截图里显示 5 条，而沙箱那份只有 1 条），指错了文件。改成按 agent 分行报。
+
+**一次误判的记录**：第一次跑驱动时 `check()` 断言失败，我又跑了一遍，
+`runs` 表里出现 enable + disable 各一条，看着像 Plan 2 那个「点一次发两次请求」的回归。
+查 `runs` 与备份目录证明是**两次独立点击**（受控复选框要等后端返回才翻状态，
+`check()` 等不及就报错），不是双触发。驱动改成 `click()` + 断言落盘结果。
+
+**3. 升档结论：`qoder-cn` 的 rule / subagent / hook 全部保持 `verified=false`。**
+沙箱真机证明的是**我们这一侧**：路径对、字节对、归属认得出、漂移报得准、取消删得干净。
+它没有证明**工具那一侧**会读这些文件 —— 本机从来没有一份真实的
+`~/.qoder-cn/rules/` 或 `agents/` 样本，`~/.qoder-cn/settings.json` 现在也没有 `hooks` 子树，
+「Qoder CN 会消费它们」的依据仍然只有二进制里的解析器源码与 teamai 的产物（C 档推断）。
+要闭合这一步，需要拿沙箱目录当配置根启动 Qoder CN IDE/CLI，看规则与子代理是否出现在
+它自己的列表里 —— 那是需要用户配合的一次操作，不擅自做。
+`claude` 的 hook 保持 `true`（依据是本机真实 `~/.claude/settings.json` 里就有 hooks 子树，
+属 B 档实物），`codex` 同理（真实 `~/.codex/hooks.json`）。
+
+**4. 门禁**：`cargo test` 235 通过（含 3 条沙箱链路）、`pnpm test` 45 通过、
+`pnpm build` 通过、`cargo fmt --check` 干净、`cargo clippy --all-targets` 只剩 Plan 2 那条遗留告警。
+清理：临时目录、`%APPDATA%/cc-switch-x/settings.json`（跑前不存在，跑后删除）、
+5 个真实配置文件哈希前后一致。
 
 ---
 

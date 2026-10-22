@@ -118,4 +118,14 @@ describe("hooks 编解码", () => {
     expect(form.commandWindows).toBe("");
     expect(form.timeout).toBe("5");
   });
+
+  // 真机跑出来的缺陷：`command_windows: null` 被读成字符串 "null"，
+  // 于是面板把 "[Windows] null" 当成一条真实命令显示出来。
+  it("YAML 的 null 读成空值，不是字符串 null", () => {
+    expect(parseHook("command_windows: null\n").commandWindows).toBe("");
+    expect(parseSubagent("model: null\n").model).toBe("");
+    const form = parseHook("name: a\nevent: Stop\ncommand: x\ncommand_windows: null\n");
+    expect(renderHook(form)).toContain("command_windows: null");
+    expect(renderHook(form)).not.toContain('"null"');
+  });
 });
