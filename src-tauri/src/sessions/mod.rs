@@ -138,9 +138,9 @@ static PROVIDERS: &[SessionProvider] = &[
         display_name: "Pi Coding Agent",
         roots: &["~/.pi/agent/sessions"],
         verified: false,
-        discover: discover_jsonl,
-        parse: None,
-        resume: None,
+        discover: providers::pi::discover_pi,
+        parse: Some(providers::pi::parse_pi_all),
+        resume: Some(providers::pi::resume_pi),
     },
     SessionProvider {
         agent_id: "agy",

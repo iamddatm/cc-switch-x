@@ -1,0 +1,7 @@
+{"type":"session","id":"p1","version":3,"cwd":"D:/repo","timestamp":"2026-10-20T10:00:00Z"}
+{"id":"e1","parentId":null,"type":"model_change","timestamp":"2026-10-20T10:00:01Z","modelId":"test-model"}
+{"id":"e2","parentId":"e1","type":"message","timestamp":"2026-10-20T10:00:02Z","message":{"role":"user","content":[{"type":"text","text":"活动分支"}]}}
+{"id":"e3","parentId":"e2","type":"message","timestamp":"2026-10-20T10:00:03Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"想一下"},{"type":"text","text":"回答"},{"type":"toolCall","id":"call1","name":"read","arguments":{"path":"a.rs"}}]}}
+{"id":"e4","parentId":"e3","type":"message","timestamp":"2026-10-20T10:00:04Z","message":{"role":"toolResult","toolCallId":"call1","content":[{"type":"text","text":"文件内容"}]}}
+{"id":"b1","parentId":"e2","type":"message","timestamp":"2026-10-20T10:00:05Z","message":{"role":"user","content":[{"type":"text","text":"被放弃的分支"}]}}
+{"id":"e5","parentId":"e4","type":"message","timestamp":"2026-10-20T10:00:06Z","message":{"role":"bashExecution","command":"ls","output":"a.rs","exitCode":0}}
