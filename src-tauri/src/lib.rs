@@ -1,3 +1,5 @@
+pub mod domain;
+
 #[tauri::command]
 fn ping() -> &'static str {
     "pong"
