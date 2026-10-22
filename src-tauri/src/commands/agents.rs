@@ -1,4 +1,6 @@
+use crate::adapters::cli::CliChannel;
 use crate::adapters::mcp as mcp_adapter;
+use crate::adapters::paths::WriteTarget;
 use crate::adapters::prompt::{self, ActivateOutcome, Takeover};
 use crate::adapters::skills::{self, Deployed, Removed};
 use crate::domain::agent::{builtin_agents, AgentDescriptor};
@@ -7,7 +9,7 @@ use crate::domain::{AssetKind, AssetType};
 use crate::error::AppError;
 use crate::import::update_matrix;
 use crate::services::agents::{detect_all, load_state, AgentStatus};
-use crate::services::apply::{ApplyReport, ApplyService};
+use crate::services::apply::ApplyReport;
 use crate::services::drift;
 use crate::state::AppState;
 use std::path::PathBuf;
@@ -48,25 +50,32 @@ pub fn set_mcp_enabled(
     let canonical = state.store.read(AssetType::Mcp, &id)?;
     let server: McpServer = serde_json::from_slice(&canonical)?;
     let base = override_base(&state, &agent_id)?;
+    // CLI 通道：只有该 agent 有官方写命令时才去 PATH 里找（Claude / Codex 等直接是 NotApplicable）。
+    let target = WriteTarget::new(&state.home, base.as_deref())
+        .with_channel(CliChannel::for_agent(&agent_id));
 
-    let plan = {
-        let secrets = state
-            .secrets
-            .lock()
-            .map_err(|_| AppError::InvalidInput("secrets 锁失败".into()))?;
-        if enabled {
-            mcp_adapter::plan_enable(&descriptor, &server, &secrets, &state.home, base.as_deref())
-        } else {
-            mcp_adapter::plan_disable(&descriptor, &id, &state.home, base.as_deref())
-        }
-    }?;
-
+    // 锁顺序固定为 index → secrets，与 commands::import 一致；反过来会构成死锁风险。
     let report = {
         let mut index = state
             .index
             .lock()
             .map_err(|_| AppError::InvalidInput("index 锁失败".into()))?;
-        ApplyService::apply(&state.store, &mut index, &[plan])?
+        let secrets = state
+            .secrets
+            .lock()
+            .map_err(|_| AppError::InvalidInput("secrets 锁失败".into()))?;
+        if enabled {
+            mcp_adapter::write_enable(
+                &state.store,
+                &mut index,
+                &descriptor,
+                &server,
+                &secrets,
+                &target,
+            )
+        } else {
+            mcp_adapter::write_disable(&state.store, &mut index, &descriptor, &id, &target)
+        }?
     };
     update_matrix(&state.store, &agent_id, |matrix| {
         if enabled {

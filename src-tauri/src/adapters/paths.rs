@@ -1,10 +1,36 @@
+use crate::adapters::cli::CliChannel;
 use std::path::{Path, PathBuf};
 
+/// 一次落盘的「往哪儿写、能不能走 CLI」。所有适配器共用，避免每个入口都拖三个参数。
+/// `base_override` 覆盖的是 `~` 这个锚点，所以该 agent 的全部落点会一起重定位 ——
+/// 真机验证与非常规安装位置都靠它，用来保证「绝不拿用户真实配置当试验田」。
+#[derive(Debug)]
+pub struct WriteTarget<'a> {
+    pub home: &'a Path,
+    pub base_override: Option<&'a Path>,
+    pub channel: CliChannel,
+}
+
+impl<'a> WriteTarget<'a> {
+    pub fn new(home: &'a Path, base_override: Option<&'a Path>) -> Self {
+        Self {
+            home,
+            base_override,
+            channel: CliChannel::NotApplicable,
+        }
+    }
+
+    pub fn with_channel(mut self, channel: CliChannel) -> Self {
+        self.channel = channel;
+        self
+    }
+
+    pub fn expand(&self, declared: &str) -> PathBuf {
+        expand_root(declared, self.base_override, self.home)
+    }
+}
+
 /// 把注册表里声明式路径（一律以 `~/` 开头）展开成真实路径。
-///
-/// `base_override` 覆盖的是 `~` 这个锚点，因此该 agent 的**所有**落点会一起重定位，
-/// 包括 `~/.claude.json` 这种与配置根同级的文件。真机验证与非常规安装位置都靠它，
-/// 用来保证「绝不拿用户真实配置当试验田」。
 pub fn expand_root(declared: &str, base_override: Option<&Path>, home: &Path) -> PathBuf {
     let rest = declared.strip_prefix("~/").unwrap_or(declared);
     base_override.unwrap_or(home).join(rest)

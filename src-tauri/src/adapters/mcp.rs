@@ -1,9 +1,12 @@
-use crate::adapters::paths::expand_root;
+use crate::adapters::paths::{expand_root, WriteTarget};
 use crate::domain::agent::{AgentDescriptor, AgentPaths, McpTarget};
 use crate::domain::mcp::{McpServer, Transport};
+use crate::domain::AssetState;
 use crate::error::AppError;
-use crate::services::apply::{Action, PlanItem};
+use crate::index::Index;
+use crate::services::apply::{Action, ApplyReport, ApplyService, PlanItem};
 use crate::store::secrets::Secrets;
+use crate::store::Store;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -168,6 +171,111 @@ pub fn plan_disable(
         McpTarget::TomlTable { table, .. } => merge_toml(&current, table, server_id, None)?,
     };
     Ok(plan_item(agent, server_id, path, contents, Action::Disable))
+}
+
+/// CLI 优先落盘（spec 5.3 的写入顺序）。`target.channel` 说清这条路径适不适用：
+/// 没装 CLI 或 CLI 失败都**回落文件写入并在 `note` 里写明原因**，不把降级说成验证过。
+pub fn write_enable(
+    store: &Store,
+    index: &mut Index,
+    agent: &AgentDescriptor,
+    server: &McpServer,
+    secrets: &Secrets,
+    target: &WriteTarget,
+) -> Result<ApplyReport, AppError> {
+    let (home, base_override) = (target.home, target.base_override);
+    let plan = plan_enable(agent, server, secrets, home, base_override)?;
+    if let Some(cli) = target.channel.cli() {
+        let rendered = render(server, secrets)?;
+        let json = serde_json::to_string(&rendered.to_json())?;
+        // 留底必须在叫 CLI 动手之前：它改的是同一个文件，写完就没有原始内容了。
+        let snapshot = ApplyService::snapshot(store, std::slice::from_ref(&plan))?;
+        match cli.add_mcp(&server.id, &json) {
+            Ok(_) => {
+                let confirmed = cli.mcp_present(&server.id);
+                let mut report = ApplyService::record_external_write(
+                    index,
+                    std::slice::from_ref(&plan),
+                    &snapshot,
+                    if confirmed {
+                        AssetState::Effective
+                    } else {
+                        AssetState::Written
+                    },
+                )?;
+                report.note = Some(if confirmed {
+                    "由 qoderclicn 写入，并用 mcp get 读回确认".into()
+                } else {
+                    // 写命令成功但读回没看到：只能说已写入，不能替用户猜它生效了
+                    "qoderclicn 写入后 mcp get 没读到，只算已写入".into()
+                });
+                return Ok(report);
+            }
+            Err(error) => {
+                return finish_with_file(
+                    store,
+                    index,
+                    plan,
+                    Some(format!("qoderclicn 失败：{error}；已改走文件写入")),
+                )
+            }
+        }
+    }
+    finish_with_file(store, index, plan, target.channel.fallback_note())
+}
+
+/// 取消落盘。CLI 删完还要读回确认它真不在了；仍然读得到就用文件路径复核删除，
+/// 因为「CLI 说删了但配置还在」正是不能当作完成的那种状态。
+pub fn write_disable(
+    store: &Store,
+    index: &mut Index,
+    agent: &AgentDescriptor,
+    server_id: &str,
+    target: &WriteTarget,
+) -> Result<ApplyReport, AppError> {
+    let (home, base_override) = (target.home, target.base_override);
+    let plan = plan_disable(agent, server_id, home, base_override)?;
+    if let Some(cli) = target.channel.cli() {
+        let snapshot = ApplyService::snapshot(store, std::slice::from_ref(&plan))?;
+        match cli.remove_mcp(server_id) {
+            Ok(_) if !cli.mcp_present(server_id) => {
+                return ApplyService::record_external_write(
+                    index,
+                    std::slice::from_ref(&plan),
+                    &snapshot,
+                    AssetState::Off,
+                );
+            }
+            Ok(_) => {
+                return finish_with_file(
+                    store,
+                    index,
+                    plan,
+                    Some("qoderclicn 报删除成功但 mcp get 仍读得到，已用文件路径复核删除".into()),
+                )
+            }
+            Err(error) => {
+                return finish_with_file(
+                    store,
+                    index,
+                    plan,
+                    Some(format!("qoderclicn 失败：{error}；已改走文件写入")),
+                )
+            }
+        }
+    }
+    finish_with_file(store, index, plan, target.channel.fallback_note())
+}
+
+fn finish_with_file(
+    store: &Store,
+    index: &mut Index,
+    plan: PlanItem,
+    note: Option<String>,
+) -> Result<ApplyReport, AppError> {
+    let mut report = ApplyService::apply(store, index, std::slice::from_ref(&plan))?;
+    report.note = note;
+    Ok(report)
 }
 
 fn plan_item(
@@ -528,5 +636,301 @@ mod tests {
         .unwrap();
         assert!(plan.needs_restart);
         assert!(!plan.diff.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cli_write_tests {
+    use super::*;
+    use crate::adapters::cli::{CliChannel, CliError, QoderCli};
+    use crate::domain::agent::builtin_agents;
+    use crate::domain::mcp::{McpServer, Transport};
+    use crate::index::Index;
+    use crate::store::secrets::Secrets;
+    use crate::store::Store;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    fn agent(id: &str) -> crate::domain::agent::AgentDescriptor {
+        builtin_agents().into_iter().find(|a| a.id == id).unwrap()
+    }
+
+    fn server(id: &str) -> McpServer {
+        McpServer {
+            id: id.into(),
+            name: id.into(),
+            transport: Transport::Stdio,
+            command: Some("npx".into()),
+            args: vec!["-y".into()],
+            env: BTreeMap::new(),
+            url: None,
+            headers: BTreeMap::new(),
+            description: String::new(),
+            homepage: String::new(),
+            docs: String::new(),
+            tags: Vec::new(),
+        }
+    }
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        store: Store,
+        index: Index,
+        home: PathBuf,
+        target: PathBuf,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let index = Index::open(&dir.path().join("index.db")).unwrap();
+        let home = dir.path().join("home");
+        let target = home.join(".qoder-cn/settings.json");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(
+            &target,
+            "{\"model\":\"haiku\",\"mcpServers\":{\"theirs\":{\"command\":\"x\"}}}",
+        )
+        .unwrap();
+        Fixture {
+            _dir: dir,
+            store,
+            index,
+            home,
+            target,
+        }
+    }
+
+    fn channel(run: fn(&Path, &[String]) -> Result<String, CliError>) -> CliChannel {
+        CliChannel::Present(QoderCli::with_runner(PathBuf::from("fake-qoderclicn"), run))
+    }
+
+    fn fails(_: &Path, _: &[String]) -> Result<String, CliError> {
+        Err(CliError::Failed {
+            code: Some(1),
+            message: "scope 必须是 project".into(),
+        })
+    }
+
+    fn succeeds(_: &Path, _: &[String]) -> Result<String, CliError> {
+        Ok("ok".into())
+    }
+
+    /// 只接受带 `--scope user` 的调用，其余一律算失败：
+    /// 于是「结果=CLI」这件事本身就证明命令带对了 scope。
+    fn strict_scope_user(_: &Path, args: &[String]) -> Result<String, CliError> {
+        if args
+            .windows(2)
+            .any(|pair| pair[0] == "--scope" && pair[1] == "user")
+        {
+            Ok("ok".into())
+        } else {
+            Err(CliError::Failed {
+                code: None,
+                message: format!("没带 --scope user：{args:?}"),
+            })
+        }
+    }
+
+    /// 写命令成功，但 `mcp get` 读不到（比如它其实落到了别的 scope）。
+    fn written_but_not_readable(_: &Path, args: &[String]) -> Result<String, CliError> {
+        if args.get(1).map(String::as_str) == Some("get") {
+            return Err(CliError::Failed {
+                code: Some(1),
+                message: "not found".into(),
+            });
+        }
+        Ok("ok".into())
+    }
+
+    fn enable(fx: &mut Fixture, channel: CliChannel) -> ApplyReport {
+        let home = fx.home.clone();
+        let target = WriteTarget {
+            home: &home,
+            base_override: None,
+            channel,
+        };
+        write_enable(
+            &fx.store,
+            &mut fx.index,
+            &agent("qoder-cn"),
+            &server("playwright"),
+            &Secrets::default(),
+            &target,
+        )
+        .unwrap()
+    }
+
+    fn state_of(fx: &Fixture) -> crate::domain::AssetState {
+        fx.index
+            .agent_states()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.asset_id == "playwright")
+            .expect("落过盘的项必须有状态行")
+            .state
+    }
+
+    #[test]
+    fn a_failing_cli_falls_back_to_file_writing_and_says_so() {
+        let mut fx = fixture();
+        let before = std::fs::read_to_string(&fx.target).unwrap();
+        let report = enable(&mut fx, channel(fails));
+
+        assert_eq!(report.method_used, crate::adapters::cli::MethodUsed::File);
+        let after = std::fs::read_to_string(&fx.target).unwrap();
+        assert!(
+            after.contains("playwright"),
+            "文件回落后必须真的写上：{after}"
+        );
+        assert!(after.contains("theirs"), "非管辖键不能丢：{after}");
+        let note = report.note.expect("降级要写明原因");
+        assert!(note.contains("已改走文件写入"), "{note}");
+        assert!(
+            note.contains("scope 必须是 project"),
+            "CLI 的原话要带出来：{note}"
+        );
+        assert_ne!(after, before);
+    }
+
+    #[test]
+    fn the_cli_is_only_used_when_the_command_is_correctly_scoped() {
+        let mut fx = fixture();
+        let report = enable(&mut fx, channel(strict_scope_user));
+        assert_eq!(report.method_used, crate::adapters::cli::MethodUsed::Cli);
+        assert!(
+            report.note.as_deref().unwrap().contains("mcp get 读回确认"),
+            "{}",
+            report.note.unwrap()
+        );
+        // CLI 路径不自己写文件，那份内容归 CLI 负责，我们只留底不改写
+        assert!(!std::fs::read_to_string(&fx.target)
+            .unwrap()
+            .contains("playwright"));
+    }
+
+    #[test]
+    fn read_back_reports_effective_only_when_the_cli_confirms_it() {
+        let mut confirmed = fixture();
+        enable(&mut confirmed, channel(succeeds));
+        assert_eq!(
+            state_of(&confirmed),
+            crate::domain::AssetState::Effective,
+            "CLI 写成功且读回确认 → 已生效"
+        );
+
+        let mut unconfirmed = fixture();
+        let report = enable(&mut unconfirmed, channel(written_but_not_readable));
+        assert_eq!(report.method_used, crate::adapters::cli::MethodUsed::Cli);
+        assert!(
+            report.note.as_deref().unwrap().contains("只算已写入"),
+            "{}",
+            report.note.unwrap()
+        );
+        assert_eq!(
+            state_of(&unconfirmed),
+            crate::domain::AssetState::Written,
+            "读回没看到就不能说已生效"
+        );
+    }
+
+    #[test]
+    fn a_cli_write_is_backed_up_before_it_runs_and_can_be_reverted() {
+        let mut fx = fixture();
+        let before = std::fs::read_to_string(&fx.target).unwrap();
+        let report = enable(&mut fx, channel(succeeds));
+
+        let backed_up = std::fs::read_to_string(
+            report
+                .backup_dir
+                .join("qoder-cn")
+                .join("mcp")
+                .join("playwright")
+                .join("settings.json"),
+        )
+        .expect("CLI 路径也必须留底");
+        assert_eq!(backed_up, before, "留底必须是 CLI 动手之前的原文");
+
+        ApplyService::revert_last(&mut fx.index).unwrap();
+        assert_eq!(std::fs::read_to_string(&fx.target).unwrap(), before);
+    }
+
+    #[test]
+    fn an_unavailable_cli_says_why_it_went_the_file_way() {
+        let mut fx = fixture();
+        let report = enable(&mut fx, CliChannel::Unavailable);
+        assert_eq!(report.method_used, crate::adapters::cli::MethodUsed::File);
+        assert!(
+            report
+                .note
+                .as_deref()
+                .unwrap()
+                .contains("没找到 qoderclicn"),
+            "{}",
+            report.note.unwrap()
+        );
+    }
+
+    #[test]
+    fn agents_without_a_cli_channel_need_no_explanation() {
+        assert!(
+            matches!(CliChannel::for_agent("claude"), CliChannel::NotApplicable),
+            "Claude 没有官方写命令，不该为它去翻 PATH"
+        );
+        let mut fx = fixture();
+        let plan = plan_enable(
+            &agent("claude"),
+            &server("playwright"),
+            &Secrets::default(),
+            &fx.home,
+            None,
+        )
+        .unwrap();
+        let report = ApplyService::apply(&fx.store, &mut fx.index, &[plan]).unwrap();
+        assert_eq!(report.note, None, "不适用这条路径时不需要借口");
+    }
+
+    #[test]
+    fn a_removal_the_cli_claims_but_still_reads_back_is_verified_by_file() {
+        let mut fx = fixture();
+        let plan = plan_enable(
+            &agent("qoder-cn"),
+            &server("playwright"),
+            &Secrets::default(),
+            &fx.home,
+            None,
+        )
+        .unwrap();
+        ApplyService::apply(&fx.store, &mut fx.index, &[plan]).unwrap();
+        assert!(std::fs::read_to_string(&fx.target)
+            .unwrap()
+            .contains("playwright"));
+
+        // fake CLI 报删除成功，但 mcp get 仍读得到（succeeds 对所有调用都返回 Ok）
+        let target = WriteTarget {
+            home: &fx.home,
+            base_override: None,
+            channel: channel(succeeds),
+        };
+        let report = write_disable(
+            &fx.store,
+            &mut fx.index,
+            &agent("qoder-cn"),
+            "playwright",
+            &target,
+        )
+        .unwrap();
+        assert_eq!(report.method_used, crate::adapters::cli::MethodUsed::File);
+        assert!(
+            report.note.as_deref().unwrap().contains("仍读得到"),
+            "{}",
+            report.note.unwrap()
+        );
+        let after = std::fs::read_to_string(&fx.target).unwrap();
+        assert!(
+            !after.contains("playwright"),
+            "回落之后必须真的删掉：{after}"
+        );
+        assert!(after.contains("theirs"), "用户那一条不能跟着丢：{after}");
     }
 }

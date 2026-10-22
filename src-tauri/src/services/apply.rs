@@ -41,6 +41,10 @@ pub struct ApplyReport {
     pub ok: bool,
     pub backup_dir: PathBuf,
     pub error: Option<String>,
+    /// 这批写入到底走了哪条路径。CLI 与文件写入的可信度不一样，报告不能只说「成功」。
+    pub method_used: crate::adapters::cli::MethodUsed,
+    /// 为什么走这条（例如 CLI 失败的原因）。没有额外说明时是 None。
+    pub note: Option<String>,
 }
 
 /// 回滚一项所需的信息：目标文件、写入前的备份（None 表示当时目标不存在，回滚即删除）。
@@ -56,32 +60,84 @@ struct RollbackEntry {
 
 pub struct ApplyService;
 
+/// 一次「写入前留底」的结果：备份目录 + 每项的回滚信息。
+/// 文件流水线与 CLI 路径共用它，所以两条路径的 `revert_last` 行为完全一致。
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub backup_dir: PathBuf,
+    entries: Vec<RollbackEntry>,
+}
+
 impl ApplyService {
+    /// 把 plan 里**已存在**的目标逐个复制进新的 backups/<时间戳>/。
+    /// 必须在任何写入（包括叫 CLI 动手）之前调用：写完之后原始内容就不在了。
+    pub fn snapshot(store: &Store, plan: &[PlanItem]) -> Result<Snapshot, AppError> {
+        let backup_dir = store
+            .root()
+            .join("backups")
+            .join(chrono::Utc::now().timestamp_millis().to_string());
+        let mut entries = Vec::with_capacity(plan.len());
+        for item in plan {
+            let backup = Self::back_up(&backup_dir, item)?;
+            entries.push(RollbackEntry {
+                target: item.target_path.clone(),
+                backup,
+                agent_id: item.agent_id.clone(),
+                asset_type: item.asset_type,
+                asset_id: item.asset_id.clone(),
+            });
+        }
+        Ok(Snapshot {
+            backup_dir,
+            entries,
+        })
+    }
+
+    /// 外部（CLI）已经改完目标文件：把留底记成一次可回滚的执行并写下状态。
+    /// 这里**不写文件**，只补 `runs` 与 `agent_state`。
+    pub fn record_external_write(
+        index: &mut Index,
+        plan: &[PlanItem],
+        snapshot: &Snapshot,
+        state: AssetState,
+    ) -> Result<ApplyReport, AppError> {
+        for item in plan {
+            index.set_agent_state(&AgentStateRow {
+                agent_id: item.agent_id.clone(),
+                asset_type: item.asset_type,
+                asset_id: item.asset_id.clone(),
+                state,
+                last_error: None,
+                applied_at: chrono::Utc::now().timestamp_millis(),
+            })?;
+        }
+        index.record_run(
+            false,
+            &serde_json::to_string(plan)?,
+            &serde_json::to_string(&snapshot.entries)?,
+            &snapshot.backup_dir,
+        )?;
+        Ok(ApplyReport {
+            written: plan.len(),
+            skipped: 0,
+            ok: true,
+            backup_dir: snapshot.backup_dir.clone(),
+            error: None,
+            method_used: crate::adapters::cli::MethodUsed::Cli,
+            note: None,
+        })
+    }
+
     pub fn apply(
         store: &Store,
         index: &mut Index,
         plan: &[PlanItem],
     ) -> Result<ApplyReport, AppError> {
-        let backup_dir = store
-            .root()
-            .join("backups")
-            .join(chrono::Utc::now().timestamp_millis().to_string());
-
         // 1. 先备份全部已存在的目标：这一步失败时还没有任何写入，直接报错返回
-        let mut work: Vec<(PlanItem, RollbackEntry)> = Vec::with_capacity(plan.len());
-        for item in plan {
-            let backup = Self::back_up(&backup_dir, item)?;
-            work.push((
-                item.clone(),
-                RollbackEntry {
-                    target: item.target_path.clone(),
-                    backup,
-                    agent_id: item.agent_id.clone(),
-                    asset_type: item.asset_type,
-                    asset_id: item.asset_id.clone(),
-                },
-            ));
-        }
+        let snapshot = Self::snapshot(store, plan)?;
+        let backup_dir = snapshot.backup_dir.clone();
+        let work: Vec<(PlanItem, RollbackEntry)> =
+            plan.iter().cloned().zip(snapshot.entries).collect();
 
         // 2. 逐项写入并回读确认；任一项失败就把已写项全部还原
         let mut touched: Vec<usize> = Vec::new();
@@ -160,6 +216,8 @@ impl ApplyService {
             ok: true,
             backup_dir,
             error: None,
+            method_used: crate::adapters::cli::MethodUsed::File,
+            note: None,
         })
     }
 
@@ -198,6 +256,9 @@ impl ApplyService {
             ok: true,
             backup_dir: run.backup_dir,
             error: None,
+            // 回滚是拿备份文件还原，与 CLI 无关
+            method_used: crate::adapters::cli::MethodUsed::File,
+            note: Some("已回滚到本次执行前的状态".into()),
         })
     }
 

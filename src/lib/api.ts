@@ -50,4 +50,8 @@ export interface ApplyReport {
   ok: boolean;
   backupDir: string;
   error: string | null;
+  /** 这批写入实际走了哪条路径：CLI 确认过的才配得上「已生效」 */
+  methodUsed: "cli" | "file";
+  /** 为什么走这条（CLI 失败原因 / 没装 CLI / 已回滚）。没有额外说明时是 null。 */
+  note: string | null;
 }

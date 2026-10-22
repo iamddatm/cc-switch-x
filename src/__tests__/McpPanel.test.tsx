@@ -40,6 +40,8 @@ beforeEach(() => {
     ok: true,
     backupDir: "C:/x/backups/1",
     error: null,
+    methodUsed: "file",
+    note: null,
   });
 });
 
@@ -106,6 +108,8 @@ test("toggling an agent switch calls setMcpEnabled", async () => {
     ok: true,
     backupDir: "C:/x/backups/1",
     error: null,
+    methodUsed: "file",
+    note: null,
   });
   render(<McpPanel />);
   fireEvent.click(await screen.findByText("Playwright"));

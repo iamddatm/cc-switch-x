@@ -39,6 +39,10 @@ Plan 2 之后又做了一轮定向调研。**关键结论:这台机器上没有�
 | Codex hooks 在独立 `~/.codex/hooks.json`,顶层 `hooks`,事件 `Interrupt/SessionStart/Stop/UserPromptSubmit`,条目**无 matcher** | 本机文件 | 已验证 |
 | `~/.qoder-cn/settings.json` 当前**没有** `hooks` 也没有 `agents` 键 | 本机实测 | 已验证（新增子树属追加,不覆盖） |
 | Qoder CN CLI 能力：`mcp add-json -s user\|local\|project <name> <json>`（默认 `local`）、`mcp add/remove/get/list/enable/disable`；`skills list/enable/disable/install/link/uninstall`；`agents` **只有 list**；`hooks` **只有 migrate --from-claude**；`config set/get/unset` | 本机 `qoderclicn --help` 实测 | 已验证 |
+| `mcp get` 不带 `--scope` 时「Defaults to the first scope the server is defined in」——任意 scope 命中都算存在，回读必须钉 `--scope user` | 本机 `qoderclicn mcp get --help` | 已验证（Task 9） |
+| `mcp remove` 不带 `--scope` 时「removes from the scope the server is defined in」，可能删掉项目级那份而不是用户级 | 本机 `qoderclicn mcp remove --help` | 已验证（Task 9） |
+| `skills link <path>` 的 `--scope` 默认就是 `user`，但**不带 `--consent` 会弹交互确认**；非交互调用会挂住 | 本机 `qoderclicn skills link --help` | 已验证（Task 9） |
+| hook 事件名共 28 个的具体名单（`PreToolUse` … `PermissionDenied`，含 `Setup/QueryEnd/StopFailure/TeammateIdle/InstructionsLoaded/CwdChanged/FileChanged/WorktreeCreate/WorktreeRemove/Elicitation/ElicitationResult/TaskCreated/TaskCompleted`） | 本机二进制里的事件枚举 `X.PreToolUse="PreToolUse"…` | 已验证，已抄进 `domain::hook::KNOWN_EVENTS` |
 | Qoder 国际版**没有独立 CLI**,`qoder` 只是 IDE 启动器 | 本机实测（`~/.qoder/bin` 不存在） | 已验证 |
 | `hooks migrate --from-claude` 是单向迁移、会改写文件 | CLI help | 已验证（因此**不能**当 CRUD 用） |
 
@@ -741,7 +745,51 @@ fn an_untracked_file_is_never_drift() {
   - `mcp_add_json_always_passes_scope_user`:参数数组构造的纯函数断言,含 `--scope` 与 `user` 相邻两项。
   - `a_nonzero_exit_falls_back_to_file_writing_and_says_so`:注入一个必然失败的 CLI 命令,断言最终文件写成功且 `ApplyReport.method_used == File`。
   - `read_back_reports_effective_only_when_the_cli_confirms_it`:CLI 回读失败时状态停在 `Written`,不升 `Effective`。
-- [ ] Step 2–5:红 → 实现 → 绿 → 提交 `git commit -m "feat: Qoder MCP 与 Skills 走 CLI 优先并回读确认"`。
+- [x] Step 2–5:红 → 实现 → 绿 → 提交 `git commit -m "feat: Qoder MCP 与 Skills 走 CLI 优先并回读确认"`。
+
+#### Task 9 执行记录（2026-10-22）
+
+- 实际接口：`adapters/cli.rs` 里一组**纯函数**的参数构造器（`add_mcp_args` /
+  `remove_mcp_args` / `get_mcp_args` / `link_skill_args` / `uninstall_skill_args`）+
+  `QoderCli { program: PathBuf, run: fn(&Path, &[String]) -> Result<String, CliError> }`。
+  `run` 是函数指针字段，测试用 `QoderCli::with_runner` 注入假执行器 —— 不需要环境变量、
+  全局可变状态或真装一个 CLI。**`discover()` 只翻 `PATH`**（Windows 上再试 `.exe/.cmd/.bat`），
+  不把 `~/.qoder-cn/bin/...` 当假设路径。
+- `CliChannel::{NotApplicable, Unavailable, Present(cli)}` 三态是刻意的：
+  「没走 CLI」必须能说清是**本来不适用**（Claude / Codex 没有官方写命令，不去翻 PATH）、
+  **本机没装**，还是**装了但失败**。`ApplyReport` 因此加了 `method_used` + `note`
+  （前端 `src/lib/api.ts` 同步）。测试里有一个 `strict_scope_user` 假执行器：只接受
+  带相邻 `--scope user` 的调用，所以「结果=CLI」这个事实本身就证明命令带对了 scope。
+- **回读的口径**：`mcp get --scope user` 成功退出 → `Effective`；写命令成功但读回不到 →
+  停在 `Written` 并在 `note` 里写明「qoderclicn 写入后 mcp get 没读到」。删除同理：
+  CLI 报成功但 `mcp get` 仍读得到时**回落文件路径复核删除**并说明（`仍读得到`），
+  不把「工具嘴上说删了」当完成。
+- **CLI 路径也进回滚**：`ApplyService::snapshot()` 必须在**叫 CLI 之前**调用（它改的是同一个
+  文件，写完就没有原文了），随后 `record_external_write()` 只记 `runs` + `agent_state`、不写文件。
+  测试断言备份内容正是 CLI 动手前的原文，且 `revert_last` 能还原。
+- 顺带把 `apply()` 的备份步骤抽成公用的 `snapshot()`（文件路径与 CLI 路径共用同一份留底逻辑），
+  `ApplyService::apply` 行为不变。
+- 与示例的两处不同：
+  1. 示例说「在 `AgentStatus` 里标 `readBack = "cli" | "file"`」。`AgentStatus` 是
+     **每个 agent 的现状快照**，而「这次写入是怎么确认的」是**每次写入**的属性 ——
+     放在 AgentStatus 上会让一个 bool 冒充六类资产的状态，所以落在 `ApplyReport.methodUsed`。
+  2. **Skills 没有接 CLI**，只把参数构造器与调用写好（含 `--consent`：不带它会弹交互确认，
+     非交互调用直接挂住）。理由：我们现在的 symlink 部署已经满足 spec 5.3 想要的
+     「改真源即时生效」，而 `skills link` 的**落点**与 `skills uninstall <name>` 的**名字**
+     都不由我们掌控（name 取自 SKILL.md 的 `name`，不是我们的资产 id）——
+     换 CLI 的代价是失去「只删自己创建的」这条可证明的归属。Task 11 真机确认落点与
+     资产 id 一致之后再决定要不要接。
+- 一处必须记下的并发约束：**锁顺序固定 index → secrets**（`commands::import` 就是这个顺序）。
+  `write_enable` 同时需要 secrets 与 index，若按旧写法先 secrets 再 index 会与导入命令构成
+  锁序反转，两个命令并发时能死锁。
+- 为消掉 `too_many_arguments`，引入 `adapters::paths::WriteTarget { home, base_override, channel }`
+  把「往哪儿写、能不能走 CLI」打包；`write_enable` 从 8 个参数降到 6 个。
+- **Step 6（真机写一次 `qoderclicn mcp add-json --scope user` 来确证 A1）没有执行**：
+  它要往真实的 `~/.qoder-cn/settings.json` 写东西，按约定需要用户点头。未点头之前
+  `qoder-cn` 的 MCP 仍是 `verified` 但 `mcp_needs_restart = Some(true)`，
+  A1（IDE/CLI 到底读哪一份）继续挂「待确证」。
+- 门禁：`cargo test` 232 通过（本任务 +15：cli 8 + mcp CLI 7）、`pnpm test` 23 通过、
+  `pnpm build` 通过、`cargo fmt --check` 干净、`cargo clippy` 只剩 Plan 2 那条遗留告警。
 - [ ] **Step 6(真机,需用户点头)**:在临时配置根 + 临时 store 下跑一次 `qoderclicn mcp add-json --scope user`,diff `~/.qoder-cn/settings.json` 确认字段位置(A1),再把这条升为 `verified`。不点头就不做。
 
 ---
