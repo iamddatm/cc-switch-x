@@ -30,6 +30,9 @@ pub struct McpServer {
     pub description: String,
     #[serde(default)]
     pub homepage: String,
+    /// cc-switch 的 `docs` 列；canonical 若不存就会在导入时静默丢一个链接。
+    #[serde(default)]
+    pub docs: String,
     #[serde(default)]
     pub tags: Vec<String>,
 }

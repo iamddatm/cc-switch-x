@@ -67,6 +67,11 @@ fn declared(root: &str, rest: &str) -> String {
     format!("{root}/{rest}")
 }
 
+/// cc-switch 的 `enabled_<app>` 列里，哪些 app 是我们注册表里认识的 agent。
+pub fn is_known_agent(app: &str) -> bool {
+    builtin_agents().iter().any(|agent| agent.id == app)
+}
+
 pub fn builtin_agents() -> Vec<AgentDescriptor> {
     let all = |sessions: bool| AgentCapabilities {
         mcp: true,

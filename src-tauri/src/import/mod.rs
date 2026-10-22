@@ -1,6 +1,7 @@
+pub mod mcp;
 pub mod source;
 
-use crate::domain::agent::builtin_agents;
+use crate::domain::is_known_agent;
 use crate::domain::AssetType;
 use crate::store::Store;
 use rusqlite::Connection;
@@ -96,10 +97,6 @@ fn enabled_apps(conn: &Connection, table: &str) -> Result<Vec<String>, ImportErr
         .into_iter()
         .filter_map(|name| name.strip_prefix("enabled_").map(|app| app.to_string()))
         .collect())
-}
-
-fn is_known_agent(app: &str) -> bool {
-    builtin_agents().iter().any(|a| a.id == app)
 }
 
 fn list_column(conn: &Connection, table: &str, column: &str) -> Result<Vec<String>, ImportError> {

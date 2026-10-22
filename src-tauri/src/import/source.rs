@@ -29,6 +29,12 @@ pub enum ImportError {
     MissingTable(String),
     #[error("真源读取失败：{0}")]
     Store(#[from] crate::store::StoreError),
+    #[error("写入失败：{0}")]
+    Secrets(#[from] crate::store::secrets::SecretsError),
+    #[error("暂不支持的 MCP type：{0}")]
+    UnsupportedTransport(String),
+    #[error("索引写入失败：{0}")]
+    Index(#[from] crate::index::IndexError),
 }
 
 /// 打开的导入源。SnapshotDir 要把 `db.sql` 还原进临时库，临时目录必须活得比连接久，

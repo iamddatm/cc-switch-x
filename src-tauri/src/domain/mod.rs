@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod asset;
+pub mod enablement;
 pub mod frontmatter;
 pub mod hook;
 pub mod mcp;
@@ -8,6 +9,7 @@ pub mod rule;
 pub mod secret;
 pub mod subagent;
 
+pub use agent::is_known_agent;
 pub use asset::{AssetState, AssetSummary, AssetType};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

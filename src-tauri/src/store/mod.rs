@@ -61,6 +61,11 @@ impl Store {
         self.root.join("assets").join(asset_type.dir_name())
     }
 
+    /// `agents/<id>.json`（启用矩阵）的路径。id 只来自内置注册表，不是用户输入。
+    pub fn agent_config_path(&self, agent_id: &str) -> PathBuf {
+        self.root.join("agents").join(format!("{agent_id}.json"))
+    }
+
     pub fn entry_path(&self, asset_type: AssetType, id: &str) -> Result<PathBuf, StoreError> {
         if !is_safe_id(id) {
             return Err(StoreError::InvalidId(id.to_string()));

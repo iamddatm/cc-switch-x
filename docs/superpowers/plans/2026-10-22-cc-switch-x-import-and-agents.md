@@ -333,10 +333,14 @@ fn unknown_enabled_columns_are_reported_not_fatal() {
 **Files:** Create `src-tauri/src/import/mcp.rs`
 
 **Interfaces:**
+- `McpRow { id, name, server_config, description, homepage, docs, tags, enabled: Vec<(app, bool)> }`；`read_rows` 用 `PRAGMA table_info` **按实际列名**读，不写死列清单。
 - `import::mcp::convert(server_config: &str, row: &McpRow) -> Result<(McpServer, Vec<(SecretRef, String)>), ImportError>`
-- `import::mcp::run(store: &Store, secrets: &mut Secrets, index: &mut Index, conn: &Connection, policy: ConflictPolicy) -> Result<ImportCount, ImportError>`
-- `ConflictPolicy::{Skip, Overwrite, KeepBoth}`（同 ID 时；`KeepBoth` 用 `<id>-2` 递增后缀）
-- `enabled_*` 列 → `agents/<agent>.json` 的 `enabled.mcp` 列表；agent id 不在注册表里的列忽略并计入 `ignored_columns`。
+  - **摘密钥的规则**：`env` 与 `headers` 的值**一律**外移（spec 4.5「把明文 env 值抽到这里」，不做「像不像密钥」的猜测）；`url` 的查询参数只摘名字含 `key|token|secret|password|auth` 的，`?v=2` 这类普通参数留在原处。
+  - `type` → `Transport`：`stdio/http/sse/ws`；未知值 → `ImportError::UnsupportedTransport`，**只失败这一行**，其余继续导入并计入 `failed`；`server.validate()` 不过（stdio 缺 command 等）同样只失败这一行。
+- **canonical 新增 `docs` 字段**：cc-switch 有 `docs` 列，canonical 不收就会在导入时静默丢一个链接（spec 12 把 canonical 字段名留给实现者，此处追加）。
+- `import::mcp::run(store, secrets, index, conn, policy) -> Result<ImportCount, ImportError>`；`ImportCount { imported, unchanged, skipped, failed }`；`ConflictPolicy::{Skip, Overwrite, KeepBoth}`（KeepBoth 用 `<id>-2` 递增）。
+- 启用矩阵写 `agents/<app>.json`（`domain::enablement::AgentEnablement`，键用 `AssetType::dir_name()`）：**先读后合并**，不能把别的资产类型整份覆盖；未知 app 不建文件、只在预览里报告。
+- `run` 结束统一 `secrets.save(store.root()/secrets.local.json)`。
 
 - [ ] **Step 1: 写失败测试**
 
