@@ -1,0 +1,5 @@
+{"type":"workspace-directories","directories":["D:/repo"]}
+{"type":"runtime-config","config":{"model":"qoder"}}
+{"type":"ai-title","aiTitle":"Qoder 会话标题"}
+{"type":"user","sessionId":"q1","timestamp":"2026-10-20T10:00:00Z","message":{"role":"user","content":[{"type":"text","text":"搜索一下"}]}}
+{"type":"assistant","sessionId":"q1","timestamp":"2026-10-20T10:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"好的"},{"type":"tool_use","id":"t1","name":"Grep","input":{"pattern":"x"}}]}}

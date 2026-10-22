@@ -147,7 +147,10 @@ impl Builder {
     }
 }
 
-fn parse_with_family(path: &Path, family: &ClaudeFamily) -> Result<ParsedSession, SessionError> {
+pub(crate) fn parse_with_family(
+    path: &Path,
+    family: &ClaudeFamily,
+) -> Result<ParsedSession, SessionError> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut line = String::new();
@@ -508,6 +511,13 @@ mod tests {
         fixture(name)
     }
 
+    /// Windows 的 `Path` 显示为反斜杠，`contains("/subagents/")` 永远为假；
+    /// 按路径组件判断，测试在任何平台都真的能发现子代理文件被误收。
+    fn in_subagents(path: &Path) -> bool {
+        path.components()
+            .any(|part| part.as_os_str().eq_ignore_ascii_case("subagents"))
+    }
+
     #[test]
     fn claude_extracts_text_thinking_calls_results_and_images() {
         let parsed = parse_claude(&fixture("claude.jsonl")).unwrap();
@@ -555,9 +565,7 @@ mod tests {
     fn claude_discovery_skips_subagent_and_journal_files() {
         let files = discover_claude(&fixture_dir("claude-projects"), false);
         assert!(files.iter().any(|p| p.ends_with("s1.jsonl")));
-        assert!(!files
-            .iter()
-            .any(|p| p.to_string_lossy().contains("/subagents/")));
+        assert!(!files.iter().any(|p| in_subagents(p)), "{files:?}");
         assert!(!files.iter().any(|p| p.ends_with("journal.jsonl")));
         assert!(!files.iter().any(|p| p
             .file_name()

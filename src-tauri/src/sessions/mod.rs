@@ -159,9 +159,9 @@ static PROVIDERS: &[SessionProvider] = &[
         display_name: "Qoder CN",
         roots: &["~/.qoder-cn/projects"],
         verified: false,
-        discover: discover_jsonl,
-        parse: None,
-        resume: None,
+        discover: providers::qoder_cn::discover_qoder_cn,
+        parse: Some(providers::qoder_cn::parse_qoder_cn_all),
+        resume: Some(providers::qoder_cn::resume_qoder_cn),
     },
 ];
 
