@@ -1,4 +1,5 @@
 pub mod domain;
+pub mod store;
 
 #[tauri::command]
 fn ping() -> &'static str {
