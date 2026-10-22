@@ -181,9 +181,12 @@ mod tests {
 - **Claude 的用户级 MCP 在 `~/.claude.json`，它是 `~/.claude/` 的同级文件而不是配置根内的文件**，所以 `file` 一律写完整 `~/...` 路径，不做「配置根 + 相对名」拼接。
 - `McpTarget::{JsonRoot { file: &'static str, key: &'static str }, TomlTable { file: &'static str, table: &'static str } }`
 - `AgentPaths { mcp: McpTarget, skills_dir: &'static str, prompt_file: &'static str, rules_dir: Option<&'static str>, agents_dir: Option<&'static str>, hooks: HooksTarget }`（`HooksTarget::{SettingsJson, File(&'static str), Unsupported}`）
-- `agent::builtin_agents()` 扩到 5 个：`claude`、`codex`、`gemini`、`qoder`、`qoder-cn`；每个带 `paths`、`mcp_needs_restart: bool`、`verified: bool`（`qoder` 为 `false`，UI 据此隐藏开关）。
-- `LocalAgentState { detected: bool, config_root: PathBuf, link_kind: Option<LinkKind> }`，读写 `local/agents/<agent-id>.json`。
-- `agents::detect_all(store: &Store, home: &Path) -> Result<Vec<DetectedAgent>, AppError>`（只看配置根/落点文件是否存在，并把结果写回 `local/agents/<id>.json`）。
+- `agent::builtin_agents()` 扩到 5 个：`claude`、`codex`、`gemini`、`qoder`、`qoder-cn`；每个带 `paths`、`mcp_needs_restart: Option<bool>`、`verified: bool`（`qoder` 为 `false`，UI 据此隐藏开关）。
+  - `mcp_needs_restart` 用三态：只有 Qoder CN 有 `requiresRestart` 的实测依据（`Some(true)`），其余一律 `None` = 未实测，UI 保守提示「可能需要重启」，**不得因为没有依据就写成 `Some(false)`**。
+- `LocalAgentState { base_override: Option<PathBuf> }`，读写 `local/agents/<agent-id>.json`（`serde(default)`，Task 8 再追加 `link_kind` 字段，只加不改）。
+- `AgentStatus { id, display_name, detected, verified, mcp_needs_restart, mcp_path }`（serde camelCase，给前端矩阵表头用）。
+- `agents::detect_all(store: &Store, home: &Path) -> Result<Vec<AgentStatus>, AppError>`：只看配置根在不在；**只读** `local/agents/<id>.json` 的覆盖，检测本身不回写状态。
+- `agents::save_override(store, agent_id, base: Option<&Path>)`：写 `local/agents/<id>.json` 的 `baseOverride`（`~` 锚点覆盖）。
 
 - [ ] **Step 1: 写失败测试**（`adapters/paths.rs` 末尾）
 
@@ -205,7 +208,7 @@ mod tests {
             }
             other => panic!("Claude 的 MCP 落点被改成了 {other:?}"),
         }
-        assert!(!claude.mcp_needs_restart);
+        assert_eq!(claude.mcp_needs_restart, None, "Claude 的重启语义没有实测依据");
     }
 
     #[test]
@@ -229,7 +232,7 @@ mod tests {
 }
 ```
 
-`services/agents.rs` 的测试：`detect_all` 对存在的目录报 `detected=true`；`local/agents/claude.json` 写入 `config_root` 覆盖后，检测与后续落点都用覆盖值。
+`services/agents.rs` 的测试：`detect_all` 对存在的配置根报 `detected=true`；`local/agents/claude.json` 写入 `baseOverride` 后，检测与后续落点都用覆盖目录；清除覆盖后回到真实 home。
 
 - [ ] **Step 2: 运行确认失败** — `cargo test … agents` → FAIL。
 - [ ] **Step 3: 实现**（落点常量按「事实来源」表填；`verified=false` 的 agent 在 `capabilities` 之外再带 `hidden_panes`，前端读取后不渲染开关）

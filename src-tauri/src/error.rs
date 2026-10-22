@@ -5,6 +5,8 @@ use crate::store::StoreError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
+    #[error("IO 错误：{0}")]
+    Io(#[from] std::io::Error),
     #[error("存储错误：{0}")]
     Store(#[from] StoreError),
     #[error("索引错误：{0}")]
@@ -13,6 +15,8 @@ pub enum AppError {
     Domain(#[from] DomainError),
     #[error("设置错误：{0}")]
     Settings(#[from] SettingsError),
+    #[error("JSON 处理失败：{0}")]
+    Json(#[from] serde_json::Error),
     #[error("未找到：{0}")]
     NotFound(String),
     #[error("非法输入：{0}")]
