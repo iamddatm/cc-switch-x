@@ -288,11 +288,11 @@ fn rerunning_the_same_plan_is_idempotent() {
 **Files:** Create `src-tauri/src/import/{mod,source}.rs`
 
 **Interfaces:**
-- `ImportSource::{InstalledDb(PathBuf), SnapshotDir(PathBuf)}`；`source::connect(&ImportSource) -> Result<Connection, ImportError>`
-  - `InstalledDb` → `Connection::open_with_flags(uri, SQLITE_OPEN_READ_ONLY)`，URI 形如 `file:<path>?mode=ro`。
-  - `SnapshotDir` → 目录内必须有 `manifest.json`（校验 `format == "cc-switch-webdav-sync"`）与 `db.sql`；把 `db.sql` 用 `execute_batch` 灌进 `tempfile` 里的临时库再打开。**下载与解包不在本计划**（Plan 5）。
+- `ImportSource::{InstalledDb(PathBuf), SnapshotDir(PathBuf)}`；`source::connect(&ImportSource) -> Result<ImportDb, ImportError>`
+  - `InstalledDb` → `Connection::open_with_flags(path, SQLITE_OPEN_READ_ONLY)`。**实测更正**：不要拼 `file:<path>?mode=ro` URI —— rusqlite 的 `open()` 默认带 URI 位，路径里的 `?`/`#`/`%` 会被当查询串/转义解析；只给 `READ_ONLY` 位即可保证不写库。含空格与中文的路径实测可开；含 `?`/`#`/`%` 的路径 SQLite 打不开，如实报错即可。
+  - `SnapshotDir` → 目录内必须有 `manifest.json`（校验 `format == "cc-switch-webdav-sync"`）与 `db.sql`；把 `db.sql` 用 `execute_batch` 灌进临时库再打开，`ImportDb` 同时持有临时目录以保证连接存活期间不被清理。**下载与解包不在本计划**（Plan 5）。
 - `ImportPreview { mcp_count, prompts_count, skills_count, conflicts: Vec<String>, ignored_columns: Vec<String>, missing_skill_dirs: Vec<String> }`
-- `import::preview(&Path, ccswitch_home: &Path) -> Result<ImportPreview, ImportError>`（只读，不写任何文件）
+- `import::preview(store: &Store, source: &ImportSource, skills_root: &Path) -> Result<ImportPreview, ImportError>`（只读，不写任何文件；`conflicts` 形如 `mcp/pw`、`skill/demo`）
 
 - [ ] **Step 1: 写失败测试**
 

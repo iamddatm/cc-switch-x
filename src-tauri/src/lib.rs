@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod commands;
 pub mod domain;
 pub mod error;
+pub mod import;
 pub mod index;
 pub mod services;
 pub mod settings;
