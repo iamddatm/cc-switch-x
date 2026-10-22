@@ -19,6 +19,8 @@ pub enum AppError {
     Secrets(#[from] crate::store::secrets::SecretsError),
     #[error("导入错误：{0}")]
     Import(#[from] crate::import::ImportError),
+    #[error("会话解析失败：{0}")]
+    Session(#[from] crate::domain::session::SessionError),
     #[error("JSON 处理失败：{0}")]
     Json(#[from] serde_json::Error),
     #[error("未找到：{0}")]

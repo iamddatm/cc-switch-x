@@ -1,4 +1,9 @@
 mod schema;
+pub mod sessions;
+
+pub use sessions::{
+    SessionFileRow, SessionFilter, SessionMatch, SessionSearchHit, INDEX_CONTENT_CAP,
+};
 
 use crate::domain::{display_name, AssetState, AssetSummary, AssetType, DriftKind};
 use crate::store::Store;
@@ -16,6 +21,8 @@ pub enum IndexError {
     Store(#[from] crate::store::StoreError),
     #[error("资产解析失败：{0}")]
     Domain(#[from] crate::domain::DomainError),
+    #[error("会话数据损坏：{0}")]
+    Session(#[from] crate::domain::session::SessionError),
     #[error("未找到：{0}")]
     NotFound(String),
 }

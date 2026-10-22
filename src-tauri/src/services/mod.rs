@@ -4,4 +4,5 @@ pub mod assets;
 pub mod drift;
 pub mod import;
 pub mod scan;
+pub mod sessions;
 pub mod settings;
