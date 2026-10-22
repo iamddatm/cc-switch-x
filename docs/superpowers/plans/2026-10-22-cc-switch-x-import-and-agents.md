@@ -429,9 +429,13 @@ fn missing_skill_directory_is_reported_not_created() {
 **Files:** Create `src-tauri/src/adapters/mcp.rs`
 
 **Interfaces:**
-- `adapters::mcp::render(agent: &AgentDescriptor, server: &McpServer, resolved: &str) -> Result<Rendered, AppError>`（`Rendered::{JsonObject(Value), TomlDocument(String)}`）
-- `adapters::mcp::enable(store, secrets, target_root: &Path, agent, server) -> Result<(), AppError>` / `disable(...)`
-- 工具专属字段（`disabled`、`timeout`）**不写进 canonical**，只在渲染时按 agent 追加（spec 4.2）。
+- `adapters::mcp::plan_enable(agent, server, secrets, home, base_override) -> Result<PlanItem, AppError>` / `plan_disable(agent, server_id, home, base_override)`。
+  **适配器只产出计划**（读目标当前内容 → 内存里键级合并 → 给出新字节与 diff），真正写盘由 Task 3 的流水线做，这样 dry-run 与 apply 共用同一份渲染代码。
+- 渲染差异：JSON 目标写 `{type, command, args, env, url, headers}`；Codex 的 TOML 目标只写它认得的键（stdio → `command/args` + `[..env]` 子表；远程 → `url` + `http_headers`），**不写 `type`**。此形状来自本机 `~/.codex/config.toml` 观察，属「待复核」，Task 10 用真机 diff 复核。
+- 密钥：`env`/`headers`/`url` 里的 `${secret:…}` 在渲染时解析；解析失败 → `plan_*` 直接 `Err`，不出计划、不写空值。
+- 目标文件解析不了（非法 JSON/TOML）→ `Err`，绝不覆盖看不懂的文件。
+- `needs_restart` 取 `agent.mcp_needs_restart.unwrap_or(true)`：没有实测依据时按「要重启」处理。
+- 索引新增两表：`agent_state(agent_id, asset_type, asset_id, state, last_error, applied_at)`、`runs(id, started_at, dry_run, plan_json, result, backup_dir)`。
 
 - [ ] **Step 1: 写失败测试**（用 fixture 目录当配置根）
 
@@ -480,7 +484,7 @@ fn disable_removes_only_our_key_and_keeps_the_rest() { /* 先 enable 再 disable
 fn unresolved_secret_fails_the_item() { /* canonical 引用指向不存在的密钥 → Err，不写出空值 */ }
 ```
 
-> `toml_merge_touches_only_its_own_table` 里的 `in_our_table` 是测试辅助函数：按 `\[mcp_servers\.codegraph\]` 段落边界把属于本次写入的行剔掉，其余行整串比对。实现时写清楚段边界，不要用「包含子串」近似判断。
+> **与 spec M1 措辞的偏差（必须记录）**：spec 写的是「非管辖键逐字节不变」。**TOML 侧做到了**（`toml_edit` 保留注释、空行、原始格式，测试按行断言）；**JSON 侧做不到逐字节** —— `serde_json` 没有保格式编辑 API，我们重排整个文件的缩进。因此 JSON 侧的断言降级为「键集合、键顺序、未管辖键的值都不变」，靠 `preserve_order` 保证顺序。真机若遇到用户手排版的 `~/.claude.json`，导入会产生一次纯格式 diff：写盘前有备份、可回滚，但仍要在 UI 里如实展示这个 diff，不能声称逐字节不变。
 
 - [ ] **Step 2: 运行确认失败** — `cargo test … adapters::mcp` → FAIL。
 - [ ] **Step 3: 实现**（JSON 走 `serde_json` + `preserve_order`；TOML 走 `toml_edit`，只 `item(key)` 增删；写盘统一用 `store::atomic::write_atomic`）

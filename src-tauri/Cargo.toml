@@ -13,8 +13,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order：改 agent 的 JSON 配置时必须保住原有键序，否则「非管辖键不变」无从谈起
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
+toml_edit = "0.22"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 thiserror = "2"
