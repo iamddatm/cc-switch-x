@@ -26,6 +26,9 @@ export function agentStatus(overrides: Partial<AgentStatus> = {}): AgentStatus {
     mcpPath: "C:/x/.claude.json",
     enabledMcp: [],
     enabledSkills: [],
+    enabledRules: [],
+    enabledSubagents: [],
+    enabledHooks: [],
     activePrompt: null,
     ...overrides,
   };

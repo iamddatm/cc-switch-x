@@ -1,11 +1,50 @@
 import { useState } from "react";
-import { api } from "../lib/api";
-import { switchable, supported, type AgentStatus, type AssetKind } from "../types";
+import { api, type ApplyReport } from "../lib/api";
+import {
+  enabledFor,
+  switchable,
+  supported,
+  type AgentStatus,
+  type AssetType,
+} from "../types";
+
+/** 面板上「同步到」能出现的资产类型。prompts 是整文件接管，走自己的激活流程。 */
+export type MatrixAsset = Exclude<AssetType, "prompt">;
+
+/** 每次开关返回的实测结果：不是配置意图，是后端做完之后到底是什么。 */
+function outcomeLabel(result: string | ApplyReport): string {
+  if (typeof result === "string") {
+    return result;
+  }
+  const via = result.methodUsed === "cli" ? "CLI" : "文件";
+  const count = result.written > 0 ? `写入 ${result.written}` : `无变化 ${result.skipped}`;
+  return `${via} · ${count}${result.note ? ` · ${result.note}` : ""}`;
+}
+
+async function call(
+  kind: MatrixAsset,
+  id: string,
+  agentId: string,
+  enabled: boolean,
+): Promise<string | ApplyReport> {
+  switch (kind) {
+    case "mcp":
+      return api.setMcpEnabled(id, agentId, enabled);
+    case "skill":
+      return api.setSkillEnabled(id, agentId, enabled);
+    case "rule":
+      return api.setRuleEnabled(id, agentId, enabled);
+    case "subagent":
+      return api.setSubagentEnabled(id, agentId, enabled);
+    case "hook":
+      return api.setHookEnabled(id, agentId, enabled);
+  }
+}
 
 /**
  * 「资产 × agent」开关。能力按资产类型逐格判定：
  * 该 agent 没有这一类落点 → 整行不出现；有落点但没实测 → 只说明、不给开关。
- * 没有实测依据时按「需要重启」提示，不把未知报成安全。
+ * 有未解决漂移时后端会直接拒绝（错误显示在下方），这里不给「强制覆盖」的口子。
  */
 export function AgentMatrix({
   assetType,
@@ -13,25 +52,20 @@ export function AgentMatrix({
   agents,
   onChanged,
 }: {
-  assetType: Extract<AssetKind, "mcp" | "skill">;
+  assetType: MatrixAsset;
   id: string;
   agents: AgentStatus[];
   onChanged: () => void;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  /** skill 的实测落地方式（symlink / junction / copy），由后端返回，不是配置意图 */
-  const [kinds, setKinds] = useState<Record<string, string>>({});
+  const [outcomes, setOutcomes] = useState<Record<string, string>>({});
 
   const toggle = async (agent: AgentStatus, enabled: boolean) => {
     setBusy(agent.id);
     try {
-      if (assetType === "mcp") {
-        await api.setMcpEnabled(id, agent.id, enabled);
-      } else {
-        const label = await api.setSkillEnabled(id, agent.id, enabled);
-        setKinds((current) => ({ ...current, [agent.id]: label }));
-      }
+      const label = outcomeLabel(await call(assetType, id, agent.id, enabled));
+      setOutcomes((current) => ({ ...current, [agent.id]: label }));
       setError(null);
       onChanged();
     } catch (e) {
@@ -57,11 +91,11 @@ export function AgentMatrix({
               </li>
             );
           }
-          const on = (assetType === "mcp" ? agent.enabledMcp : agent.enabledSkills).includes(id);
+          const on = enabledFor(agent, assetType).includes(id);
           // 控件不能嵌在 <label> 里：那样点一次会触发两次 change（启用后立刻又被取消）
           const inputId = `matrix-${assetType}-${id}-${agent.id}`;
           return (
-            <li key={agent.id} className="flex items-center gap-2">
+            <li key={agent.id} className="flex flex-wrap items-center gap-2">
               <input
                 id={inputId}
                 type="checkbox"
@@ -77,9 +111,9 @@ export function AgentMatrix({
               {on && assetType === "mcp" && agent.mcpNeedsRestart !== false && (
                 <span className="text-amber-700 dark:text-amber-400">需重启或 reload</span>
               )}
-              {assetType === "skill" && kinds[agent.id] && (
+              {outcomes[agent.id] && (
                 <span className="text-slate-500 dark:text-slate-400">
-                  落地方式：{kinds[agent.id]}
+                  实测：{outcomes[agent.id]}
                 </span>
               )}
             </li>

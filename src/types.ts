@@ -39,6 +39,9 @@ export interface AgentStatus {
   mcpPath: string;
   enabledMcp: string[];
   enabledSkills: string[];
+  enabledRules: string[];
+  enabledSubagents: string[];
+  enabledHooks: string[];
   activePrompt: string | null;
 }
 
@@ -50,6 +53,94 @@ export function supported(agent: AgentStatus, kind: AssetKind): boolean {
 export function switchable(agent: AgentStatus, kind: AssetKind): boolean {
   return agent.capabilities.some((c) => c.kind === kind && c.supported && c.verified);
 }
+
+/** 该 agent 已勾选的资产 id。矩阵一次取全，省掉每个资产问一次的往返。 */
+export function enabledFor(agent: AgentStatus, kind: AssetType): string[] {
+  switch (kind) {
+    case "mcp":
+      return agent.enabledMcp;
+    case "skill":
+      return agent.enabledSkills;
+    case "rule":
+      return agent.enabledRules;
+    case "subagent":
+      return agent.enabledSubagents;
+    case "hook":
+      return agent.enabledHooks;
+    default:
+      // prompts 同时只能激活一份，走 activePrompt，不在这张表里
+      return [];
+  }
+}
+
+export type DriftKind = "modified" | "missing";
+
+/** 后端 drift::DriftRecord。targetPath 是绝对路径，处置前用户要能看到到底在动哪个文件。 */
+export interface DriftRecord {
+  id: number;
+  assetType: AssetType;
+  assetId: string;
+  agentId: string;
+  kind: DriftKind;
+  detectedAt: number;
+  targetPath: string;
+}
+
+export type ResolveAction = "adoptDisk" | "repushSource";
+
+export type ResolveOutcome =
+  | { kind: "adopted"; path: string }
+  | { kind: "repushed"; path: string; written: number; skipped: number };
+
+export interface SkippedFile {
+  file: string;
+  reason: string;
+}
+
+export interface ScanReport {
+  imported: number;
+  updated: number;
+  unchanged: number;
+  skipped: SkippedFile[];
+}
+
+/** 该工具的 hooks 要用户自己打开功能开关；我们只报告，不代改。 */
+export interface HooksNeedUserAction {
+  file: string;
+  why: string;
+}
+
+/** hook 事件白名单，与后端 `domain::hook::KNOWN_EVENTS` 同源（Qoder CN 的事件枚举）。 */
+export const HOOK_EVENTS: string[] = [
+  "PreToolUse",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "SubagentStart",
+  "Notification",
+  "SubagentStop",
+  "SessionStart",
+  "Setup",
+  "SessionEnd",
+  "PreCompact",
+  "PostCompact",
+  "Stop",
+  "QueryEnd",
+  "UserPromptSubmit",
+  "ConfigChange",
+  "StopFailure",
+  "TeammateIdle",
+  "InstructionsLoaded",
+  "CwdChanged",
+  "FileChanged",
+  "WorktreeCreate",
+  "WorktreeRemove",
+  "Elicitation",
+  "ElicitationResult",
+  "TaskCreated",
+  "TaskCompleted",
+  "PermissionRequest",
+  "PermissionDenied",
+];
 
 export interface ImportPreview {
   mcpCount: number;

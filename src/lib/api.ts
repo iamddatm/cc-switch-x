@@ -6,8 +6,13 @@ import type {
   AssetSummary,
   AssetType,
   ConflictPolicy,
+  DriftRecord,
+  HooksNeedUserAction,
   ImportPreview,
   ImportSummary,
+  ResolveAction,
+  ResolveOutcome,
+  ScanReport,
   Theme,
 } from "../types";
 
@@ -42,6 +47,27 @@ export const api = {
       confirm: options?.confirm ?? false,
       saveExistingAs: options?.saveExistingAs,
     }),
+
+  /** 返回实测标签：written / removed / absent；外来内容会直接报错 */
+  setRuleEnabled: (id: string, agentId: string, enabled: boolean) =>
+    invoke<string>("set_rule_enabled", { id, agentId, enabled }),
+  scanRules: (agentId: string) => invoke<ScanReport>("scan_rules", { agentId }),
+  setSubagentEnabled: (id: string, agentId: string, enabled: boolean) =>
+    invoke<string>("set_subagent_enabled", { id, agentId, enabled }),
+  scanSubagents: (agentId: string) =>
+    invoke<ScanReport>("scan_subagents", { agentId }),
+  setHookEnabled: (id: string, agentId: string, enabled: boolean) =>
+    invoke<ApplyReport>("set_hook_enabled", { id, agentId, enabled }),
+  /** 该 agent 的 hook 文件里不是本工具写的条目数 */
+  foreignHookCount: (agentId: string) => invoke<number>("foreign_hook_count", { agentId }),
+  /** null = 不需要用户额外打开开关 */
+  hooksGateStatus: (agentId: string) =>
+    invoke<HooksNeedUserAction | null>("hooks_gate_status", { agentId }),
+
+  rescanDrift: () => invoke<DriftRecord[]>("rescan_drift"),
+  listDrifts: () => invoke<DriftRecord[]>("list_drifts"),
+  resolveDrift: (id: number, action: ResolveAction, agentId: string) =>
+    invoke<ResolveOutcome>("resolve_drift", { id, action, agentId }),
 };
 
 export interface ApplyReport {

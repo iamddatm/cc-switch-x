@@ -29,7 +29,7 @@ test("shows the link kind the backend actually used", async () => {
   render(<SkillsPanel />);
   fireEvent.click(await screen.findByText("demo"));
   fireEvent.click(await screen.findByRole("checkbox", { name: "Claude Code 启用 demo" }));
-  expect(await screen.findByText("落地方式：junction")).toBeInTheDocument();
+  expect(await screen.findByText("实测：junction")).toBeInTheDocument();
   expect(api.setSkillEnabled).toHaveBeenCalledWith("demo", "claude", true);
   // 点一次只该发一次请求：控件嵌在 <label> 里时真实浏览器会触发两次 change
   expect(api.setSkillEnabled).toHaveBeenCalledTimes(1);
@@ -43,6 +43,6 @@ test("a rejected deployment shows the reason instead of a fake success", async (
   fireEvent.click(await screen.findByText("demo"));
   fireEvent.click(await screen.findByRole("checkbox", { name: "Claude Code 启用 demo" }));
   expect(await screen.findByText(/别人建的目录/)).toBeInTheDocument();
-  // 只查动态的那条「落地方式：xxx」，面板底部的静态说明文字不算
-  expect(screen.queryByText(/^落地方式：/)).not.toBeInTheDocument();
+  // 只查动态的那条「实测：xxx」，面板底部的静态说明文字不算
+  expect(screen.queryByText(/^实测：/)).not.toBeInTheDocument();
 });

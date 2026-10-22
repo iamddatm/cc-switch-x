@@ -806,6 +806,40 @@ fn an_untracked_file_is_never_drift() {
 - 测试:`hooks_panel_shows_the_full_command_without_truncation`、`drift_banner_offers_both_resolutions_and_no_silent_write`、`unverified_capability_shows_no_switch`、`event_dropdown_only_offers_known_events`。
 - 提交:`git commit -m "feat: 添加 Rules/Subagents/Hooks 面板与漂移处置"`。
 
+#### Task 10 执行记录（2026-10-22）
+
+- `AgentMatrix` 从 `mcp | skill` 扩到五种（`Exclude<AssetType, "prompt">`），按类型分派
+  setter 与「已勾选」列表；`AgentStatus` 因此加了 `enabledRules` / `enabledSubagents` /
+  `enabledHooks`，前端统一走 `enabledFor(agent, kind)`。那句实测回显从「落地方式：junction」
+  改叫「实测：…」（rules / hooks 那边没有「落地方式」这回事），SkillsPanel 的断言跟着改。
+- 新增 `src/lib/canonical.ts`：三类真源文件的最小编解码器（面板要表单而不是裸 JSON）。
+  只支持**我们自己产出的那一小撮 YAML**：顶层扁平键、`key:` 后跟块（全是 `- x` 当序列，
+  否则当块标量并只去共同缩进，保住 `tool_extras` 的嵌套层级）、`|-` 指示符不当值。
+  读不懂的行**抛错**给面板显示，绝不静默丢字段；只有会被 YAML 误读的值才加引号
+  （中文这类普通字符保持原样，否则 diff 里全是引号）。后端在写盘前还会再校验一遍。
+- `DriftBanner`：只给「采纳磁盘 / 重刷真源」两个按钮，没有第三种「忽略 / 强制覆盖」；
+  `missing` 时「采纳磁盘」禁用（没有内容可采纳）并说明该选哪条；每条都印出目标文件绝对路径。
+  处置完走 `rescanDrift` 重扫，绝不从面板直接发写请求（测试断言 `writeAsset` /
+  `setRuleEnabled` 一次都没被调用）。
+- `useDrift`：挂载时读 `listDrifts`（不重新扫盘 —— 启动那一次后端已经做过了），
+  「重新检查」与处置之后才 `rescanDrift`。文件监听仍在 Plan 5。
+- `HooksPanel`：命令用 `<pre class="whitespace-pre-wrap break-all">` 全文展示（断言里没有
+  `…` / `...`、计算样式不是 ellipsis）；事件下拉的选项就是 `HOOK_EVENTS` 那 28 个，
+  `PreTool` 选不出来；`HooksSafety` 明示「还有 N 条不是本工具写的 hook」与
+  Codex 的功能开关（`hooksGateStatus` 给绝对路径）。
+- 三个面板都带能力闸：`supported=false` 的 agent 整行不出现，`supported && !verified`
+  显示「未实测，暂不提供开关」而不是一个禁用复选框。
+- 测试：44 条前端测试通过，含计划点名的 `hooks_panel_shows_the_full_command_without_truncation`、
+  `drift_banner_offers_both_resolutions_and_no_silent_write`、
+  `unverified_capability_shows_no_switch`、`event_dropdown_only_offers_known_events`，
+  外加编解码器一轮（`canonical.test.ts`：规则、子代理块标量与私有字段、hook）。
+- **还没做（Task 11 必查）**：这些面板只在 jsdom 里跑过。Plan 2 的教训是 jsdom 抓不到
+  「复选框嵌在 `<label>` 里点一次发两次请求」这类真实浏览器行为 —— 新面板沿用了
+  `input id + label htmlFor` 的写法，但三条新路径必须在真机（WebView2 + CDP）点一遍：
+  勾选/取消 rules、subagents、hooks，触发一次漂移并逐条处置，检查 Codex 功能开关提示的文案。
+- 门禁：`cargo test` 232 通过、`pnpm test` 44 通过、`pnpm build` 通过、
+  `cargo clippy --all-targets` 只剩 Plan 2 那条遗留告警。
+
 ---
 
 ### Task 11: 端到端验证(沙箱)

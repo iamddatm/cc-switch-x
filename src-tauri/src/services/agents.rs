@@ -32,6 +32,9 @@ pub struct AgentStatus {
     pub mcp_path: PathBuf,
     pub enabled_mcp: Vec<String>,
     pub enabled_skills: Vec<String>,
+    pub enabled_rules: Vec<String>,
+    pub enabled_subagents: Vec<String>,
+    pub enabled_hooks: Vec<String>,
     pub active_prompt: Option<String>,
 }
 
@@ -116,6 +119,9 @@ pub fn detect_all(store: &Store, home: &Path) -> Result<Vec<AgentStatus>, AppErr
             mcp_path,
             enabled_mcp: matrix.enabled_for(AssetType::Mcp),
             enabled_skills: matrix.enabled_for(AssetType::Skill),
+            enabled_rules: matrix.enabled_for(AssetType::Rule),
+            enabled_subagents: matrix.enabled_for(AssetType::Subagent),
+            enabled_hooks: matrix.enabled_for(AssetType::Hook),
             active_prompt: matrix.active_prompt,
         });
     }
@@ -190,8 +196,11 @@ mod tests {
                 "capabilities",
                 "detected",
                 "displayName",
+                "enabledHooks",
                 "enabledMcp",
+                "enabledRules",
                 "enabledSkills",
+                "enabledSubagents",
                 "id",
                 "mcpNeedsRestart",
                 "mcpPath",
