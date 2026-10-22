@@ -10,6 +10,8 @@ vi.mock("../lib/api", () => ({
     sessionProviders: vi.fn(),
     scanSessions: vi.fn(),
     searchSessions: vi.fn(),
+    getSession: vi.fn(),
+    searchInSession: vi.fn(),
   },
 }));
 
@@ -57,6 +59,12 @@ beforeEach(() => {
     warnings: [],
   });
   vi.mocked(api.searchSessions).mockResolvedValue([]);
+  vi.mocked(api.getSession).mockResolvedValue({
+    session: session(),
+    messages: [],
+    total: 0,
+  });
+  vi.mocked(api.searchInSession).mockResolvedValue([]);
 });
 
 afterEach(cleanup);
@@ -138,6 +146,35 @@ test("search_shows_the_matching_snippet_and_session", async () => {
   expect(screen.getByText("登录问题")).toBeInTheDocument();
   expect(screen.getByText("会话内命中")).toBeInTheDocument();
   expect(api.searchSessions).toHaveBeenCalledWith("关键字");
+});
+
+test("opening_a_session_and_returning_keeps_the_search_term", async () => {
+  const target = session({ title: "登录问题" });
+  vi.mocked(api.listSessions).mockResolvedValue([target]);
+  vi.mocked(api.sessionProviders).mockResolvedValue([provider()]);
+  vi.mocked(api.searchSessions).mockResolvedValue([
+    { session: target, index: 0, seq: 0, snippet: "关键字片段" },
+  ]);
+  vi.mocked(api.getSession).mockResolvedValue({
+    session: target,
+    messages: [
+      { seq: 0, role: "user", kind: "text", content: "会话正文", toolName: null },
+    ],
+    total: 1,
+  });
+
+  render(<SessionsPanel />);
+
+  const input = await screen.findByPlaceholderText("搜索会话内容");
+  fireEvent.change(input, { target: { value: "关键字" } });
+  fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+  await screen.findByText("关键字片段");
+  fireEvent.click(screen.getByRole("button", { name: /登录问题/ }));
+  expect(await screen.findByText("会话正文")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "返回列表" }));
+  expect(screen.getByPlaceholderText("搜索会话内容")).toHaveValue("关键字");
+  expect(screen.getByText("关键字片段")).toBeInTheDocument();
 });
 
 test("scan_failures_are_listed_not_hidden", async () => {

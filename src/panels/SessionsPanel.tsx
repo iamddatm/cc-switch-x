@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { SessionReader } from "../components/sessions/SessionReader";
 import { useSessions } from "../hooks/useSessions";
 import { groupSessions } from "../lib/sessionGroups";
 import type {
@@ -22,6 +23,7 @@ export function SessionsPanel() {
   } = useSessions();
   const [query, setQuery] = useState("");
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [openSession, setOpenSession] = useState<SessionSummary | null>(null);
 
   const providerFor = (agentId: string) =>
     providers.find((provider) => provider.agentId === agentId);
@@ -44,6 +46,18 @@ export function SessionsPanel() {
     setQuery("");
     clearSearch();
   };
+
+  if (openSession) {
+    return (
+      <SessionReader
+        session={openSession}
+        agentName={
+          providerFor(openSession.agentId)?.displayName ?? openSession.agentId
+        }
+        onBack={() => setOpenSession(null)}
+      />
+    );
+  }
 
   return (
     <section className="space-y-4">
@@ -178,6 +192,7 @@ export function SessionsPanel() {
                       key={`${hit.session.agentId}:${hit.session.sessionId}`}
                       hit={hit}
                       provider={providerFor(hit.session.agentId)}
+                      onOpen={setOpenSession}
                     />
                   ))}
                 </ul>
@@ -206,6 +221,7 @@ export function SessionsPanel() {
                               <SessionRow
                                 session={session}
                                 provider={providerFor(session.agentId)}
+                                onOpen={setOpenSession}
                               />
                             </li>
                           ))}
@@ -226,14 +242,17 @@ export function SessionsPanel() {
 function SessionRow({
   session,
   provider,
+  onOpen,
 }: {
   session: SessionSummary;
   provider?: SessionProviderStatus;
+  onOpen: (session: SessionSummary) => void;
 }) {
   return (
     <button
       type="button"
       className="w-full rounded border border-slate-200 px-3 py-2 text-left text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
+      onClick={() => onOpen(session)}
     >
       <span className="flex flex-wrap items-center gap-2">
         <span className="font-medium">{session.title}</span>
@@ -262,27 +281,37 @@ function SessionRow({
 function SearchHitRow({
   hit,
   provider,
+  onOpen,
 }: {
   hit: SessionSearchHit;
   provider?: SessionProviderStatus;
+  onOpen: (session: SessionSummary) => void;
 }) {
   return (
-    <li className="rounded border border-slate-200 px-3 py-2 text-sm dark:border-slate-700">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="rounded bg-slate-100 px-1 text-xs text-slate-600 dark:bg-slate-700 dark:text-slate-200">
-          会话内命中
-        </span>
-        <span className="font-medium">{hit.session.title}</span>
-        <span className="text-xs text-slate-500">
-          {provider?.displayName ?? hit.session.agentId}
-        </span>
-        {provider && !provider.verified && (
-          <span className="rounded bg-amber-100 px-1 text-xs text-amber-800">
-            解析器未实测
+    <li className="rounded border border-slate-200 text-sm dark:border-slate-700">
+      <button
+        type="button"
+        className="w-full px-3 py-2 text-left hover:bg-slate-50 dark:hover:bg-slate-800"
+        onClick={() => onOpen(hit.session)}
+      >
+        <span className="flex flex-wrap items-center gap-2">
+          <span className="rounded bg-slate-100 px-1 text-xs text-slate-600 dark:bg-slate-700 dark:text-slate-200">
+            会话内命中
           </span>
-        )}
-      </div>
-      <p className="mt-1 text-slate-600 dark:text-slate-300">{hit.snippet}</p>
+          <span className="font-medium">{hit.session.title}</span>
+          <span className="text-xs text-slate-500">
+            {provider?.displayName ?? hit.session.agentId}
+          </span>
+          {provider && !provider.verified && (
+            <span className="rounded bg-amber-100 px-1 text-xs text-amber-800">
+              解析器未实测
+            </span>
+          )}
+        </span>
+        <span className="mt-1 block text-slate-600 dark:text-slate-300">
+          {hit.snippet}
+        </span>
+      </button>
     </li>
   );
 }
