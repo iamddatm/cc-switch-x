@@ -246,12 +246,13 @@ mod tests {
 **Files:** Create `src-tauri/src/services/apply.rs`；Modify `index/schema.rs`、`index/mod.rs`、`state.rs`
 
 **Interfaces:**
-- `AssetState::{Off, Written, Effective, Drifted}`（serde `snake_case`，前端四态文案对应 未同步/已写入/已生效/有漂移）。
-- `PlanItem { agent_id, asset_type, asset_id, action: Action::{Enable, Disable, Refresh}, target_path: PathBuf, diff: Vec<String> }`
-- `ApplyService::plan(&AppSettings, &[Target]) -> Result<Vec<PlanItem>, AppError>`（纯函数，不落盘，供 dry-run 预览）
-- `ApplyService::apply(&Store, &mut Index, &[PlanItem]) -> Result<ApplyReport, AppError>`
-- `ApplyService::revert_last(&Store, &mut Index) -> Result<ApplyReport, AppError>`
-- 索引新增两表：`agent_state(agent_id, asset_type, asset_id, state, last_error, applied_at)`、`runs(id, started_at, dry_run, plan_json, result, backup_dir)`。
+- `AssetState::{Off, Written, Effective, Drifted}` 定义在 `domain/asset.rs`（四态是领域概念，索引层也要用，放 apply 里会让 `index` 反向依赖 `services`）。serde `snake_case`，落库存 `as_str()`，`from_db()` 遇到未知值直接报错。
+- `PlanItem { agent_id, asset_type, asset_id, action: Action::{Enable, Disable, Refresh}, target_path, #[serde(skip)] contents, diff, needs_restart }`
+  - **`contents` 是适配器已经渲染好的完整字节**（键级合并发生在渲染侧）。流水线只负责备份/写入/回读/回滚，不掺渲染逻辑，因此不需要一个会随适配器膨胀的 op 枚举。
+- `ApplyService::apply(&Store, &mut Index, &[PlanItem]) -> Result<ApplyReport, AppError>`：先备份全部已存在目标（这步失败时还没写过任何东西）→ 逐项写入并回读比对 → 任一项失败按倒序还原已写项并返回 `Err` → 全部成功才写 `agent_state` 与 `runs`。
+- `ApplyService::revert_last(&mut Index) -> Result<ApplyReport, AppError>`：取最近一次 `reverted=0` 的 run，按 `result` 里的 `{target, backup}` 还原（`backup` 为 null 表示当时是新建，回滚即删除），并把相关项标成 `Drifted`、把该 run 置 `reverted=1`（不能被回滚两遍）。
+- `ApplyReport { written, skipped, ok, backup_dir, error }`
+- 索引新增：`agent_state(agent_id, asset_type, asset_id, state, last_error, applied_at)`、`runs(id, started_at, dry_run, plan_json, result, backup_dir, reverted)`；方法 `set_agent_state / agent_states / record_run / last_unreverted_run / mark_run_reverted`。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -587,3 +588,4 @@ test("activating a prompt over foreign content asks for confirmation", async () 
 - **类型一致性**：canonical `McpServer` 沿用 Plan 1 的字段；`Transport` 与 cc-switch `server_config.type` 的取值域一致（`stdio/http/sse/ws`），未知值按条跳过并报告。
 - **Review Focus 对应**：密钥外泄 Task 5；列名漂移 Task 4；非管辖键 Task 7；幂等 Task 3/5；skill 缺失 Task 6；链接降级 Task 8；删除归属 Task 8；Prompts 接管 Task 8/9。
 - **已知缺口**：① `qoderclicn` CLI 写入路径未实现；② 云快照的下载/解包未实现（只做了 `SnapshotDir` 格式层）；③ Codex 的 Rules 无法映射（其 `rules/*.rules` 是执行策略 DSL），留到 Plan 3 的能力矩阵里显式标不支持；④ 漂移检测与 `rescan()` 在 Plan 3。
+- **实现期定下的取舍**：不设 `ApplyService::plan()` —— 适配器渲染出 `PlanItem`（含 `diff`）本身就是 dry-run，UI 先展示 diff 再调 `apply`，避免两处规划各说各话。

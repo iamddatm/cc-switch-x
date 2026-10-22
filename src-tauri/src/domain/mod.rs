@@ -8,7 +8,7 @@ pub mod rule;
 pub mod secret;
 pub mod subagent;
 
-pub use asset::{AssetSummary, AssetType};
+pub use asset::{AssetState, AssetSummary, AssetType};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DomainError {

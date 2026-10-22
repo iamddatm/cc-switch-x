@@ -52,3 +52,35 @@ pub struct AssetSummary {
     pub updated_at: i64,
     pub hash: String,
 }
+
+/// 「资产 × agent」四态（spec 3.3）：未同步 / 已写入 / 已生效 / 有漂移。
+/// 落库用 `as_str()`，改名等于改数据，必须一并处理旧值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetState {
+    Off,
+    Written,
+    Effective,
+    Drifted,
+}
+
+impl AssetState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Written => "written",
+            Self::Effective => "effective",
+            Self::Drifted => "drifted",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "written" => Some(Self::Written),
+            "effective" => Some(Self::Effective),
+            "drifted" => Some(Self::Drifted),
+            _ => None,
+        }
+    }
+}

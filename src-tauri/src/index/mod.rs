@@ -1,10 +1,10 @@
 mod schema;
 
-use crate::domain::{display_name, AssetSummary, AssetType};
+use crate::domain::{display_name, AssetState, AssetSummary, AssetType};
 use crate::store::Store;
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
@@ -126,6 +126,111 @@ impl Index {
         )?;
         Ok(())
     }
+
+    pub fn set_agent_state(&mut self, row: &AgentStateRow) -> Result<(), IndexError> {
+        self.conn.execute(
+            "INSERT INTO agent_state (agent_id,asset_type,asset_id,state,last_error,applied_at)
+             VALUES (?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(agent_id,asset_type,asset_id)
+             DO UPDATE SET state=?4,last_error=?5,applied_at=?6",
+            params![
+                row.agent_id,
+                asset_type_key(row.asset_type),
+                row.asset_id,
+                row.state.as_str(),
+                row.last_error,
+                row.applied_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn agent_states(&self) -> Result<Vec<AgentStateRow>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT agent_id,asset_type,asset_id,state,last_error,applied_at FROM agent_state ORDER BY agent_id,asset_type,asset_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let type_key: String = row.get(1)?;
+            let state_key: String = row.get(3)?;
+            let state = AssetState::from_db(&state_key).ok_or_else(|| {
+                rusqlite::Error::InvalidColumnName(format!("未知同步状态：{state_key}"))
+            })?;
+            Ok(AgentStateRow {
+                agent_id: row.get(0)?,
+                asset_type: asset_type_from_key(&type_key)?,
+                asset_id: row.get(2)?,
+                state,
+                last_error: row.get(4)?,
+                applied_at: row.get(5)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn record_run(
+        &mut self,
+        dry_run: bool,
+        plan_json: &str,
+        result: &str,
+        backup_dir: &Path,
+    ) -> Result<(), IndexError> {
+        self.conn.execute(
+            "INSERT INTO runs (started_at,dry_run,plan_json,result,backup_dir,reverted) VALUES (?1,?2,?3,?4,?5,0)",
+            params![
+                now_millis(),
+                dry_run as i64,
+                plan_json,
+                result,
+                backup_dir.to_string_lossy()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 最近一次还没被回滚的执行记录。
+    pub fn last_unreverted_run(&self) -> Result<Option<RunRow>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,backup_dir,result FROM runs WHERE reverted=0 ORDER BY id DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map([], |row| {
+            Ok(RunRow {
+                id: row.get(0)?,
+                backup_dir: PathBuf::from(row.get::<_, String>(1)?),
+                result: row.get(2)?,
+            })
+        })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn mark_run_reverted(&mut self, run_id: i64) -> Result<(), IndexError> {
+        self.conn
+            .execute("UPDATE runs SET reverted=1 WHERE id=?1", [run_id])?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentStateRow {
+    pub agent_id: String,
+    pub asset_type: AssetType,
+    pub asset_id: String,
+    pub state: AssetState,
+    pub last_error: Option<String>,
+    pub applied_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunRow {
+    pub id: i64,
+    pub backup_dir: PathBuf,
+    pub result: String,
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
