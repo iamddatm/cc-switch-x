@@ -398,7 +398,7 @@ fn scanning_a_tool_rule_becomes_a_canonical_rule_with_the_same_body() {
 - 反向:`reverse_subagent(agent, filename, content) -> Result<Subagent, DomainError>`,非公共字段收进 `tool_extras.<agent>`。
 - Qoder 的 `allowed-tools` / `allowed_tools` 读进来要归一到 `tools`,写出时用 `tools`(Plan 3 不发明新键)。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```rust
 #[test]
@@ -435,7 +435,37 @@ fn tool_private_fields_land_in_tool_extras_and_come_back() {
 }
 ```
 
-- [ ] **Step 2–5:** 红 → 实现 → 绿 → 提交 `git commit -m "feat: 添加 Subagents 的多形态渲染与解析"`。
+- [x] **Step 2–5:** 红 → 实现 → 绿 → 提交 `git commit -m "feat: 添加 Subagents 的多形态渲染与解析"`。
+
+#### Task 4 执行记录（2026-10-22）
+
+- `render_subagent(agent, &Subagent) -> Result<Rendered, DomainError>`（`Rendered { extension, content }`），
+  `reverse_subagent(agent, filename, content) -> Result<Subagent, DomainError>`。
+  示例里 `render_subagent(&claude(), &spec()).content` 的用法照旧，只是返回 `Result`——
+  写不出合法 TOML（例如 extras 里有 `null`）必须失败，不能悄悄丢键。
+- **`DomainError` 加了 `EmptyDescription` / `EmptyInstructions`**：`name` 之外的两个必填项
+  原先共用 `EmptyName`，报出来的话没法告诉用户到底缺了什么。（`domain/hook.rs` 里也有一处
+  同样借用 `EmptyName` 的写法，留到 Task 6 一起收拾。）
+- `domain::subagent::render_canonical(&Subagent) -> Result<String, DomainError>` 新增：
+  canonical 是 YAML，序列化失败不能写成空文件覆盖真源（与 `rule::render_canonical` 同因）。
+- TOML 写入仍只用已有的 `toml_edit`（**没有新增 `toml` 依赖**）：先由 `DocumentMut` 出全篇，
+  再把「合格的多行值」从基本字符串换成 `'''` 字面量。合格条件与 teamai 一致（含 `'''`、
+  以 `'` 结尾、带 `\r`/NUL/DEL 之类控制字符的都不行，C1 允许）。
+  Rust 这边 `str::replace` 本来就是字面替换，不存在 JS 那个 `$&` / `$$` 被展开、
+  把提示词里的美元符号吃掉的问题。
+- 实测到的 `toml_edit` 行为（测试里钉住）：**不合格的多行值它会自己用 `"""` 多行基本字符串**，
+  而我们只断言「字节级往返」，不断言具体形式——形式变了不影响 Codex 读，也不影响漂移比对。
+  `\r` 这类控制字符会被转义写出去，读回来仍然是原字节。
+- markdown 的 frontmatter 由 `serde_yaml` 出，块序列是 libyaml 的**零缩进**风格
+  （`tools:\n- Read`），与示例里写的 `tools:\n  - Read` 不同。选它的原因：只有一处 YAML 输出器，
+  产物保证合法，两家都用 YAML 解析器读 frontmatter；字节风格只在「认自家渲染」时与**我们自己**
+  的输出比对（规则那边同理，靠 `body_equals` 只比正文）。
+- 单行提示词落 Codex 时是基本字符串（`can_use_toml_literal` 要求必须含换行），
+  字面量只为多行内容服务——这条与 teamai 一致，示例里那句断言是我照抄错了。
+- Qoder 的 `allowed-tools` / `allowed_tools` 两种写法都读进 `tools`，写出只用 `tools`；
+  Codex 侧 `tools` 不是公共字段，原样进 `tool_extras.codex`，反向时不会凭空造出列表。
+- 门禁：`cargo test` 163 通过（本任务 +11）、`cargo fmt --check` 干净、
+  `cargo clippy --all-targets` 只剩 Plan 2 那条遗留告警。
 
 ---
 

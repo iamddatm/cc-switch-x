@@ -4,3 +4,4 @@ pub mod paths;
 pub mod prompt;
 pub mod rules;
 pub mod skills;
+pub mod subagents;

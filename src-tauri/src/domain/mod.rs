@@ -18,6 +18,10 @@ pub enum DomainError {
     EmptyId,
     #[error("name 不能为空")]
     EmptyName,
+    #[error("description 不能为空")]
+    EmptyDescription,
+    #[error("正文（提示词/指令）不能为空")]
+    EmptyInstructions,
     #[error("MCP stdio 必须提供 command")]
     McpCommandRequired,
     #[error("MCP 非 stdio 必须提供 url")]

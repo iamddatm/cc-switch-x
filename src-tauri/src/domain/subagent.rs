@@ -24,3 +24,9 @@ pub fn parse_subagent(raw: &str) -> Result<Subagent, DomainError> {
     }
     Ok(parsed)
 }
+
+/// canonical 真源的 YAML。与 `rule::render_canonical` 同理：序列化失败必须报出来，
+/// 不能写出一个空文件把真源覆盖掉。
+pub fn render_canonical(sub: &Subagent) -> Result<String, DomainError> {
+    serde_yaml::to_string(sub).map_err(|e| DomainError::Yaml(e.to_string()))
+}
