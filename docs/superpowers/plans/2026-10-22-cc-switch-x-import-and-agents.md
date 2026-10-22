@@ -119,12 +119,26 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_reference() {
+    fn rejects_incomplete_reference() {
         assert!(parse_reference("${secret:nocolon}").is_none());
-        assert!(parse_reference("${secret:a.b.c}").is_none()); // scope 只允许一段 kind.id
+        assert!(parse_reference("${secret:a.b}").is_none()); // scope 不足 kind.id 两段
+        assert!(parse_reference("${secret:mcp.pw.}").is_none()); // key 为空
+        assert!(parse_reference("mcp.pw.TOKEN").is_none()); // 缺 ${} 包裹
+    }
+
+    #[test]
+    fn splits_on_the_last_dot_so_dotted_asset_ids_work() {
+        // 资产 ID 本身允许 '.'（store 的 is_safe_id），所以按**最后一个点**切：
+        // mcp.a.b.TOKEN -> scope=mcp.a.b, key=TOKEN；密钥名是环境变量名，不含点
+        assert_eq!(
+            parse_reference("${secret:mcp.a.b.TOKEN}").unwrap(),
+            SecretRef { scope: "mcp.a.b".into(), key: "TOKEN".into() }
+        );
     }
 }
 ```
+
+> 切分规则必须在写实现前定死：`scope` 至少 `kind.id` 两段、按最后一个点分、body 含空白即非法。`resolve_text` 遇到**解析不了的 `${secret:…}` 候选要报 `BadReference`**，不能把它当普通文本原样写进 agent 配置。
 
 `store/secrets.rs` 的测试：
 

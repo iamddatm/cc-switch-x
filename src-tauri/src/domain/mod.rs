@@ -5,6 +5,7 @@ pub mod hook;
 pub mod mcp;
 pub mod prompt;
 pub mod rule;
+pub mod secret;
 pub mod subagent;
 
 pub use asset::{AssetSummary, AssetType};

@@ -1,4 +1,5 @@
 pub mod atomic;
+pub mod secrets;
 
 use crate::domain::AssetType;
 use std::fs;
