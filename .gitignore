@@ -1,0 +1,12 @@
+node_modules/
+dist/
+src-tauri/target/
+*.tsbuildinfo
+references/
+index.db
+index.db-*
+secrets.local.json
+local/
+backups/
+logs/
+state/
