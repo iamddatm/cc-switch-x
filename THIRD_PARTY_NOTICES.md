@@ -8,7 +8,7 @@
 | 来源 | 许可证 | 借用的机制 | 本仓库对应位置 |
 |---|---|---|---|
 | [teamai-cli](https://github.com/Tencent/teamai-cli) | MIT（Tencent） | ① 规则文件的 `RuleFormat` 三段式（render / bodyEquals / mergeBodyIntoTeam + `previousRenders` 认旧渲染）；② 子代理的中间 `AgentSpec` 与 `tool_extras.<tool>` 反向映射；③ hook 条目用 `description` 前缀作归属标记；④ Codex agent TOML 用 `'''` 多行字面量保持可读；⑤ 各工具 rules/agents 落点是否存在的证据（`LEGACY_RULE_DIRS`、`agentFileExtensionForTool`） | `src-tauri/src/domain/agent.rs` 的能力表与 `adapters/ledger.rs` 的归属台账；①②③④ 落在 Plan 3 Task 2–7 的 `adapters/{rules,subagents,hooks}.rs` |
-| [cc-switch](https://github.com/farion1231/cc-switch) | MIT | 本地库 `tools` 表与 `enabled_<app>` 列的读取映射（导入器只读，不写它的库）；「每工具一个适配器模块」的分层思路 | `src-tauri/src/import/{source,mcp,prompts,skills}.rs` |
+| [cc-switch](https://github.com/farion1231/cc-switch) | MIT | ① 本地库 `tools` 表与 `enabled_<app>` 列的读取映射（导入器只读，不写它的库）；② 「每工具一个适配器模块」的分层思路；③ 会话 provider 的路径与字段映射（11 类工具的会话文件位置、字段形状与恢复命令） | ① `src-tauri/src/import/{source,mcp,prompts,skills}.rs`；③ `src-tauri/src/sessions/providers/` |
 | [vercel-labs/skills](https://github.com/vercel-labs/skills) | MIT（Vercel, Inc.） | `SKILL.md` 的目录布局与 frontmatter 字段约定（skills 作为整目录资产分发） | `src-tauri/src/adapters/skills.rs`、`import/skills.rs` |
 
 上述借用均为**机制与公开格式**，不含其代码文件；本仓库的实现独立编写，命名与代码结构按本项目约定。

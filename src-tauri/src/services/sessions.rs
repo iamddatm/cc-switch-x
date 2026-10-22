@@ -612,7 +612,7 @@ mod tests {
             "{}",
             &huge.content[..80.min(huge.content.len())]
         );
-        assert!(huge.content.len() <= 8 * 1024 + 64);
+        assert!(huge.content.len() <= 4 * 1024 + 64);
     }
 
     #[test]

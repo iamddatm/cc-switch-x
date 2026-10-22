@@ -8,7 +8,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 /// 单条消息进索引前保留的最大字符数；超出部分截断并留下可解释的标记。
-pub const INDEX_CONTENT_CAP: usize = 8 * 1024;
+pub const INDEX_CONTENT_CAP: usize = 4 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -524,17 +524,35 @@ fn make_snippet(content: &str, query: &str) -> String {
 }
 
 pub fn cap_content(content: &str) -> String {
-    let chars = content.chars().count();
-    if chars <= INDEX_CONTENT_CAP {
+    if content.len() <= INDEX_CONTENT_CAP {
         return content.to_string();
     }
-    let kept: String = content.chars().take(INDEX_CONTENT_CAP).collect();
+    let chars = content.chars().count();
+    // 上限按 UTF-8 字节算；回退到最近的字符边界，避免切坏多字节字符。
+    let mut end = INDEX_CONTENT_CAP;
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    let kept = &content[..end];
     format!("{kept}\n…[已截断，原文 {chars} 字符]")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cap_content_counts_utf8_bytes_not_chars() {
+        let text = "汉".repeat(3000);
+        assert!(text.len() > INDEX_CONTENT_CAP, "测试输入必须超过上限");
+        let capped = cap_content(&text);
+        assert!(
+            capped.len() <= INDEX_CONTENT_CAP + 64,
+            "截断后 {} 字节",
+            capped.len()
+        );
+        assert!(capped.contains("已截断"), "{capped}");
+    }
 
     #[test]
     fn fts5_trigram_is_available() {
