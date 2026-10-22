@@ -1,0 +1,6 @@
+{"timestamp":"2026-10-20T10:00:00Z","type":"session_meta","payload":{"id":"c1","cwd":"D:/repo","timestamp":"2026-10-20T10:00:00Z"}}
+{"timestamp":"2026-10-20T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"修复构建"}]}}
+{"timestamp":"2026-10-20T10:00:02Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"先看日志"}]}}
+{"timestamp":"2026-10-20T10:00:03Z","type":"response_item","payload":{"type":"function_call","name":"exec","arguments":"{\"cmd\":\"cargo build\"}","call_id":"call1"}}
+{"timestamp":"2026-10-20T10:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call1","output":"error[E0308]"}}
+{"timestamp":"2026-10-20T10:00:05Z","type":"event_msg","payload":{"type":"task_complete"}}

@@ -75,9 +75,9 @@ static PROVIDERS: &[SessionProvider] = &[
         display_name: "Codex",
         roots: &["~/.codex/sessions", "~/.codex/archived_sessions"],
         verified: false,
-        discover: discover_jsonl,
-        parse: None,
-        resume: None,
+        discover: providers::codex::discover_codex,
+        parse: Some(providers::codex::parse_codex_all),
+        resume: Some(providers::codex::resume_codex),
     },
     SessionProvider {
         agent_id: "gemini",

@@ -1,0 +1,5 @@
+{"timestamp":"2026-10-20T10:00:00Z","type":"session_meta","payload":{"id":"c1","cwd":"D:/repo","timestamp":"2026-10-20T10:00:00Z"}}
+{"timestamp":"2026-10-20T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"第一问"}]}}
+{"timestamp":"2026-10-20T10:00:02Z","type":"event_msg","payload":{"type":"thread_name_updated","thread_name":"第一线程名"}}
+{"timestamp":"2026-10-20T10:00:03Z","type":"session_meta","payload":{"id":"other","cwd":"D:/other","timestamp":"2026-10-20T10:00:03Z"}}
+{"timestamp":"2026-10-20T10:00:04Z","type":"event_msg","payload":{"type":"thread_name_updated","thread_name":"最后的线程名"}}

@@ -1,0 +1,5 @@
+{"timestamp":"2026-10-20T10:00:00Z","type":"session_meta","payload":{"id":"c1","cwd":"D:/repo","timestamp":"2026-10-20T10:00:00Z"}}
+{"timestamp":"2026-10-20T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"用户问题"}]}}
+{"timestamp":"2026-10-20T10:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"用户问题"}}
+{"timestamp":"2026-10-20T10:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"助手回答"}]}}
+{"timestamp":"2026-10-20T10:00:04Z","type":"event_msg","payload":{"type":"agent_message","message":"助手回答"}}
