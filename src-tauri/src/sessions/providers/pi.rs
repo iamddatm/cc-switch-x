@@ -192,7 +192,14 @@ fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
 
 pub fn resume_pi(summary: &SessionSummary) -> Option<String> {
     let path = &summary.source_path;
-    if path.contains('"') || path.contains('\n') || path.contains('\r') {
+    if path.contains('"')
+        || path.contains('\n')
+        || path.contains('\r')
+        || path.contains('$')
+        || path.contains('`')
+        || path.contains('%')
+        || path.contains('!')
+    {
         return None;
     }
     Some(format!("pi --session \"{path}\""))

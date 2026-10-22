@@ -6,8 +6,10 @@ use crate::domain::session::{
 };
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
-/// 单条消息进索引前保留的最大字符数；超出部分截断并留下可解释的标记。
+/// 单条消息进索引前保留的最大 UTF-8 字节数；超出部分截断并留下可解释的标记。
+/// 截断点会回退到字符边界。`Image` 行不走这个上限（解析器已限制 data URL 大小）。
 pub const INDEX_CONTENT_CAP: usize = 4 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,7 +73,12 @@ impl Index {
         delete_session_rows(&tx, agent_id, &parsed.session_id)?;
         for (seq, message) in parsed.messages.iter().enumerate() {
             let seq = seq as i64;
-            let content = cap_content(&message.content);
+            // 图片是 data URL：截断会得到无法解码的字符串，解析器已单独限制其大小。
+            let content = if message.kind == SessionMessageKind::Image {
+                message.content.clone()
+            } else {
+                cap_content(&message.content)
+            };
             tx.execute(
                 "INSERT INTO session_messages (agent_id,session_id,seq,role,kind,content,tool_name) \
                  VALUES (?1,?2,?3,?4,?5,?6,?7)",
@@ -250,6 +257,19 @@ impl Index {
                 });
             }
         }
+        let mut seen: HashSet<(String, String)> = hits
+            .iter()
+            .map(|hit| (hit.session.agent_id.clone(), hit.session.session_id.clone()))
+            .collect();
+        for hit in self.metadata_hits(query, limit)? {
+            if hits.len() >= limit as usize {
+                break;
+            }
+            let key = (hit.session.agent_id.clone(), hit.session.session_id.clone());
+            if seen.insert(key) {
+                hits.push(hit);
+            }
+        }
         Ok(hits)
     }
 
@@ -359,6 +379,49 @@ impl Index {
             |row| row.get(0),
         )?;
         Ok(usize::try_from(count).unwrap_or(usize::MAX))
+    }
+
+    /// 标题、项目目录与会话 ID 也参与搜索（规格 3.2）；命中这些字段时
+    /// 用 `index=0` 占位，前端只展示 snippet，不做会话内跳转。
+    fn metadata_hits(&self, query: &str, limit: u32) -> Result<Vec<SessionSearchHit>, IndexError> {
+        let pattern = like_pattern(query);
+        let mut stmt = self.conn.prepare(
+            "SELECT agent_id,session_id,title,project_path FROM sessions \
+             WHERE title LIKE ?1 ESCAPE '\\' OR project_path LIKE ?1 ESCAPE '\\' \
+             OR session_id LIKE ?1 ESCAPE '\\' ORDER BY updated_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![pattern, limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        let needle = query.to_lowercase();
+        let mut out = Vec::new();
+        for row in rows {
+            let (agent_id, session_id, title, project_path) = row?;
+            let Some(session) = self.session_by_id(&agent_id, &session_id)? else {
+                continue;
+            };
+            let snippet = if title.to_lowercase().contains(&needle) {
+                format!("标题：{title}")
+            } else if let Some(path) =
+                project_path.filter(|path| path.to_lowercase().contains(&needle))
+            {
+                format!("目录：{path}")
+            } else {
+                format!("会话 ID：{session_id}")
+            };
+            out.push(SessionSearchHit {
+                session,
+                index: 0,
+                seq: 0,
+                snippet,
+            });
+        }
+        Ok(out)
     }
 
     fn like_hits(
@@ -503,14 +566,25 @@ fn like_pattern(query: &str) -> String {
     format!("%{escaped}%")
 }
 
-fn make_snippet(content: &str, query: &str) -> String {
-    let total = content.chars().count();
+/// 大小写折叠可能改变字符的字节长度（如 `İ` → `i̇`），折叠串里的偏移不能
+/// 直接切原串；越界或落在字符中间时回退到原文的精确匹配。
+fn snippet_position(content: &str, query: &str) -> Option<usize> {
     let lower = content.to_lowercase();
     let needle = query.to_lowercase();
-    let char_pos = lower
-        .find(&needle)
+    if let Some(byte) = lower.find(&needle) {
+        if content.is_char_boundary(byte) {
+            return Some(content[..byte].chars().count());
+        }
+    }
+    content
+        .find(query)
+        .filter(|byte| content.is_char_boundary(*byte))
         .map(|byte| content[..byte].chars().count())
-        .unwrap_or(0);
+}
+
+fn make_snippet(content: &str, query: &str) -> String {
+    let total = content.chars().count();
+    let char_pos = snippet_position(content, query).unwrap_or(0);
     let start = char_pos.saturating_sub(30);
     let end = (char_pos + query.chars().count() + 30).min(total);
     let mut snippet: String = content.chars().skip(start).take(end - start).collect();
@@ -552,6 +626,75 @@ mod tests {
             capped.len()
         );
         assert!(capped.contains("已截断"), "{capped}");
+    }
+
+    #[test]
+    fn image_messages_keep_full_data_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut index = Index::open(&dir.path().join("index.db")).unwrap();
+        let data_url = format!("data:image/png;base64,{}", "A".repeat(100 * 1024));
+        let parsed = ParsedSession {
+            session_id: "s1".into(),
+            title: "图片会话".into(),
+            project_path: None,
+            created_at: None,
+            updated_at: 1,
+            messages: vec![crate::domain::session::ParsedMessage {
+                role: SessionRole::User,
+                kind: SessionMessageKind::Image,
+                content: data_url.clone(),
+                tool_name: None,
+            }],
+            warnings: Vec::new(),
+        };
+        index
+            .upsert_session("claude", &parsed, "D:/s1.jsonl", 1, 1)
+            .unwrap();
+
+        let detail = index.session_detail("claude", "s1", 0, 10).unwrap();
+        assert_eq!(
+            detail.messages[0].content, data_url,
+            "图片不能被索引上限截断"
+        );
+    }
+
+    #[test]
+    fn snippets_survive_unicode_case_folding() {
+        let snippet = make_snippet("İ中", "中");
+        assert!(snippet.contains('中'), "{snippet}");
+    }
+
+    #[test]
+    fn search_matches_session_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut index = Index::open(&dir.path().join("index.db")).unwrap();
+        let parsed = ParsedSession {
+            session_id: "session-xyz".into(),
+            title: "只有标题能命中".into(),
+            project_path: Some("D:/unique-project".into()),
+            created_at: None,
+            updated_at: 1,
+            messages: vec![crate::domain::session::ParsedMessage {
+                role: SessionRole::User,
+                kind: SessionMessageKind::Text,
+                content: "正文".into(),
+                tool_name: None,
+            }],
+            warnings: Vec::new(),
+        };
+        index
+            .upsert_session("claude", &parsed, "D:/s1.jsonl", 1, 1)
+            .unwrap();
+
+        for query in ["只有标题能命中", "unique-project", "session-xyz"] {
+            let hits = index.search_sessions(query, 10).unwrap();
+            assert_eq!(hits.len(), 1, "{query}：{hits:?}");
+            assert!(
+                hits[0].snippet.contains(query),
+                "{query}：{}",
+                hits[0].snippet
+            );
+        }
     }
 
     #[test]

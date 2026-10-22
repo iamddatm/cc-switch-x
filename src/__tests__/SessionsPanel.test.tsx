@@ -157,8 +157,26 @@ test("search_shows_the_matching_snippet_and_session", async () => {
 
   expect(await screen.findByText("这里包含关键字片段")).toBeInTheDocument();
   expect(screen.getByText("登录问题")).toBeInTheDocument();
-  expect(screen.getByText("会话内命中")).toBeInTheDocument();
+  expect(screen.getByText("命中")).toBeInTheDocument();
   expect(api.searchSessions).toHaveBeenCalledWith("关键字");
+});
+
+test("session_list_can_load_more_than_the_first_page", async () => {
+  const first = Array.from({ length: 50 }, (_, index) =>
+    session({ sessionId: `s${index}`, title: `会话${index}` }),
+  );
+  const second = [session({ sessionId: "s50", title: "第 51 个会话" })];
+  vi.mocked(api.listSessions)
+    .mockResolvedValueOnce(first)
+    .mockResolvedValueOnce(second);
+  vi.mocked(api.sessionProviders).mockResolvedValue([provider()]);
+
+  render(<SessionsPanel />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "载入更多" }));
+
+  expect(await screen.findByText("第 51 个会话")).toBeInTheDocument();
+  expect(api.listSessions).toHaveBeenLastCalledWith(undefined, undefined, 50, 50);
 });
 
 test("opening_a_session_and_returning_keeps_the_search_term", async () => {
@@ -188,6 +206,31 @@ test("opening_a_session_and_returning_keeps_the_search_term", async () => {
   fireEvent.click(screen.getByRole("button", { name: "返回列表" }));
   expect(screen.getByPlaceholderText("搜索会话内容")).toHaveValue("关键字");
   expect(screen.getByText("关键字片段")).toBeInTheDocument();
+});
+
+test("scan_warnings_show_the_file_and_line", async () => {
+  vi.mocked(api.scanSessions).mockResolvedValue({
+    added: 0,
+    updated: 0,
+    removed: 0,
+    unchanged: 0,
+    failures: [],
+    warnings: [
+      {
+        agentId: "claude",
+        file: "C:/bad.jsonl",
+        line: 4,
+        message: "JSON 解析失败：expected value",
+      },
+    ],
+  });
+
+  render(<SessionsPanel />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "扫描本机会话" }));
+
+  expect(await screen.findByText(/bad\.jsonl:4/)).toBeInTheDocument();
+  expect(screen.getByText(/expected value/)).toBeInTheDocument();
 });
 
 test("scan_failures_are_listed_not_hidden", async () => {

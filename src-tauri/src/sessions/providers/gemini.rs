@@ -3,17 +3,21 @@
 
 use crate::domain::session::{
     ParsedMessage, ParsedSession, SessionError, SessionMessageKind, SessionRole, SessionSummary,
+    SessionWarning,
 };
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 const TITLE_MAX_CHARS: usize = 80;
+const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 pub fn parse_gemini(path: &Path) -> Result<ParsedSession, SessionError> {
-    let document = load_document(path)?;
-    map_document(&document, path)
+    let (document, warnings) = load_document(path)?;
+    map_document(&document, path, warnings)
 }
 
 pub fn parse_gemini_all(path: &Path) -> Result<Vec<ParsedSession>, SessionError> {
@@ -61,36 +65,60 @@ pub fn resume_gemini(summary: &SessionSummary) -> Option<String> {
     Some(format!("gemini --resume {}", summary.session_id))
 }
 
-fn load_document(path: &Path) -> Result<Value, SessionError> {
-    let text = std::fs::read_to_string(path)?;
+fn load_document(path: &Path) -> Result<(Value, Vec<SessionWarning>), SessionError> {
     let is_jsonl = path
         .extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"));
     if is_jsonl {
-        return replay_jsonl(&text);
+        return replay_jsonl(BufReader::new(File::open(path)?));
     }
+    let text = std::fs::read_to_string(path)?;
     let document: Value = serde_json::from_str(&text)?;
     if !document.is_object() {
         return Err(SessionError::Unsupported(
             "Gemini 会话不是 JSON 对象".to_string(),
         ));
     }
-    Ok(document)
+    Ok((document, Vec::new()))
 }
 
-/// 按 Gemini CLI 的 `loadConversationRecord` 回放增量日志。
-fn replay_jsonl(text: &str) -> Result<Value, SessionError> {
+/// 按 Gemini CLI 的 `loadConversationRecord` 回放增量日志。逐行读取，
+/// 坏行只记警告，前后的记录仍然回放。
+fn replay_jsonl(reader: impl BufRead) -> Result<(Value, Vec<SessionWarning>), SessionError> {
     let mut metadata = Map::new();
     let mut log = MessageLog::default();
+    let mut warnings = Vec::new();
     let mut seen_record = false;
 
-    for line in text.lines() {
+    for (line_number, line) in reader.lines().enumerate() {
+        let line = line?;
+        if line.len() > MAX_LINE_BYTES {
+            warnings.push(SessionWarning {
+                line: line_number + 1,
+                message: "单行超过 8 MiB，已跳过".to_string(),
+            });
+            continue;
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let Ok(Value::Object(mut record)) = serde_json::from_str::<Value>(trimmed) else {
+        let value: Value = match serde_json::from_str(trimmed) {
+            Ok(value) => value,
+            Err(error) => {
+                warnings.push(SessionWarning {
+                    line: line_number + 1,
+                    message: format!("JSON 解析失败：{error}"),
+                });
+                continue;
+            }
+        };
+        let Value::Object(mut record) = value else {
+            warnings.push(SessionWarning {
+                line: line_number + 1,
+                message: "记录不是 JSON 对象".to_string(),
+            });
             continue;
         };
         seen_record = true;
@@ -117,7 +145,7 @@ fn replay_jsonl(text: &str) -> Result<Value, SessionError> {
         return Err(SessionError::Unsupported("Gemini 会话文件为空".to_string()));
     }
     metadata.insert("messages".to_string(), Value::Array(log.messages));
-    Ok(Value::Object(metadata))
+    Ok((Value::Object(metadata), warnings))
 }
 
 #[derive(Default)]
@@ -159,7 +187,11 @@ impl MessageLog {
     }
 }
 
-fn map_document(document: &Value, path: &Path) -> Result<ParsedSession, SessionError> {
+fn map_document(
+    document: &Value,
+    path: &Path,
+    warnings: Vec<SessionWarning>,
+) -> Result<ParsedSession, SessionError> {
     let session_id = document
         .get("sessionId")
         .and_then(Value::as_str)
@@ -194,7 +226,7 @@ fn map_document(document: &Value, path: &Path) -> Result<ParsedSession, SessionE
         created_at,
         updated_at,
         messages,
-        warnings: Vec::new(),
+        warnings,
     })
 }
 
@@ -495,6 +527,29 @@ mod tests {
         assert!(files.iter().any(|p| p.ends_with("session-1.jsonl")));
         assert!(!files.iter().any(|p| p.ends_with("session-1.json")));
         assert!(files.iter().any(|p| p.ends_with("session-2.json")));
+    }
+
+    #[test]
+    fn gemini_reports_bad_lines_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-1.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"sessionId\":\"g1\"}\n",
+                "{\"id\":\"m1\",\"type\":\"user\",\"content\":\"保留\"}\n",
+                "not-json\n",
+                "{\"id\":\"m2\",\"type\":\"user\",\"content\":\"也保留\"}\n"
+            ),
+        )
+        .unwrap();
+
+        let parsed = parse_gemini(&path).unwrap();
+
+        assert_eq!(parsed.warnings.len(), 1, "{:?}", parsed.warnings);
+        assert_eq!(parsed.warnings[0].line, 3);
+        assert!(parsed.messages.iter().any(|m| m.content == "保留"));
+        assert!(parsed.messages.iter().any(|m| m.content == "也保留"));
     }
 
     #[test]

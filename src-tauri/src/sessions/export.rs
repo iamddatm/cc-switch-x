@@ -51,7 +51,27 @@ pub fn render_markdown(detail: &SessionDetail) -> String {
     markdown
 }
 
+/// 会话 ID 会原样拼进 shell 命令；只接受常见 provider 的 ID 字符集，
+/// 防止会话文件里的恶意 ID 在用户复制命令后执行额外语句。
+fn safe_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+/// 命令里的路径放在双引号中；双引号挡不住 `$()`、反引号与 `%VAR%`，
+/// 这些字符一律拒绝，宁可不给恢复命令也不拼出可注入的字符串。
+fn safe_command_path(path: &str) -> bool {
+    !path
+        .chars()
+        .any(|c| matches!(c, '"' | '$' | '`' | '%' | '!' | '\r' | '\n' | '\0'))
+}
+
 pub fn resume_info(provider: &SessionProvider, summary: &SessionSummary) -> Option<ResumeInfo> {
+    if !safe_session_id(&summary.session_id) {
+        return None;
+    }
     let resume = provider.resume?;
     let base = resume(summary)?;
     let cwd = summary
@@ -60,7 +80,7 @@ pub fn resume_info(provider: &SessionProvider, summary: &SessionSummary) -> Opti
         .filter(|path| !path.trim().is_empty())
         .map(str::to_string);
     if let Some(path) = &cwd {
-        if path.contains('"') || path.contains('\r') || path.contains('\n') || path.contains('\0') {
+        if !safe_command_path(path) {
             return None;
         }
     }
@@ -251,5 +271,27 @@ mod tests {
     fn a_project_path_that_could_break_out_of_the_command_is_refused() {
         let claude = provider("claude").unwrap();
         assert!(resume_info(claude, &summary(Some("D:/x\" && rm -rf /"))).is_none());
+        assert!(resume_info(claude, &summary(Some("D:/$(calc)"))).is_none());
+        assert!(resume_info(claude, &summary(Some("D:/`calc`"))).is_none());
+        assert!(resume_info(claude, &summary(Some("D:/100%/x"))).is_none());
+    }
+
+    #[test]
+    fn a_session_id_that_could_break_out_of_the_command_is_refused() {
+        let claude = provider("claude").unwrap();
+        for evil in ["x; calc", "$(calc)", "x`calc`", "x|calc", "x&calc"] {
+            let mut summary = summary(Some("D:/x"));
+            summary.session_id = evil.to_string();
+            assert!(resume_info(claude, &summary).is_none(), "{evil}");
+        }
+    }
+
+    #[test]
+    fn a_pi_source_path_with_shell_expansion_is_refused() {
+        let pi = provider("pi").unwrap();
+        let mut summary = summary(Some("D:/x"));
+        summary.agent_id = "pi".into();
+        summary.source_path = "D:/x/$(calc).jsonl".into();
+        assert!(resume_info(pi, &summary).is_none());
     }
 }

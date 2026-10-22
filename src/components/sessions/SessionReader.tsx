@@ -27,6 +27,7 @@ export function SessionReader({
 }: SessionReaderProps) {
   const [messages, setMessages] = useState<SessionMessage[]>([]);
   const [total, setTotal] = useState(0);
+  const [windowStart, setWindowStart] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [highlightedSeq, setHighlightedSeq] = useState<number | null>(null);
@@ -44,6 +45,7 @@ export function SessionReader({
     setError(null);
     setHighlightedSeq(null);
     setHighlightQuery("");
+    setWindowStart(0);
     api
       .getSession(session.agentId, session.sessionId, 0, PAGE_SIZE)
       .then((detail) => {
@@ -75,7 +77,7 @@ export function SessionReader({
       const detail = await api.getSession(
         session.agentId,
         session.sessionId,
-        messages.length,
+        windowStart + messages.length,
         PAGE_SIZE,
       );
       setTotal(detail.total);
@@ -91,12 +93,13 @@ export function SessionReader({
     } finally {
       setLoading(false);
     }
-  }, [messages.length, session.agentId, session.sessionId]);
+  }, [messages.length, session.agentId, session.sessionId, windowStart]);
 
   const jumpTo = useCallback(
     async (match: SessionMatch, query: string) => {
       setHighlightQuery(query);
       setHighlightedSeq(match.seq);
+      setWindowStart(Math.max(0, match.index - JUMP_CONTEXT));
       setLoading(true);
       setError(null);
       try {

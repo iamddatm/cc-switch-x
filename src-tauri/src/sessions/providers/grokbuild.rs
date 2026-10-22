@@ -134,6 +134,10 @@ fn read_chat_history(path: &Path) -> Result<ChatHistory, SessionError> {
         };
         let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
         if !matches!(kind, "system" | "user" | "assistant" | "tool") {
+            warnings.push(SessionWarning {
+                line: line_number + 1,
+                message: format!("未知记录类型：{kind}"),
+            });
             continue;
         }
         if let Some(timestamp) = value
@@ -252,6 +256,19 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/sessions")
             .join(name)
+    }
+
+    #[test]
+    fn grok_reports_unknown_record_types() {
+        let parsed = parse_grokbuild(&fixture("grokbuild/sessions/p1/s1/summary.json")).unwrap();
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.line == 5 && warning.message.contains("reasoning")),
+            "{:?}",
+            parsed.warnings
+        );
     }
 
     #[test]

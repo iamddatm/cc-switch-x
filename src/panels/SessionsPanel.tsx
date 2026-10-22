@@ -15,9 +15,11 @@ export function SessionsPanel() {
     hits,
     loading,
     scanning,
+    hasMore,
     scanReport,
     error,
     scan,
+    loadMore,
     search,
     clearSearch,
   } = useSessions();
@@ -27,8 +29,8 @@ export function SessionsPanel() {
 
   const providerFor = (agentId: string) =>
     providers.find((provider) => provider.agentId === agentId);
-  const presentProviders = providers.filter((provider) =>
-    sessions.some((session) => session.agentId === provider.agentId),
+  const presentProviders = providers.filter(
+    (provider) => provider.sessionCount > 0,
   );
   const visibleSessions = sessions.filter(
     (session) => !selectedAgent || session.agentId === selectedAgent,
@@ -136,6 +138,20 @@ export function SessionsPanel() {
               ))}
             </ul>
           )}
+          {scanReport.warnings.length > 0 && (
+            <ul className="mt-2 space-y-1 text-amber-700">
+              {scanReport.warnings.map((warning, index) => (
+                <li
+                  key={`${warning.agentId}:${warning.file}:${warning.line}:${index}`}
+                >
+                  <span>
+                    {warning.file}:{warning.line}
+                  </span>
+                  ：<span>{warning.message}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
       )}
 
@@ -233,6 +249,16 @@ export function SessionsPanel() {
               ))}
             </div>
           )}
+          {hits === null && hasMore && (
+            <button
+              type="button"
+              className="rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:hover:bg-slate-700"
+              disabled={loading}
+              onClick={() => void loadMore()}
+            >
+              载入更多
+            </button>
+          )}
         </>
       )}
     </section>
@@ -296,7 +322,7 @@ function SearchHitRow({
       >
         <span className="flex flex-wrap items-center gap-2">
           <span className="rounded bg-slate-100 px-1 text-xs text-slate-600 dark:bg-slate-700 dark:text-slate-200">
-            会话内命中
+            命中
           </span>
           <span className="font-medium">{hit.session.title}</span>
           <span className="text-xs text-slate-500">

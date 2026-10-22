@@ -164,6 +164,16 @@ test("in_session_search_jumps_to_the_matching_message", async () => {
     "data-highlighted",
     "true",
   );
+
+  fireEvent.click(screen.getByRole("button", { name: "载入更多" }));
+  await vi.waitFor(() =>
+    expect(api.getSession).toHaveBeenLastCalledWith(
+      SESSION.agentId,
+      SESSION.sessionId,
+      150,
+      200,
+    ),
+  );
 });
 
 test("search_terms_are_rendered_as_text_not_html", async () => {
