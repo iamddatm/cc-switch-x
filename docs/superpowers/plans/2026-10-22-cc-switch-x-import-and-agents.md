@@ -30,7 +30,7 @@
 | `skill_repos(owner,name,branch,enabled)`；`~/.cc-switch/skills/<dir>/SKILL.md` 共 81 个目录 | 本机 | 已验证 |
 | 来源元数据只在 DB 与 `skill-backups/<ts>_<name>/meta.json`（DB 行的 camelCase 快照），skill 目录内无来源文件 | 本机 | 已验证 |
 | `~/.cc-switch/settings.json` 有 `webdavSync.password` 明文、`currentProvider*`、`skillSyncMethod` | 本机 | 已验证（**均不导入**，见 2.2 非目标） |
-| Claude 用户级 MCP 落点是 `~/.claude.json` 顶层 `mcpServers`（不在 `settings.json`） | 子代理实测本机文件 | 待复核（Task 7 用 fixture 断言，不依赖真机） |
+| Claude 用户级 MCP 落点是 `~/.claude.json` 顶层 `mcpServers`（不在 `settings.json`） | 子代理实测本机文件 + 沙箱真机写入验证 | 已验证（键级合并与键序保留均通过，见 Task 10 实测结果） |
 | Codex MCP 落点 `~/.codex/config.toml` 的 `[mcp_servers.<name>]`；hooks 在独立 `hooks.json` 且需 `[features].hooks = true` | 子代理实测本机文件 | 待复核 |
 | Codex `rules/default.rules` 是命令执行策略 DSL，**不是** markdown 规则 | 子代理实测 | 已验证（Plan 3 据此把 Codex 的 Rules 标为不支持） |
 | Qoder CN CLI：`~/.qoder-cn/settings.json` 顶层 `mcpServers`，`requiresRestart:true`、`mergeStrategy:"shallow_merge"`；`rules/*.md` 用 `trigger: always_on\|glob\|manual\|model_decision` + 逗号裸值 `glob:`；`agents/*.md`；`skills/`；提示词 `AGENTS.md` | 子代理读二进制内默认档 | 待复核（Task 10 真机 diff） |
@@ -599,6 +599,21 @@ test("activating a prompt over foreign content asks for confirmation", async () 
 - [ ] **Step 4: 真机 UI 验证**（CDP 驱动，同 Plan 1 的做法）
   - 导入向导预览 → 执行 → MCP 面板出现导入条目 → 逐 agent 开关写入临时配置根 → Skills 面板显示链接方式 → Prompts 激活触发接管确认。截图逐张查看后再清理临时目录。
 - [ ] **Step 5: 提交** — `git commit -m "test: 补充导入与适配的端到端验证记录"`（把 Step 2/3 的实测结论回写进本文件「事实来源」表）
+
+### 实测结果（2026-10-22 执行记录）
+
+全部写在 `%TEMP%` 沙箱里，agent 配置根通过 `local/agents/claude.json` 的 `baseOverride` 重定向；真实 `~/.claude.json` 与 `~/.cc-switch/**` 前后逐字节未变。
+
+| 验证项 | 结果 |
+|---|---|
+| 真实 cc-switch 导入（`cargo test --test import_local_ccswitch -- --ignored`） | 5 MCP / 5 prompts(4 成功 1 失败) / 81 skills；源库里的明文凭据在产物 `assets/**` 与 `index.db` 中全部搜不到；`cc-switch.db` 逐字节不变 |
+| UI 导入向导 | 预览显示「MCP 5 条」等计数与「有记录但文件缺失」；执行后显示「cc-switch 数据保持原样」 |
+| Claude MCP 键级合并（真机） | 勾选后沙箱 `.claude.json` 多出 `mcpServers.playwright`（密钥已解析成明文），`permissions` / `statusLine` / `mcpServers.theirs` 与键序不变；取消勾选只删掉 `playwright` |
+| Skills 分发（真机） | 实测 `LinkKind = symlink`，`~/.claude/skills/<id>` 是指向真源目录的 SymbolicLink；矩阵 `agents/claude.json` 记下 35 个 skill 与 4 条 MCP、`activePrompt` |
+| 备份 | 每次 apply 都在 `backups/<ts>/claude/mcp/<id>/` 留下写入前原件 |
+| A1（Qoder CN 读 `settings.json.mcpServers`） | **仍未确证**：`qoderclicn mcp list` 在空配置下回「No MCP servers configured.」，与「读别处」无法区分；要确证必须往真实配置写一条，需用户点头 |
+
+**真机才发现的缺陷（jsdom 测不出来）**：复选框嵌在 `<label>` 内时，真实浏览器一次点击触发两次 `change`，导致「启用后立刻被取消」（UI 一度显示 `落地方式：absent`）。已改为 `input id` + `label htmlFor`，并补了「点一次只发一次请求」的断言。
 
 ---
 

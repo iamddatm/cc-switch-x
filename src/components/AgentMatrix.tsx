@@ -19,6 +19,8 @@ export function AgentMatrix({
 }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  /** skill 的实测落地方式（symlink / junction / copy），由后端返回，不是配置意图 */
+  const [kinds, setKinds] = useState<Record<string, string>>({});
 
   const toggle = async (agent: AgentStatus, enabled: boolean) => {
     setBusy(agent.id);
@@ -26,7 +28,8 @@ export function AgentMatrix({
       if (assetType === "mcp") {
         await api.setMcpEnabled(id, agent.id, enabled);
       } else {
-        await api.setSkillEnabled(id, agent.id, enabled);
+        const label = await api.setSkillEnabled(id, agent.id, enabled);
+        setKinds((current) => ({ ...current, [agent.id]: label }));
       }
       setError(null);
       onChanged();
@@ -51,24 +54,30 @@ export function AgentMatrix({
             );
           }
           const on = (assetType === "mcp" ? agent.enabledMcp : agent.enabledSkills).includes(id);
+          // 控件不能嵌在 <label> 里：那样点一次会触发两次 change（启用后立刻又被取消）
+          const inputId = `matrix-${assetType}-${id}-${agent.id}`;
           return (
-            <li key={agent.id}>
-              <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  aria-label={`${agent.displayName} 启用 ${id}`}
-                  checked={on}
-                  disabled={!agent.detected || busy === agent.id}
-                  onChange={(e) => void toggle(agent, e.target.checked)}
-                />
-                <span>{agent.displayName}</span>
-                {!agent.detected && (
-                  <span className="text-slate-500 dark:text-slate-400">未检测到</span>
-                )}
-                {on && assetType === "mcp" && agent.mcpNeedsRestart !== false && (
-                  <span className="text-amber-700 dark:text-amber-400">需重启或 reload</span>
-                )}
-              </label>
+            <li key={agent.id} className="flex items-center gap-2">
+              <input
+                id={inputId}
+                type="checkbox"
+                aria-label={`${agent.displayName} 启用 ${id}`}
+                checked={on}
+                disabled={!agent.detected || busy === agent.id}
+                onChange={(e) => void toggle(agent, e.target.checked)}
+              />
+              <label htmlFor={inputId}>{agent.displayName}</label>
+              {!agent.detected && (
+                <span className="text-slate-500 dark:text-slate-400">未检测到</span>
+              )}
+              {on && assetType === "mcp" && agent.mcpNeedsRestart !== false && (
+                <span className="text-amber-700 dark:text-amber-400">需重启或 reload</span>
+              )}
+              {assetType === "skill" && kinds[agent.id] && (
+                <span className="text-slate-500 dark:text-slate-400">
+                  落地方式：{kinds[agent.id]}
+                </span>
+              )}
             </li>
           );
         })}
