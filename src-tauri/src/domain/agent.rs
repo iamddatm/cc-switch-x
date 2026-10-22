@@ -126,10 +126,15 @@ pub enum McpTarget {
 }
 
 /// Hooks 一律是「某个 JSON 文件里的某个子树」；Codex 用的是独立的 hooks.json 而非 settings.json。
+/// `matcher=false` 表示该工具的条目里没有 `matcher` 字段（Codex 实测如此），渲染时就不许写它。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum HooksTarget {
-    Json { file: String, key: String },
+    Json {
+        file: String,
+        key: String,
+        matcher: bool,
+    },
     Unsupported,
 }
 
@@ -240,6 +245,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
                 hooks: HooksTarget::Json {
                     file: declared("~/.claude", "settings.json"),
                     key: "hooks".into(),
+                    matcher: true,
                 },
             },
             mcp_needs_restart: None,
@@ -269,6 +275,8 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
                 hooks: HooksTarget::Json {
                     file: declared("~/.codex", "hooks.json"),
                     key: "hooks".into(),
+                    // 本机 hooks.json 的条目里没有 matcher（实测形状）
+                    matcher: false,
                 },
             },
             mcp_needs_restart: None,
@@ -321,6 +329,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
                 hooks: HooksTarget::Json {
                     file: declared("~/.qoder", "settings.json"),
                     key: "hooks".into(),
+                    matcher: true,
                 },
             },
             mcp_needs_restart: None,
@@ -353,6 +362,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
                 hooks: HooksTarget::Json {
                     file: declared("~/.qoder-cn", "settings.json"),
                     key: "hooks".into(),
+                    matcher: true,
                 },
             },
             mcp_needs_restart: Some(true),

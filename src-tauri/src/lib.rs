@@ -37,6 +37,8 @@ pub fn run() {
             commands::assets::read_asset,
             commands::assets::write_asset,
             commands::assets::delete_asset,
+            commands::hooks::foreign_hook_count,
+            commands::hooks::set_hook_enabled,
             commands::import::import_apply,
             commands::import::import_preview,
             commands::import::revert_last,

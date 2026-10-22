@@ -515,7 +515,39 @@ fn tool_private_fields_land_in_tool_extras_and_come_back() {
 - `hooks::plan_enable / plan_disable`:读目标 `settings.json` → 只动 `hooks` 子树 → 按 `description` 前缀增删**自己的**条目 → 其余条目与键原样(键序保留,靠 `preserve_order`)。
 - `hooks::foreign_count`:报告该文件里非我们的条目数,UI 明示「这些是你自己的,我们不动」。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
+
+#### Task 6 执行记录（2026-10-22）
+
+- 事件白名单落地成 `domain::hook::KNOWN_EVENTS`（28 个，逐条抄自本机
+  `qoderclicn` 二进制里的事件枚举 `X.PreToolUse="PreToolUse" … X.PermissionDenied="PermissionDenied"`）。
+  `parse_hook` 与 `render_entry` 都走 `Hook::validate()`，拼错的事件名在**渲染阶段**就失败，
+  测试还断言了「失败时目标文件一个字节没变」。
+  单测钉住 28 这个数字并查重（名单里有重复的话「28」就失去意义）。
+- **`HooksTarget::Json` 加了 `matcher: bool`**：条目里能不能有 `matcher` 是**工具形状**，
+  不该在渲染代码里按 agent id 猜。claude / qoder / qoder-cn 为 `true`，codex 为 `false`
+  （本机 `~/.codex/hooks.json` 的条目里没有 matcher）。
+- 归属标记 `description = "[ccswitchx:hook:<id>]"`；`entry_owner` 按前缀取 `<id>`，
+  容忍 `]` 之后跟空白加说明（用户可能自己补了话），**不**容忍 `]` 后直接接字符、
+  不闭合、空 id 这三种形似写法。识别只认标记：命令完全相同的用户条目一律不动
+  （`a_file_without_the_marker_is_left_alone_even_if_the_command_matches`）。
+- 合并只在 `hooks` 子树内进行，另外三处保守到底：`hooks` 不是对象、`hooks.<event>` 不是数组、
+  目标 JSON 解析失败 → 报错且不写；自家最后一条被删掉后，空掉的 event 与空掉的 `hooks`
+  子树一起收掉，不在用户配置里留 `"hooks": {}` 这种噪音。
+- 幂等：先按 owner 摘掉自家旧条目再放新的，所以「重复 enable」字节不变（ApplyService 会 skip），
+  「改了 command 再 enable」是**原位替换**（用户那条仍在它原来的位置）。
+- `timeout` 单位是秒，canonical 与两侧字段同名同义，不做换算；`command_windows` 只在
+  `cfg!(target_os = "windows")` 且非空时替换 `command`。
+- `needs_restart` 恒为 `true`：hook 的热加载语义没有实测依据，`written` 不能说成 `effective`。
+- 新增命令 `set_hook_enabled`（返回逐项报告）与 `foreign_hook_count`（面板要明示
+  「这些是你自己的，我们不动」）。hooks 不写台账——它的归属信号在条目自己身上，
+  Global Constraints 里台账只管**文件型**资产。
+- **一处已知缺口，留给 Task 11 复核**：这份 28 事件名单来自 Qoder CN 的实现，
+  Claude 文档里的事件名全在其中，但「Claude 会不会忽略它不认的事件、还是报错」没有实测依据。
+  现在按单一白名单处理（plan 的口径），Task 11 真机验证时若发现 Claude 侧需要更窄的名单，
+  就把白名单按 agent 拆开——那是收紧，不是放宽。
+- 门禁：`cargo test` 195 通过（本任务 +19：hooks 15 + hook 域 4）、`cargo fmt --check` 干净、
+  `cargo clippy --all-targets` 只剩 Plan 2 那条遗留告警。
 
 ```rust
 #[test]
@@ -560,7 +592,7 @@ fn windows_command_is_used_only_on_windows() {
 }
 ```
 
-- [ ] **Step 2–5:** 红 → 实现 → 绿 → 提交 `git commit -m "feat: 添加 Hooks 写入 settings.json 与归属标记"`。
+- [x] **Step 2–5:** 红 → 实现 → 绿 → 提交 `git commit -m "feat: 添加 Hooks 写入 settings.json 与归属标记"`。
 
 ---
 

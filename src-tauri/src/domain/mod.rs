@@ -22,6 +22,10 @@ pub enum DomainError {
     EmptyDescription,
     #[error("正文（提示词/指令）不能为空")]
     EmptyInstructions,
+    #[error("命令不能为空")]
+    EmptyCommand,
+    #[error("未知的 hook 事件名：{0}")]
+    UnknownHookEvent(String),
     #[error("MCP stdio 必须提供 command")]
     McpCommandRequired,
     #[error("MCP 非 stdio 必须提供 url")]
