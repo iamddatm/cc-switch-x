@@ -1,7 +1,7 @@
 use crate::adapters::paths::expand_root;
 use crate::domain::agent::builtin_agents;
 use crate::domain::enablement::AgentEnablement;
-use crate::domain::AssetType;
+use crate::domain::{AssetKind, AssetType, CapabilityStatus};
 use crate::error::AppError;
 use crate::store::atomic::write_atomic;
 use crate::store::Store;
@@ -26,12 +26,27 @@ pub struct AgentStatus {
     pub id: String,
     pub display_name: String,
     pub detected: bool,
-    pub verified: bool,
+    /// 每类资产的 supported/verified 一档一档列出来；不再有「整个 agent 已验证」这种粗话。
+    pub capabilities: Vec<CapabilityStatus>,
     pub mcp_needs_restart: Option<bool>,
     pub mcp_path: PathBuf,
     pub enabled_mcp: Vec<String>,
     pub enabled_skills: Vec<String>,
     pub active_prompt: Option<String>,
+}
+
+impl AgentStatus {
+    pub fn switchable(&self, kind: AssetKind) -> bool {
+        self.capabilities.iter().any(|capability| {
+            capability.kind == kind && capability.supported && capability.verified
+        })
+    }
+
+    pub fn supported(&self, kind: AssetKind) -> bool {
+        self.capabilities
+            .iter()
+            .any(|capability| capability.kind == kind && capability.supported)
+    }
 }
 
 /// 读 `agents/<id>.json`；缺失按空矩阵处理，损坏则如实报错（不静默清空真源）。
@@ -94,7 +109,7 @@ pub fn detect_all(store: &Store, home: &Path) -> Result<Vec<AgentStatus>, AppErr
         let mcp_path = expand_root(descriptor.paths.mcp_file(), override_base.as_deref(), home);
         out.push(AgentStatus {
             detected: config_root.is_dir(),
-            verified: descriptor.verified,
+            capabilities: descriptor.capabilities(),
             mcp_needs_restart: descriptor.mcp_needs_restart,
             display_name: descriptor.display_name,
             id: descriptor.id,
@@ -172,6 +187,7 @@ mod tests {
             keys,
             vec![
                 "activePrompt",
+                "capabilities",
                 "detected",
                 "displayName",
                 "enabledMcp",
@@ -179,7 +195,6 @@ mod tests {
                 "id",
                 "mcpNeedsRestart",
                 "mcpPath",
-                "verified",
             ]
         );
     }
@@ -202,11 +217,25 @@ mod tests {
     }
 
     #[test]
-    fn unverified_agents_are_reported_so_the_ui_can_hide_their_switches() {
+    fn switches_are_offered_per_capability_not_per_agent() {
         let dir = tempdir().unwrap();
         let store = Store::init(dir.path().join("store")).unwrap();
         let status = detect_all(&store, &dir.path().join("home")).unwrap();
-        assert!(!status.iter().find(|s| s.id == "qoder").unwrap().verified);
-        assert_eq!(status.iter().filter(|s| s.verified).count(), 5);
+        let by_id = |id: &str| status.iter().find(|s| s.id == id).unwrap();
+
+        // Qoder 国际版：A2b 没确证，连 MCP 都不给开关
+        assert!(!by_id("qoder").switchable(AssetKind::Mcp));
+
+        // Qoder CN：MCP 有依据；rules 是「有落点但没验证」，两者在 UI 上表现不同
+        let qoder_cn = by_id("qoder-cn");
+        assert!(qoder_cn.switchable(AssetKind::Mcp));
+        assert!(!qoder_cn.switchable(AssetKind::Rule));
+        assert!(
+            qoder_cn.supported(AssetKind::Rule),
+            "落点存在只是没验证，不能说成不支持"
+        );
+
+        // Codex 根本没有 markdown 规则这个概念
+        assert!(!by_id("codex").supported(AssetKind::Rule));
     }
 }

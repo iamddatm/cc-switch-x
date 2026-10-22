@@ -1,3 +1,4 @@
+pub mod ledger;
 pub mod mcp;
 pub mod paths;
 pub mod prompt;

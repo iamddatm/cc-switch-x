@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import { SkillsPanel } from "../panels/SkillsPanel";
 import { api } from "../lib/api";
-import type { AgentStatus } from "../types";
+import { agentStatus } from "../test/agents";
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -13,17 +13,7 @@ vi.mock("../lib/api", () => ({
   },
 }));
 
-const claude: AgentStatus = {
-  id: "claude",
-  displayName: "Claude Code",
-  detected: true,
-  verified: true,
-  mcpNeedsRestart: null,
-  mcpPath: "C:/x/.claude.json",
-  enabledMcp: [],
-  enabledSkills: [],
-  activePrompt: null,
-};
+const claude = agentStatus();
 
 beforeEach(() => {
   vi.clearAllMocks();

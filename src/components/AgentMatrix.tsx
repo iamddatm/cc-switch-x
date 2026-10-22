@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { api } from "../lib/api";
-import type { AgentStatus } from "../types";
+import { switchable, supported, type AgentStatus, type AssetKind } from "../types";
 
 /**
- * 「资产 × agent」开关。未实测的 agent 只显示说明、不给开关；
+ * 「资产 × agent」开关。能力按资产类型逐格判定：
+ * 该 agent 没有这一类落点 → 整行不出现；有落点但没实测 → 只说明、不给开关。
  * 没有实测依据时按「需要重启」提示，不把未知报成安全。
  */
 export function AgentMatrix({
@@ -12,7 +13,7 @@ export function AgentMatrix({
   agents,
   onChanged,
 }: {
-  assetType: "mcp" | "skill";
+  assetType: Extract<AssetKind, "mcp" | "skill">;
   id: string;
   agents: AgentStatus[];
   onChanged: () => void;
@@ -46,7 +47,10 @@ export function AgentMatrix({
       {error && <p className="mb-2 text-sm text-red-600 dark:text-red-400">{error}</p>}
       <ul className="space-y-1 text-sm">
         {agents.map((agent) => {
-          if (!agent.verified) {
+          if (!supported(agent, assetType)) {
+            return null;
+          }
+          if (!switchable(agent, assetType)) {
             return (
               <li key={agent.id} className="text-slate-500 dark:text-slate-400">
                 {agent.displayName}：未实测，暂不提供开关

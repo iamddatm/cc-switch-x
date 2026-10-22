@@ -21,6 +21,13 @@ impl AssetType {
         Self::Hook,
     ];
 
+    /// 能力表键回到真源资产类型：Session 不是真源资产，返回 Err 让调用方必须处理。
+    pub fn from_kind(
+        kind: crate::domain::agent::AssetKind,
+    ) -> Result<Self, crate::domain::agent::AssetKind> {
+        kind.try_as_asset_type()
+    }
+
     pub fn dir_name(self) -> &'static str {
         match self {
             Self::Mcp => "mcp",

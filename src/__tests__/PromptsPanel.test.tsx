@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import { PromptsPanel } from "../panels/PromptsPanel";
 import { api } from "../lib/api";
-import type { AgentStatus } from "../types";
+import { agentStatus, capabilities } from "../test/agents";
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -13,17 +13,7 @@ vi.mock("../lib/api", () => ({
   },
 }));
 
-const claude: AgentStatus = {
-  id: "claude",
-  displayName: "Claude Code",
-  detected: true,
-  verified: true,
-  mcpNeedsRestart: null,
-  mcpPath: "C:/x/.claude.json",
-  enabledMcp: [],
-  enabledSkills: [],
-  activePrompt: null,
-};
+const claude = agentStatus();
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -82,4 +72,21 @@ test("salvaging stores the old content under a new prompt id", async () => {
   await waitFor(() => expect(api.activatePrompt).toHaveBeenCalledTimes(2));
   const options = vi.mocked(api.activatePrompt).mock.calls[1][2];
   expect(options?.saveExistingAs).toMatch(/^salvaged-/);
+});
+
+test("an unverified prompt target is named but not activatable", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([
+    claude,
+    agentStatus({
+      id: "qoder",
+      displayName: "Qoder",
+      capabilities: capabilities({ prompt: "unverified", rule: "unverified" }),
+    }),
+  ]);
+  render(<PromptsPanel />);
+  fireEvent.click(await screen.findByText("team"));
+
+  expect(await screen.findByText(/Qoder：未实测，暂不提供激活/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "激活到 Qoder" })).not.toBeInTheDocument();
+  expect(api.activatePrompt).not.toHaveBeenCalled();
 });

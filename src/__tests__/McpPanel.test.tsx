@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import { McpPanel } from "../panels/McpPanel";
 import { api } from "../lib/api";
+import { agentStatus, capabilities } from "../test/agents";
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -97,23 +98,8 @@ test("keeps the entry when the delete is cancelled", async () => {
   expect(screen.getByRole("textbox", { name: "JSON 编辑器" })).toBeInTheDocument();
 });
 
-function agent(overrides: Partial<import("../types").AgentStatus>) {
-  return {
-    id: "claude",
-    displayName: "Claude Code",
-    detected: true,
-    verified: true,
-    mcpNeedsRestart: null,
-    mcpPath: "C:/x/.claude.json",
-    enabledMcp: [],
-    enabledSkills: [],
-    activePrompt: null,
-    ...overrides,
-  };
-}
-
 test("toggling an agent switch calls setMcpEnabled", async () => {
-  vi.mocked(api.listAgents).mockResolvedValue([agent({})]);
+  vi.mocked(api.listAgents).mockResolvedValue([agentStatus()]);
   vi.mocked(api.setMcpEnabled).mockResolvedValue({
     written: 1,
     skipped: 0,
@@ -128,10 +114,14 @@ test("toggling an agent switch calls setMcpEnabled", async () => {
   await waitFor(() => expect(api.setMcpEnabled).toHaveBeenCalledWith("pw", "claude", true));
 });
 
-test("unverified agents show no switch", async () => {
+test("an unverified capability shows a note instead of a switch", async () => {
   vi.mocked(api.listAgents).mockResolvedValue([
-    agent({}),
-    agent({ id: "qoder", displayName: "Qoder", verified: false }),
+    agentStatus(),
+    agentStatus({
+      id: "qoder",
+      displayName: "Qoder",
+      capabilities: capabilities({ mcp: "unverified" }),
+    }),
   ]);
   render(<McpPanel />);
   fireEvent.click(await screen.findByText("Playwright"));
@@ -139,9 +129,20 @@ test("unverified agents show no switch", async () => {
   expect(screen.queryByRole("checkbox", { name: "Qoder 启用 pw" })).not.toBeInTheDocument();
 });
 
+test("an agent without that capability at all does not appear in the row", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agentStatus(),
+    agentStatus({ id: "gemini", displayName: "Gemini CLI", capabilities: capabilities({}) }),
+  ]);
+  render(<McpPanel />);
+  fireEvent.click(await screen.findByText("Playwright"));
+  await screen.findByRole("checkbox", { name: "Claude Code 启用 pw" });
+  expect(screen.queryByText(/Gemini CLI/)).not.toBeInTheDocument();
+});
+
 test("an agent with unmeasured restart semantics still warns about restart", async () => {
   vi.mocked(api.listAgents).mockResolvedValue([
-    agent({ mcpNeedsRestart: null, enabledMcp: ["pw"] }),
+    agentStatus({ mcpNeedsRestart: null, enabledMcp: ["pw"] }),
   ]);
   render(<McpPanel />);
   fireEvent.click(await screen.findByText("Playwright"));

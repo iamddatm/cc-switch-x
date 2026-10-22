@@ -3,7 +3,7 @@ use crate::adapters::prompt::{self, ActivateOutcome, Takeover};
 use crate::adapters::skills::{self, Deployed, Removed};
 use crate::domain::agent::{builtin_agents, AgentDescriptor};
 use crate::domain::mcp::McpServer;
-use crate::domain::AssetType;
+use crate::domain::{AssetKind, AssetType};
 use crate::error::AppError;
 use crate::import::update_matrix;
 use crate::services::agents::{detect_all, load_state, AgentStatus};
@@ -12,12 +12,19 @@ use crate::state::AppState;
 use std::path::PathBuf;
 use tauri::State;
 
-fn descriptor(agent_id: &str) -> Result<AgentDescriptor, AppError> {
+/// 每个写入入口都要带上要动的资产类型，能力表按类型把关：
+/// 未实测的落点连命令都进不来，而不是靠面板自觉。
+fn descriptor(agent_id: &str, kind: AssetKind) -> Result<AgentDescriptor, AppError> {
     builtin_agents()
         .into_iter()
         .find(|agent| agent.id == agent_id)
-        .filter(|agent| agent.verified)
-        .ok_or_else(|| AppError::Unsupported(format!("未实测或未收录的 agent：{agent_id}")))
+        .filter(|agent| agent.switchable(kind))
+        .ok_or_else(|| {
+            AppError::Unsupported(format!(
+                "{agent_id} 的 {} 落点未收录或未实测，未做任何改动",
+                kind.snake_name()
+            ))
+        })
 }
 
 fn override_base(state: &AppState, agent_id: &str) -> Result<Option<PathBuf>, AppError> {
@@ -36,7 +43,7 @@ pub fn set_mcp_enabled(
     agent_id: String,
     enabled: bool,
 ) -> Result<ApplyReport, AppError> {
-    let descriptor = descriptor(&agent_id)?;
+    let descriptor = descriptor(&agent_id, AssetKind::Mcp)?;
     let canonical = state.store.read(AssetType::Mcp, &id)?;
     let server: McpServer = serde_json::from_slice(&canonical)?;
     let base = override_base(&state, &agent_id)?;
@@ -79,7 +86,7 @@ pub fn set_skill_enabled(
     agent_id: String,
     enabled: bool,
 ) -> Result<String, AppError> {
-    let descriptor = descriptor(&agent_id)?;
+    let descriptor = descriptor(&agent_id, AssetKind::Skill)?;
     let base = override_base(&state, &agent_id)?;
     let label = if enabled {
         match skills::deploy(&state.store, &descriptor, &id, &state.home, base.as_deref())? {
@@ -122,7 +129,7 @@ pub fn activate_prompt(
     confirm: Option<bool>,
     save_existing_as: Option<String>,
 ) -> Result<ActivateOutcome, AppError> {
-    let descriptor = descriptor(&agent_id)?;
+    let descriptor = descriptor(&agent_id, AssetKind::Prompt)?;
     let base = override_base(&state, &agent_id)?;
     let takeover = match save_existing_as {
         Some(new_id) => Takeover::SaveExistingAs(new_id),

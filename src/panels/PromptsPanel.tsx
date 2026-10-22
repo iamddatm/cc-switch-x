@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useAgents } from "../hooks/useAgents";
 import { useAssets } from "../hooks/useAssets";
 import { api } from "../lib/api";
+import { switchable, supported } from "../types";
 
 export function PromptsPanel() {
   const { items, error, refresh } = useAssets("prompt");
@@ -77,16 +78,22 @@ export function PromptsPanel() {
             <h3 className="mt-4 mb-2 text-sm font-medium">激活到</h3>
             <ul className="space-y-1 text-sm">
               {agents
-                .filter((agent) => agent.verified)
+                .filter((agent) => supported(agent, "prompt"))
                 .map((agent) => (
                   <li key={agent.id} className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      className="rounded border border-slate-300 px-2 py-1 dark:border-slate-600"
-                      onClick={() => void activate(selected, agent.id)}
-                    >
-                      激活到 {agent.displayName}
-                    </button>
+                    {switchable(agent, "prompt") ? (
+                      <button
+                        type="button"
+                        className="rounded border border-slate-300 px-2 py-1 dark:border-slate-600"
+                        onClick={() => void activate(selected, agent.id)}
+                      >
+                        激活到 {agent.displayName}
+                      </button>
+                    ) : (
+                      <span className="text-slate-500 dark:text-slate-400">
+                        {agent.displayName}：未实测，暂不提供激活
+                      </span>
+                    )}
                     {activeBy(agent.id) === selected && <span>当前激活</span>}
                   </li>
                 ))}

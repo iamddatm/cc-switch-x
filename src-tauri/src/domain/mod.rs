@@ -9,7 +9,7 @@ pub mod rule;
 pub mod secret;
 pub mod subagent;
 
-pub use agent::is_known_agent;
+pub use agent::{is_known_agent, AssetKind, AssetSupport, CapabilityStatus, SupportMap};
 pub use asset::{AssetState, AssetSummary, AssetType};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

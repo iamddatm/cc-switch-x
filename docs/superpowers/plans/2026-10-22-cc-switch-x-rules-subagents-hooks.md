@@ -101,7 +101,7 @@ src/
 - `ledger.rs`：`AppliedLedger { entries: BTreeMap<String, AppliedEntry> }`,`AppliedEntry { asset_type, asset_id, target_path, hash, rendered_by: u32 }`,`rendered_by` 是渲染器版本号,给 `previousRenders` 用。读写 `state/applied/<agent>.json`。
 - `THIRD_PARTY_NOTICES.md`：记 teamai-cli / cc-switch / vercel-labs-skills 的 MIT 声明与本仓库借用的机制清单。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```rust
 // domain/agent.rs 末尾
@@ -176,10 +176,40 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败** — `cargo test … support_tests ledger` → FAIL。
-- [ ] **Step 3: 实现**（`AgentCapabilities` 保留为 `AssetKind` 的便捷构造,避免 Plan 1 的构造点全改；`AgentStatus` 增加 `capabilities: Vec<CapabilityStatus>` 给前端）
-- [ ] **Step 4: 运行** — `cargo test` + `pnpm test` + `pnpm build` 全绿（`AgentMatrix` 改读能力表：`supported && !verified` → 「未实测,暂不提供开关」；`!supported` → 整行不出现）
-- [ ] **Step 5: 提交** — `git commit -m "refactor: 能力级 verified 与落盘台账地基"`
+- [x] **Step 2: 运行确认失败** — `cargo test … support_tests ledger` → FAIL。
+- [x] **Step 3: 实现**（`AgentCapabilities` 保留为 `AssetKind` 的便捷构造,避免 Plan 1 的构造点全改；`AgentStatus` 增加 `capabilities: Vec<CapabilityStatus>` 给前端）
+- [x] **Step 4: 运行** — `cargo test` + `pnpm test` + `pnpm build` 全绿（`AgentMatrix` 改读能力表：`supported && !verified` → 「未实测,暂不提供开关」；`!supported` → 整行不出现）
+- [x] **Step 5: 提交** — `git commit -m "refactor: 能力级 verified 与落盘台账地基"`
+
+#### Task 1 执行记录（2026-10-22）
+
+落地的接口与本节写法的差异，后续任务按**实际接口**引用：
+
+- `AgentDescriptor.support: SupportMap`（`BTreeMap<AssetKind, AssetSupport>`），配套
+  `support_of()`（私有）、`supported(kind)`、`switchable(kind)`、`capabilities()`。
+  Step 3 说的「`AgentCapabilities` 保留为便捷构造」没有成立：7 个 bool 的构造点全在
+  `builtin_agents()` 里，一起删掉更干净，`supports(&[(AssetKind, AssetSupport)])` 取代它，
+  未列出的格子补 `AssetSupport::OFF`（漏写一格不等于「验证过它不支持」）。
+- `AssetKind` 与 `AssetType` 的互逆用 `AssetKind::{from_asset_type, try_as_asset_type}` +
+  `AssetType::from_kind`（后者把 `Session` 变成 `Err`），`dir_name()` 返回 `Option`。
+  另有 `snake_name()`：台账与前端用的单数名（`mcp/skill/prompt/rule/subagent/hook/session`），
+  **刻意不同于**真源目录名（复数），别把它当目录名用。
+- `adapters/ledger.rs` 的 `AppliedLedger` 除 `record/load` 外还有 `get`、`forget`、
+  `find_by_path`。归属判定用 **路径 + 字节指纹** 双条件，不按资产 id —— 提示词是「整份文件
+  一个落点、多个资产轮流占」，按 id 找会把「我们上次写的 A」误判成外来内容。
+  `prompt.rs` 已从原来的单条 `AppliedPrompt` 迁到台账（`RENDERER_VERSION = 1`）；
+  旧格式文件会解析成空台账，后果是下一次 activate 多问一次确认（保守方向，不会误删）。
+- 能力标注相对本节表格的**两处修正**（都按 Global Constraints「未实测一律 false」，不以表格为准）：
+  - **pi 的 MCP 降为未实测**：依据只有 pi 自带 docs 与 `dist/extensions/mcp/config.js` 的读侧源码，
+    本机从未真机写入过（Plan 2 已记「MCP 尚未真机写入验证」）。标 `verified=true` 就是
+    Plan 3 要修的那种过宽宣称。
+  - **qoder-cn 的 prompt 升为已实测**：`~/.qoder-cn/AGENTS.md` 被本机 Qoder CN CLI 实际读成全局约定
+    （B 档：实物 + 被消费的证据），不再挂在 MCP 那一格的光上。
+- 新增的一致性闸：`capability_table_and_declared_targets_never_disagree`（paths.rs）钉住
+  「supported ⇔ 落点存在」，rules_dir / agents_dir / hooks 三者一起查；以后加 agent 漏配一格会当场失败。
+- 门禁：`cargo test` 118 通过、`pnpm test` 23 通过、`pnpm build`（tsc + vite）通过、
+  `cargo fmt --check` 干净；`cargo clippy --all-targets` 只剩 `import/mod.rs:105 list_column`
+  一条 Plan 2 遗留的 `if let` 风格告警（`.flatten()` 的确切语义未查证，不在本任务里瞎改）。
 
 ---
 

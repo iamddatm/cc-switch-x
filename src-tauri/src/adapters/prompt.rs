@@ -1,11 +1,12 @@
+use crate::adapters::ledger;
 use crate::adapters::paths::expand_root;
 use crate::domain::agent::AgentDescriptor;
 use crate::domain::prompt::{parse_prompt, render_prompt, Prompt, PromptMetadata};
-use crate::domain::AssetType;
+use crate::domain::{AssetKind, AssetType};
 use crate::error::AppError;
 use crate::index::{sha256_hex, Index};
 use crate::store::{atomic::write_atomic, Store};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 /// 目标文件里已有内容、且不是我们上次写的，怎么处置。
@@ -35,33 +36,33 @@ pub enum ActivateOutcome {
     },
 }
 
-/// `state/applied/<agent>.json`：上次我们往该 agent 的提示词文件里写了什么。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AppliedPrompt {
-    prompt_id: String,
-    hash: String,
+/// 提示词的渲染器版本：写进的是正文（无 frontmatter）。将来若改成带标记的托管块，
+/// 递增此值，旧条目仍能靠 `find_by_path` 认出自家写的文件。
+const RENDERER_VERSION: u32 = 1;
+
+/// 台账损坏必须报错，不能当成「没有记录」：那会让下次 activate 误判成外来内容。
+fn is_ours(store: &Store, agent_id: &str, path: &Path, bytes: &[u8]) -> Result<bool, AppError> {
+    Ok(ledger::load(store, agent_id)?
+        .find_by_path(path, &sha256_hex(bytes))
+        .is_some())
 }
 
-fn applied_path(store: &Store, agent_id: &str) -> PathBuf {
-    store
-        .root()
-        .join("state")
-        .join("applied")
-        .join(format!("{agent_id}.json"))
-}
-
-fn load_applied(store: &Store, agent_id: &str) -> Option<AppliedPrompt> {
-    let text = std::fs::read_to_string(applied_path(store, agent_id)).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-fn save_applied(store: &Store, agent_id: &str, record: &AppliedPrompt) -> Result<(), AppError> {
-    write_atomic(
-        &applied_path(store, agent_id),
-        &serde_json::to_vec_pretty(record)?,
-    )?;
-    Ok(())
+fn record_applied(
+    store: &Store,
+    agent_id: &str,
+    prompt_id: &str,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), AppError> {
+    ledger::record(
+        store,
+        agent_id,
+        AssetKind::Prompt,
+        prompt_id,
+        path,
+        &sha256_hex(bytes),
+        RENDERER_VERSION,
+    )
 }
 
 pub fn target_file(agent: &AgentDescriptor, home: &Path, base_override: Option<&Path>) -> PathBuf {
@@ -91,9 +92,7 @@ pub fn activate(
 
     let ours = match &existing {
         None => true,
-        Some(current) => load_applied(store, &agent.id)
-            .map(|record| record.hash == sha256_hex(current))
-            .unwrap_or(false),
+        Some(current) => is_ours(store, &agent.id, &path, current)?,
     };
     if !ours {
         match takeover {
@@ -124,14 +123,7 @@ pub fn activate(
     }
 
     write_atomic(&path, body.as_bytes())?;
-    save_applied(
-        store,
-        &agent.id,
-        &AppliedPrompt {
-            prompt_id: prompt_id.to_string(),
-            hash: sha256_hex(body.as_bytes()),
-        },
-    )?;
+    record_applied(store, &agent.id, prompt_id, &path, body.as_bytes())?;
     Ok(ActivateOutcome::Activated { path })
 }
 
@@ -146,14 +138,15 @@ pub fn deactivate(
     let Some(current) = std::fs::read(&path).ok() else {
         return Ok(false);
     };
-    let ours = load_applied(store, &agent.id)
-        .map(|record| record.hash == sha256_hex(&current))
-        .unwrap_or(false);
-    if !ours {
+    let ours = ledger::load(store, &agent.id)?
+        .find_by_path(&path, &sha256_hex(&current))
+        .cloned();
+    let Some(entry) = ours else {
         return Ok(false);
-    }
+    };
+
     std::fs::remove_file(&path)?;
-    let _ = std::fs::remove_file(applied_path(store, &agent.id));
+    ledger::forget(store, &agent.id, AssetKind::Prompt, &entry.asset_id)?;
     Ok(true)
 }
 
