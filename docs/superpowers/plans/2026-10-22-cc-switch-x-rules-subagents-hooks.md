@@ -310,7 +310,7 @@ fn an_older_render_is_still_recognised_as_ours() {
   交给派生，不硬编成 `always_on`。
 - 门禁：`cargo test` 135 通过（本任务 +17）、`cargo fmt --check` 干净、
   `cargo clippy --all-targets` 只剩 Task 1 记下的那条 Plan 2 遗留告警。
-- [ ] **Step 5: 提交** — `git commit -m "feat: 添加 Rules 的 Qoder 渲染与回推"`
+- [x] **Step 5: 提交** — `git commit -m "feat: 添加 Rules 的 Qoder 渲染与回推"`
 
 ---
 
@@ -477,7 +477,7 @@ fn tool_private_fields_land_in_tool_extras_and_come_back() {
 
 复用 Task 3 的 deploy/remove/scan 形状,差异只在扩展名与目录(`agents_dir`)。**必须新增的断言**:同一 agent 目录里别人的 `.md`(不是我们的渲染)不被扫描器抢注成资产 —— 扫描时若文件带 `tool_extras` 之外的未知键或 frontmatter 不合 canonical,记入 `skipped_foreign` 并给出原因。
 
-- [ ] Step 1 失败测试:`deploy_uses_the_tool_extension`(codex 出 `.toml`、qoder 出 `.md`)、`scan_skips_files_that_are_not_ours`、`removing_a_subagent_keeps_the_builtin_list`(内置 agent 不在我们台账里,一律不动)。
+- [x] Step 1 失败测试:`deploy_uses_the_tool_extension`(codex 出 `.toml`、qoder 出 `.md`)、`scan_skips_files_that_are_not_ours`、`removing_a_subagent_keeps_the_builtin_list`(内置 agent 不在我们台账里,一律不动)。
 - [x] Step 2–5:红 → 实现 → 绿 → 提交 `git commit -m "feat: 添加 Subagents 落盘与扫描导入"`。
 
 #### Task 5 执行记录（2026-10-22）
@@ -741,7 +741,7 @@ fn an_untracked_file_is_never_drift() {
 - `read_back(agent, asset_kind, id) -> Option<bool>`:`mcp get <name>` 成功退出即「已生效」；CLI 不可用时回落 Plan 2 的「解析文件即已生效」,并在 `AgentStatus` 里标 `readBack = "file"` 而非 `"cli"`,不把降级说成成功验证。
 - 落点:`verified` 的 qoder-cn MCP 走 CLI 优先 → 失败回落文件；CLI 不存在时**不报错**,走文件路径并在报告里写「走了文件写入」。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
   - `mcp_add_json_always_passes_scope_user`:参数数组构造的纯函数断言,含 `--scope` 与 `user` 相邻两项。
   - `a_nonzero_exit_falls_back_to_file_writing_and_says_so`:注入一个必然失败的 CLI 命令,断言最终文件写成功且 `ApplyReport.method_used == File`。
   - `read_back_reports_effective_only_when_the_cli_confirms_it`:CLI 回读失败时状态停在 `Written`,不升 `Effective`。
