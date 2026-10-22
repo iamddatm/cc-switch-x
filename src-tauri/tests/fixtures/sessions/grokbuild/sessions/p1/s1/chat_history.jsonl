@@ -1,0 +1,5 @@
+{"type":"system","content":"系统提示","timestamp":"2026-10-20T10:00:00Z"}
+{"type":"user","content":[{"type":"text","text":"帮我清理"}],"timestamp":"2026-10-20T10:01:00Z"}
+{"type":"assistant","content":"好的","tool_calls":[{"id":"c1","type":"function","function":{"name":"run_terminal_cmd","arguments":"{\"command\":\"ls\"}"}}],"timestamp":"2026-10-20T10:02:00Z"}
+{"type":"tool","tool_call_id":"c1","content":"a.rs","timestamp":"2026-10-20T10:03:00Z"}
+{"type":"reasoning","summary":[{"type":"summary_text","text":"private"}]}

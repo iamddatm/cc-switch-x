@@ -1,0 +1,2 @@
+{"type":"session","id":"oc3","version":3,"cwd":"D:/oc3","timestamp":"2026-10-20T13:00:00Z"}
+{"id":"e1","parentId":null,"type":"message","timestamp":"2026-10-20T13:01:00Z","message":{"role":"user","content":[{"type":"text","text":"没有索引"}]}}

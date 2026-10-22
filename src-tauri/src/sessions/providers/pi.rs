@@ -218,7 +218,7 @@ fn active_branch(
     active
 }
 
-fn map_entry(
+pub(crate) fn map_entry(
     entry: &Value,
     messages: &mut Vec<ParsedMessage>,
     tool_names: &mut HashMap<String, String>,
@@ -527,7 +527,7 @@ fn push(
     });
 }
 
-fn entry_timestamp(entry: &Value) -> Option<i64> {
+pub(crate) fn entry_timestamp(entry: &Value) -> Option<i64> {
     entry
         .get("timestamp")
         .and_then(parse_timestamp)
@@ -539,7 +539,7 @@ fn entry_timestamp(entry: &Value) -> Option<i64> {
         })
 }
 
-fn choose_title(
+pub(crate) fn choose_title(
     explicit: Option<&str>,
     messages: &[ParsedMessage],
     project: Option<&Path>,
@@ -588,7 +588,7 @@ fn parse_timestamp(value: &Value) -> Option<i64> {
     })
 }
 
-fn file_mtime_millis(path: &Path) -> i64 {
+pub(crate) fn file_mtime_millis(path: &Path) -> i64 {
     std::fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .ok()

@@ -1,0 +1,6 @@
+{"type":"session","id":"oc1","version":3,"cwd":"D:/oc","timestamp":"2026-10-20T10:00:00Z"}
+{"id":"e1","parentId":null,"type":"message","timestamp":"2026-10-20T10:01:00Z","message":{"role":"user","content":[{"type":"text","text":"第一个问题"}]}}
+{"id":"e2","parentId":"e1","type":"message","timestamp":"2026-10-20T10:02:00Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"想"},{"type":"text","text":"回答"},{"type":"toolCall","id":"c1","name":"read","arguments":{"path":"a.rs"}}]}}
+{"id":"e3","parentId":"e2","type":"message","timestamp":"2026-10-20T10:03:00Z","message":{"role":"toolResult","toolCallId":"c1","content":[{"type":"text","text":"文件内容"}]}}
+{"id":"b1","parentId":"e1","type":"message","timestamp":"2026-10-20T10:04:00Z","message":{"role":"user","content":[{"type":"text","text":"另一条分支也要显示"}]}}
+{"id":"e4","parentId":"e3","type":"message","timestamp":"2026-10-20T10:05:00Z","message":{"role":"bashExecution","command":"ls","output":"a.rs","exitCode":0}}

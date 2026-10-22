@@ -93,9 +93,9 @@ static PROVIDERS: &[SessionProvider] = &[
         display_name: "Grok Build",
         roots: &["~/.grok/sessions", "~/.grok/archived_sessions"],
         verified: false,
-        discover: discover_jsonl,
-        parse: None,
-        resume: None,
+        discover: providers::grokbuild::discover_grokbuild,
+        parse: Some(providers::grokbuild::parse_grokbuild_all),
+        resume: Some(providers::grokbuild::resume_grokbuild),
     },
     SessionProvider {
         agent_id: "hermes",
@@ -120,8 +120,8 @@ static PROVIDERS: &[SessionProvider] = &[
         display_name: "OpenClaw",
         roots: &["~/.openclaw"],
         verified: false,
-        discover: discover_jsonl,
-        parse: None,
+        discover: providers::openclaw::discover_openclaw,
+        parse: Some(providers::openclaw::parse_openclaw_all),
         resume: None,
     },
     SessionProvider {

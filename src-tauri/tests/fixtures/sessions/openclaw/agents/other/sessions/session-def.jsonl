@@ -1,0 +1,2 @@
+{"type":"session","id":"oc2","version":3,"cwd":"D:/oc2","timestamp":"2026-10-20T12:00:00Z"}
+{"id":"e1","parentId":null,"type":"message","timestamp":"2026-10-20T12:01:00Z","message":{"role":"user","content":[{"type":"text","text":"第二个会话"}]}}

@@ -4,6 +4,8 @@ pub mod agy;
 pub mod claude;
 pub mod codex;
 pub mod gemini;
+pub mod grokbuild;
+pub mod openclaw;
 pub mod opencode;
 pub mod pi;
 pub mod qoder_cn;
