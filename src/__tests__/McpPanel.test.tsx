@@ -9,6 +9,8 @@ vi.mock("../lib/api", () => ({
     readAsset: vi.fn(),
     writeAsset: vi.fn(),
     deleteAsset: vi.fn(),
+    listAgents: vi.fn(),
+    setMcpEnabled: vi.fn(),
   },
 }));
 
@@ -29,6 +31,15 @@ beforeEach(() => {
     hash: "h2",
   });
   vi.mocked(api.deleteAsset).mockResolvedValue(true);
+  // 面板现在还会读 agent 列表并下发开关，默认给空实现，个别用例再覆盖
+  vi.mocked(api.listAgents).mockResolvedValue([]);
+  vi.mocked(api.setMcpEnabled).mockResolvedValue({
+    written: 1,
+    skipped: 0,
+    ok: true,
+    backupDir: "C:/x/backups/1",
+    error: null,
+  });
 });
 
 test("lists, edits and saves an MCP server", async () => {
@@ -84,6 +95,59 @@ test("keeps the entry when the delete is cancelled", async () => {
   await sleep();
   expect(api.deleteAsset).not.toHaveBeenCalled();
   expect(screen.getByRole("textbox", { name: "JSON 编辑器" })).toBeInTheDocument();
+});
+
+function agent(overrides: Partial<import("../types").AgentStatus>) {
+  return {
+    id: "claude",
+    displayName: "Claude Code",
+    detected: true,
+    verified: true,
+    mcpNeedsRestart: null,
+    mcpPath: "C:/x/.claude.json",
+    enabledMcp: [],
+    enabledSkills: [],
+    activePrompt: null,
+    ...overrides,
+  };
+}
+
+test("toggling an agent switch calls setMcpEnabled", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([agent({})]);
+  vi.mocked(api.setMcpEnabled).mockResolvedValue({
+    written: 1,
+    skipped: 0,
+    ok: true,
+    backupDir: "C:/x/backups/1",
+    error: null,
+  });
+  render(<McpPanel />);
+  fireEvent.click(await screen.findByText("Playwright"));
+  const checkbox = await screen.findByRole("checkbox", { name: "Claude Code 启用 pw" });
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(api.setMcpEnabled).toHaveBeenCalledWith("pw", "claude", true));
+});
+
+test("unverified agents show no switch", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agent({}),
+    agent({ id: "qoder", displayName: "Qoder", verified: false }),
+  ]);
+  render(<McpPanel />);
+  fireEvent.click(await screen.findByText("Playwright"));
+  expect(await screen.findByText(/Qoder：未实测，暂不提供开关/)).toBeInTheDocument();
+  expect(screen.queryByRole("checkbox", { name: "Qoder 启用 pw" })).not.toBeInTheDocument();
+});
+
+test("an agent with unmeasured restart semantics still warns about restart", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agent({ mcpNeedsRestart: null, enabledMcp: ["pw"] }),
+  ]);
+  render(<McpPanel />);
+  fireEvent.click(await screen.findByText("Playwright"));
+  await screen.findByRole("checkbox", { name: "Claude Code 启用 pw" });
+  // 已勾选 + 没有实测依据 → 提示需要重启，不能当成已生效
+  expect(screen.getByText("需重启或 reload")).toBeInTheDocument();
 });
 
 async function sleep() {

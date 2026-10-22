@@ -14,8 +14,13 @@ impl AssetService {
         Ok(index.list(asset_type)?)
     }
 
+    /// 读资产的文本。skill 在真源里是目录，读的是它下面的 `SKILL.md`。
     pub fn read(store: &Store, asset_type: AssetType, id: &str) -> Result<String, AppError> {
-        let bytes = store.read(asset_type, id)?;
+        let mut path = store.entry_path(asset_type, id)?;
+        if asset_type == AssetType::Skill {
+            path.push("SKILL.md");
+        }
+        let bytes = std::fs::read(&path)?;
         String::from_utf8(bytes)
             .map_err(|_| AppError::InvalidInput(format!("{id} 不是 UTF-8 文件")))
     }
@@ -138,6 +143,18 @@ mod tests {
         );
         let rows = AssetService::list(&store, &index, Some(AssetType::Mcp)).unwrap();
         assert_eq!(rows[0].name, "Playwright v2");
+    }
+
+    #[test]
+    fn reading_a_skill_returns_its_skill_md() {
+        let (_dir, store, _index) = fixture();
+        let dir = store.asset_dir(AssetType::Skill).join("demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "# demo\n").unwrap();
+        assert_eq!(
+            AssetService::read(&store, AssetType::Skill, "demo").unwrap(),
+            "# demo\n"
+        );
     }
 
     fn collect_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

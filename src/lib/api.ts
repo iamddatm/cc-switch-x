@@ -1,5 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppSettings, AssetSummary, AssetType, Theme } from "../types";
+import type {
+  ActivateOutcome,
+  AgentStatus,
+  AppSettings,
+  AssetSummary,
+  AssetType,
+  ConflictPolicy,
+  ImportPreview,
+  ImportSummary,
+  Theme,
+} from "../types";
 
 export const api = {
   listAssets: (assetType?: AssetType) => invoke<AssetSummary[]>("list_assets", { assetType }),
@@ -11,4 +21,33 @@ export const api = {
   getSettings: () => invoke<AppSettings>("get_settings"),
   setTheme: (theme: Theme) => invoke<AppSettings>("set_theme", { theme }),
   setStoreRoot: (storeRoot: string) => invoke<boolean>("set_store_root", { storeRoot }),
+
+  listAgents: () => invoke<AgentStatus[]>("list_agents"),
+  importPreview: () => invoke<ImportPreview>("import_preview"),
+  importApply: (policy: ConflictPolicy) => invoke<ImportSummary>("import_apply", { policy }),
+  revertLast: () => invoke<ApplyReport>("revert_last"),
+  setMcpEnabled: (id: string, agentId: string, enabled: boolean) =>
+    invoke<ApplyReport>("set_mcp_enabled", { id, agentId, enabled }),
+  /** 返回实测的落地方式：symlink / junction / copy / already / removed */
+  setSkillEnabled: (id: string, agentId: string, enabled: boolean) =>
+    invoke<string>("set_skill_enabled", { id, agentId, enabled }),
+  activatePrompt: (
+    promptId: string,
+    agentId: string,
+    options?: { confirm?: boolean; saveExistingAs?: string },
+  ) =>
+    invoke<ActivateOutcome>("activate_prompt", {
+      promptId,
+      agentId,
+      confirm: options?.confirm ?? false,
+      saveExistingAs: options?.saveExistingAs,
+    }),
 };
+
+export interface ApplyReport {
+  written: number;
+  skipped: number;
+  ok: boolean;
+  backupDir: string;
+  error: string | null;
+}

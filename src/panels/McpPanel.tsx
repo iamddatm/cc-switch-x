@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
+import { AgentMatrix } from "../components/AgentMatrix";
 import { JsonEditor } from "../components/JsonEditor";
+import { useAgents } from "../hooks/useAgents";
 import { useAssets } from "../hooks/useAssets";
 import { api } from "../lib/api";
 
 export function McpPanel() {
   const { items, error, refresh } = useAssets("mcp");
+  const { agents, refresh: refreshAgents } = useAgents();
   const [selected, setSelected] = useState<string | null>(null);
   const [content, setContent] = useState("");
   const [newId, setNewId] = useState("");
@@ -111,6 +114,15 @@ export function McpPanel() {
             </div>
             {saveError && <p className="mb-2 text-sm text-red-600 dark:text-red-400">{saveError}</p>}
             <JsonEditor value={content} onChange={setContent} />
+            <AgentMatrix
+              assetType="mcp"
+              id={selected}
+              agents={agents}
+              onChanged={() => {
+                void refresh();
+                void refreshAgents();
+              }}
+            />
           </>
         ) : (
           <p className="text-sm text-slate-500 dark:text-slate-400">选择左侧 MCP 服务器进行编辑。</p>

@@ -155,6 +155,36 @@ mod tests {
     }
 
     #[test]
+    fn agent_status_json_keys_are_the_frontend_contract() {
+        // 改字段必须同步改 src/types.ts 的 AgentStatus；这条断言就是那道闸
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let status = detect_all(&store, &dir.path().join("home")).unwrap();
+        let mut keys: Vec<String> = serde_json::to_value(&status[0])
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "activePrompt",
+                "detected",
+                "displayName",
+                "enabledMcp",
+                "enabledSkills",
+                "id",
+                "mcpNeedsRestart",
+                "mcpPath",
+                "verified",
+            ]
+        );
+    }
+
+    #[test]
     fn status_carries_the_enablement_matrix_so_the_ui_needs_one_call() {
         let dir = tempdir().unwrap();
         let store = Store::init(dir.path().join("store")).unwrap();
