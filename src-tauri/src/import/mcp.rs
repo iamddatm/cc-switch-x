@@ -1,10 +1,9 @@
-use crate::domain::enablement::AgentEnablement;
 use crate::domain::mcp::{McpServer, Transport};
 use crate::domain::secret::{reference, SecretRef};
 use crate::domain::{is_known_agent, AssetSummary, AssetType};
 use crate::import::source::ImportError;
+use crate::import::update_matrix;
 use crate::index::{sha256_hex, Index};
-use crate::store::atomic::write_atomic;
 use crate::store::secrets::{secrets_path, Secrets};
 use crate::store::Store;
 use rusqlite::Connection;
@@ -241,7 +240,7 @@ pub fn run(
     policy: ConflictPolicy,
 ) -> Result<ImportCount, ImportError> {
     let mut count = ImportCount::default();
-    let mut matrices: BTreeMap<String, AgentEnablement> = BTreeMap::new();
+    let mut wrote_secrets = false;
 
     for row in read_rows(conn)? {
         let converted = match convert(&row.server_config, &row) {
@@ -284,6 +283,7 @@ pub fn run(
         }
         for (secret_ref, value) in &moved {
             secrets.insert(secret_ref, value);
+            wrote_secrets = true;
         }
         index.upsert(&AssetSummary {
             asset_type: AssetType::Mcp,
@@ -297,42 +297,17 @@ pub fn run(
             if !*on || !is_known_agent(app) {
                 continue;
             }
-            matrices
-                .entry(app.clone())
-                .or_insert_with(|| AgentEnablement::default())
-                .enable(AssetType::Mcp, &target_id);
+            let id_for_matrix = target_id.clone();
+            update_matrix(store, app, move |matrix| {
+                matrix.enable(AssetType::Mcp, &id_for_matrix);
+            })?;
         }
     }
 
-    for (app, matrix) in &mut matrices {
-        let merged = merge_matrix(store, app, matrix)?;
-        write_atomic(
-            &store.agent_config_path(app),
-            &serde_json::to_vec_pretty(&merged)?,
-        )?;
-    }
-    if !count.failed.is_empty() || count.imported > 0 || !matrices.is_empty() {
+    if wrote_secrets {
         secrets.save(&secrets_path(store.root()))?;
     }
     Ok(count)
-}
-
-/// 矩阵文件是真源，导入只能往里加，不能把别的类型（skills/prompts）整份覆盖掉。
-fn merge_matrix(
-    store: &Store,
-    app: &str,
-    additions: &AgentEnablement,
-) -> Result<AgentEnablement, ImportError> {
-    let path = store.agent_config_path(app);
-    let mut current = if path.exists() {
-        serde_json::from_slice(&std::fs::read(&path)?)?
-    } else {
-        AgentEnablement::default()
-    };
-    for id in additions.enabled_for(AssetType::Mcp) {
-        current.enable(AssetType::Mcp, &id);
-    }
-    Ok(current)
 }
 
 fn unique_id(store: &Store, base: &str) -> Result<String, ImportError> {
@@ -349,6 +324,7 @@ fn unique_id(store: &Store, base: &str) -> Result<String, ImportError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::enablement::AgentEnablement;
     use crate::domain::mcp::Transport;
     use crate::import::source::fake_ccswitch_sql;
     use crate::index::Index;

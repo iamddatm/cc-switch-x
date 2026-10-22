@@ -170,7 +170,7 @@ fn is_safe_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     fs::create_dir_all(to)?;
     for entry in fs::read_dir(from)? {
         let entry = entry?;

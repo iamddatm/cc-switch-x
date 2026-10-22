@@ -1,6 +1,9 @@
 pub mod mcp;
+pub mod prompts;
+pub mod skills;
 pub mod source;
 
+use crate::domain::enablement::AgentEnablement;
 use crate::domain::is_known_agent;
 use crate::domain::AssetType;
 use crate::store::Store;
@@ -113,6 +116,73 @@ fn list_column(conn: &Connection, table: &str, column: &str) -> Result<Vec<Strin
     Ok(out)
 }
 
+/// 把外部 ID 变成能直接当文件/目录名的 slug：只留 `[A-Za-z0-9._-]`，其余换成 `-`。
+/// cc-switch 的 skill id 形如 `owner/repo/skill`、prompt 名称可能是纯中文，都不能原样落盘。
+pub fn slug(raw: &str) -> Option<String> {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+            out.push(ch);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.len() <= 128 {
+        return Some(trimmed);
+    }
+    // 超长时保留前缀 + 原文哈希，既满足 store 的 128 上限又保持稳定唯一
+    let digest = crate::index::sha256_hex(raw.as_bytes());
+    let mut prefix = trimmed[..100].to_string();
+    while prefix.ends_with('-') {
+        prefix.pop();
+    }
+    Some(format!("{prefix}-{}", &digest[..12]))
+}
+
+pub fn safe_asset_id(raw: &str) -> String {
+    slug(raw).unwrap_or_else(|| "asset".to_string())
+}
+
+/// 读—改—写某个 agent 的启用矩阵：只动调用方指定的部分，别的一律保留。
+pub(crate) fn update_matrix<F>(store: &Store, agent_id: &str, change: F) -> Result<(), ImportError>
+where
+    F: FnOnce(&mut AgentEnablement),
+{
+    let path = store.agent_config_path(agent_id);
+    let mut matrix = if path.exists() {
+        serde_json::from_slice(&std::fs::read(&path)?)?
+    } else {
+        AgentEnablement::default()
+    };
+    change(&mut matrix);
+    crate::store::atomic::write_atomic(&path, &serde_json::to_vec_pretty(&matrix)?)?;
+    Ok(())
+}
+
+/// 导入完成后写 `state/import.json`（spec 3.1 第 7 条）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportRecord {
+    pub source: String,
+    pub finished_at: i64,
+    pub mcp_imported: usize,
+    pub prompts_imported: usize,
+    pub skills_imported: usize,
+    pub failed: Vec<String>,
+    pub missing_skill_dirs: Vec<String>,
+    pub ignored_columns: Vec<String>,
+}
+
+pub fn record_import(store: &Store, record: &ImportRecord) -> Result<(), ImportError> {
+    let path = store.root().join("state").join("import.json");
+    crate::store::atomic::write_atomic(&path, &serde_json::to_vec_pretty(record)?)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +254,43 @@ mod tests {
             .unwrap();
         let preview = preview(&store, &source_of(&db), &skills_root).unwrap();
         assert_eq!(preview.conflicts, vec!["mcp/pw".to_string()]);
+    }
+
+    #[test]
+    fn safe_asset_id_handles_slashes_chinese_and_overlong_names() {
+        assert_eq!(safe_asset_id("acme/demo/skill"), "acme-demo-skill");
+        assert_eq!(safe_asset_id("local:demo"), "local-demo");
+        assert_eq!(safe_asset_id("团队提示词"), "asset");
+        let long = safe_asset_id(&"x".repeat(400));
+        assert!(long.len() <= 128, "{}", long.len());
+        assert_eq!(
+            long,
+            safe_asset_id(&"x".repeat(400)),
+            "同一个输入必须得到同一个 ID"
+        );
+    }
+
+    #[test]
+    fn import_record_is_written_under_state() {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        record_import(
+            &store,
+            &ImportRecord {
+                source: "installed-db".into(),
+                finished_at: 1,
+                mcp_imported: 5,
+                prompts_imported: 3,
+                skills_imported: 81,
+                failed: vec!["bad".into()],
+                missing_skill_dirs: vec!["gone".into()],
+                ignored_columns: vec!["quantum".into()],
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(dir.path().join("store/state/import.json")).unwrap();
+        assert!(text.contains("\"mcpImported\": 5"), "{text}");
+        assert!(text.contains("\"ignoredColumns\""), "{text}");
     }
 
     fn source_of(db: &std::path::Path) -> ImportSource {

@@ -382,9 +382,16 @@ fn importing_twice_does_not_duplicate_entries() { /* 同一份源跑 run 两次�
 **Files:** Create `src-tauri/src/import/{prompts,skills}.rs`；Modify `import/mod.rs`
 
 **Interfaces:**
-- `import::prompts::run(...)`：`prompts` 行 → `assets/prompts/<app_type>-<slug(name)>.md`（frontmatter `title/description`，正文 `content`）；`enabled=1` 的行写进 `agents/<app_type>.json` 的 `activePrompt`（每 agent 只留一条，多条时取 `updated_at` 最新并在预览里报告「多个候选激活」）。
-- `import::skills::run(...)`：复制 `~/.cc-switch/skills/<directory>/` → `assets/skills/<id>/`，来源信息写 `assets/skills/<id>/.meta.json`（`{repoOwner,repoName,repoBranch,readmeUrl,installedAt,contentHash}`，camelCase）；目录不存在 → 计入 `missing_skill_dirs`，不建空目录。
-- `import::finish(store, preview, counts)` → 写 `state/import.json`（来源、时间、cc-switch 版本、各类计数、被忽略的列）。
+- `import::prompts::run(store, index, conn) -> Result<PromptsReport, ImportError>`，`PromptsReport { imported, unchanged, failed, ambiguous_active }`
+  - canonical ID = `<app_type>-<名字 slug>`；名字无 ascii 字符（纯中文）时退回用行 ID，保证 ID 稳定可重入。
+  - `app_type` 不在注册表里 → 只失败这一行（不瞎猜落点）。
+  - 同一 app 有多条 `enabled=1` → 取 `updated_at` 最新的一条写 `activePrompt`，并把该 app 计入 `ambiguous_active` 报给用户。
+- `import::skills::run(store, index, conn, skills_root) -> Result<SkillsReport, ImportError>`，`SkillsReport { imported, unchanged, missing_dirs, failed }`
+  - cc-switch 的 skill id 形如 `owner/repo/skill`、`local:name`，**必须过 `safe_asset_id` 变成 slug** 才能当目录名（`acme/demo/skill` → `acme-demo-skill`）。
+  - 复制整目录（含 `references/` 等子目录），来源写 `.meta.json`（camelCase：`repoOwner/repoName/repoBranch/readmeUrl/sourceDirectory/contentHash`）；重跑靠 `.meta.json` 里的 `contentHash` 判 unchanged。
+  - 源目录或 `SKILL.md` 不存在 → 计入 `missing_dirs`，**不建空目录**。
+- `import::{slug, safe_asset_id, update_matrix}`：`slug` 只留 `[A-Za-z0-9._-]`、超 128 用「前缀 + sha256 前 12 位」；`update_matrix` 是读—改—写，任何导入器都不得整份覆盖 `agents/<id>.json`。
+- `import::record_import(store, &ImportRecord)` → 写 `state/import.json`（来源、时间、三类计数、failed、missing_skill_dirs、ignored_columns）。编排（preview → mcp → prompts → skills → record）在 Task 9 的命令层。
 
 - [ ] **Step 1: 写失败测试**
 
