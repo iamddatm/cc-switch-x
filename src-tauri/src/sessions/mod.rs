@@ -7,6 +7,8 @@ use crate::adapters::paths::expand_root;
 use crate::domain::session::{ParsedSession, SessionError, SessionSummary};
 use std::path::{Path, PathBuf};
 
+pub mod providers;
+
 pub type ParseFn = fn(&Path) -> Result<Vec<ParsedSession>, SessionError>;
 pub type ResumeFn = fn(&SessionSummary) -> Option<String>;
 
@@ -24,8 +26,8 @@ pub struct SessionProvider {
     pub resume: Option<ResumeFn>,
 }
 
-/// 通用发现：递归收集指定扩展名的普通文件。符号链接不跟随，避免目录环。
-fn discover_by_extension(root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
+/// 通用发现：递归收集满足 `keep` 的普通文件。符号链接不跟随，避免目录环。
+pub(crate) fn walk_files(root: &Path, keep: &dyn Fn(&Path) -> bool) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -39,16 +41,8 @@ fn discover_by_extension(root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
             let path = entry.path();
             if file_type.is_dir() {
                 stack.push(path);
-            } else if file_type.is_file() {
-                let matches = path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| {
-                        extensions.iter().any(|want| want.eq_ignore_ascii_case(ext))
-                    });
-                if matches {
-                    out.push(path);
-                }
+            } else if file_type.is_file() && keep(&path) {
+                out.push(path);
             }
         }
     }
@@ -56,8 +50,14 @@ fn discover_by_extension(root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
     out
 }
 
+fn has_extension(path: &Path, extensions: &[&str]) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| extensions.iter().any(|want| want.eq_ignore_ascii_case(ext)))
+}
+
 fn discover_jsonl(root: &Path, _override_active: bool) -> Vec<PathBuf> {
-    discover_by_extension(root, &["jsonl"])
+    walk_files(root, &|path| has_extension(path, &["jsonl"]))
 }
 
 static PROVIDERS: &[SessionProvider] = &[
@@ -66,9 +66,9 @@ static PROVIDERS: &[SessionProvider] = &[
         display_name: "Claude Code",
         roots: &["~/.claude/projects"],
         verified: false,
-        discover: discover_jsonl,
-        parse: None,
-        resume: None,
+        discover: providers::claude::discover_claude,
+        parse: Some(providers::claude::parse_claude_all),
+        resume: Some(providers::claude::resume_claude),
     },
     SessionProvider {
         agent_id: "codex",
