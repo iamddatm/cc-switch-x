@@ -8,6 +8,17 @@ use std::path::{Path, PathBuf};
 pub struct AppSettings {
     pub store_root: PathBuf,
     pub theme: Theme,
+    /// 全局启用的 agent；None = 全部启用（兼容旧设置文件）。
+    #[serde(default)]
+    pub enabled_agents: Option<Vec<String>>,
+}
+
+/// 未设置过范围时视为全部启用；显式空数组表示全部禁用。
+pub fn is_agent_enabled(settings: &AppSettings, agent_id: &str) -> bool {
+    settings
+        .enabled_agents
+        .as_ref()
+        .map_or(true, |ids| ids.iter().any(|id| id == agent_id))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +34,7 @@ impl Default for AppSettings {
         Self {
             store_root: default_store_root(),
             theme: Theme::System,
+            enabled_agents: None,
         }
     }
 }
@@ -90,9 +102,27 @@ mod tests {
         let settings = AppSettings {
             store_root: dir.path().join("data"),
             theme: Theme::Dark,
+            enabled_agents: Some(vec!["claude".into()]),
         };
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path).unwrap(), settings);
+    }
+
+    #[test]
+    fn unset_scope_means_every_agent_is_enabled() {
+        let settings = AppSettings::default();
+        assert!(is_agent_enabled(&settings, "claude"));
+        assert!(is_agent_enabled(&settings, "pi"));
+    }
+
+    #[test]
+    fn explicit_scope_limits_the_visible_agents() {
+        let settings = AppSettings {
+            enabled_agents: Some(vec!["claude".into()]),
+            ..AppSettings::default()
+        };
+        assert!(is_agent_enabled(&settings, "claude"));
+        assert!(!is_agent_enabled(&settings, "pi"));
     }
 
     #[test]

@@ -1,37 +1,64 @@
+import {
+  BookOpen,
+  Bot,
+  History,
+  Layers,
+  ScrollText,
+  Server,
+  Settings,
+  Sparkles,
+  Webhook,
+  type LucideIcon,
+} from "lucide-react";
 import type { Pane } from "../../types";
 
-const ITEMS: { pane: Pane; label: string }[] = [
-  { pane: "mcp", label: "MCP" },
-  { pane: "skill", label: "Skills" },
-  { pane: "prompt", label: "Prompts" },
-  { pane: "rule", label: "Rules" },
-  { pane: "subagent", label: "Subagents" },
-  { pane: "hook", label: "Hooks" },
-  { pane: "sessions", label: "Sessions" },
-  { pane: "settings", label: "Settings" },
+const ITEMS: { pane: Pane; label: string; icon: LucideIcon }[] = [
+  { pane: "mcp", label: "MCP", icon: Server },
+  { pane: "skill", label: "Skills", icon: Sparkles },
+  { pane: "prompt", label: "提示词", icon: BookOpen },
+  { pane: "rule", label: "Rules", icon: ScrollText },
+  { pane: "subagent", label: "Subagents", icon: Bot },
+  { pane: "hook", label: "Hooks", icon: Webhook },
+  { pane: "sessions", label: "会话", icon: History },
+  { pane: "agents", label: "Agents", icon: Layers },
+  { pane: "settings", label: "Settings", icon: Settings },
 ];
 
 export function Sidebar({ pane, onSelect }: { pane: Pane; onSelect: (pane: Pane) => void }) {
   return (
-    <nav className="w-48 border-r border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800">
-      <div className="mb-4 px-2 text-lg font-semibold">CC Switch X</div>
-      <ul className="space-y-1">
-        {ITEMS.map((item) => (
-          <li key={item.pane}>
-            <button
-              type="button"
-              onClick={() => onSelect(item.pane)}
-              aria-current={pane === item.pane ? "page" : undefined}
-              className={`w-full rounded px-2 py-1.5 text-left text-sm ${
-                pane === item.pane
-                  ? "bg-slate-800 text-white dark:bg-slate-600"
-                  : "hover:bg-slate-200 dark:hover:bg-slate-700"
-              }`}
-            >
-              {item.label}
-            </button>
-          </li>
-        ))}
+    <nav className="flex w-[200px] shrink-0 flex-col border-r border-border bg-sidebar">
+      <div className="flex h-[52px] shrink-0 items-center gap-2 border-b border-border px-4">
+        <span className="flex h-6 w-6 items-center justify-center rounded-control bg-action text-white">
+          <Layers size={14} aria-hidden />
+        </span>
+        <span className="text-strong text-fg-1">CC Switch X</span>
+      </div>
+      <ul className="flex-1 space-y-0.5 overflow-auto p-2">
+        {ITEMS.map((item) => {
+          const active = pane === item.pane;
+          const Icon = item.icon;
+          return (
+            <li key={item.pane}>
+              <button
+                type="button"
+                onClick={() => onSelect(item.pane)}
+                aria-current={active ? "page" : undefined}
+                className={`flex h-8 w-full items-center gap-2.5 rounded-control px-2.5 text-left text-body transition-colors duration-150 ${
+                  active
+                    ? "bg-selected font-medium text-fg-1"
+                    : "text-fg-2 hover:bg-subtle hover:text-fg-1"
+                }`}
+              >
+                <Icon
+                  size={15}
+                  aria-hidden
+                  className={active ? "text-action-text" : "text-fg-3"}
+                />
+                <span className="truncate">{item.label}</span>
+              </button>
+            </li>
+          );
+        })}
       </ul>
     </nav>
   );

@@ -32,9 +32,9 @@ async function main() {
 
   // ── MCP ────────────────────────────────────────────
   await sidebar("MCP");
-  await target.getByText("Playwright").first().click();
   await target.waitForTimeout(500);
-  log.mcpMatrix = await target.locator("text=同步到").count();
+  // 新列表把勾选直接放在行右侧，不再需要先点开详情
+  log.mcpMatrix = await target.getByRole("checkbox", { name: /启用 playwright/ }).count();
   await shot("01-mcp");
 
   // 勾 Claude 的 MCP（配置根已重定向到沙箱，绝不影响真实 ~/.claude.json）

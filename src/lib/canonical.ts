@@ -37,6 +37,20 @@ export interface HookForm {
   timeout: string;
 }
 
+export interface PromptForm {
+  title: string;
+  description: string;
+  body: string;
+}
+
+export interface SkillForm {
+  name: string;
+  description: string;
+  body: string;
+  /** name/description 以外的 frontmatter 原样保留，编辑时不丢用户字段。 */
+  extraFrontmatter: string;
+}
+
 type Entry = string | string[];
 
 /**
@@ -98,6 +112,15 @@ function unquote(value: string): string {
     return trimmed.slice(1, -1);
   }
   return trimmed;
+}
+
+/** 多行值走 YAML 块标量，避免 JSON 转义后的 \n 被读回成字面量。 */
+function renderTextField(key: string, value: string): string {
+  if (value.includes("\n")) {
+    const body = value.split("\n").map((line) => `  ${line}`).join("\n");
+    return `${key}: |\n${body}`;
+  }
+  return `${key}: ${quoteIfNeeded(value)}`;
 }
 
 /** 只有会被 YAML 误读的写法才加引号；中文这类普通字符保持原样，diff 才读得下去。 */
@@ -198,6 +221,88 @@ export function renderSubagent(form: SubagentForm): string {
   return `${lines.join("\n")}\n`;
 }
 
+/** 提示词 frontmatter 可缺省；没有就整份当正文。 */
+export function parsePrompt(text: string): PromptForm {
+  const normalized = text.replace(/^﻿/, "");
+  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(normalized);
+  if (!match) {
+    return { title: "", description: "", body: normalized.replace(/^\n+/, "") };
+  }
+  const yaml = match[1];
+  const entry = lenientEntry(yaml, "提示词");
+  return {
+    title: lenientScalar(yaml, entry, "title"),
+    description: lenientScalar(yaml, entry, "description"),
+    body: match[2].replace(/^\n+/, ""),
+  };
+}
+
+/** 只写有值的 frontmatter，正文末尾统一一个换行，避免 diff 噪声。 */
+export function renderPrompt(form: PromptForm): string {
+  const lines: string[] = [];
+  if (form.title.trim()) lines.push(renderTextField("title", form.title.trim()));
+  if (form.description.trim()) {
+    lines.push(renderTextField("description", form.description.trim()));
+  }
+  const frontmatter = lines.length > 0 ? `---\n${lines.join("\n")}\n---\n\n` : "";
+  return `${frontmatter}${form.body.replace(/\n+$/, "")}\n`;
+}
+
+/** SKILL.md 的 name/description/body；其余 frontmatter 行原样带着。 */
+export function parseSkill(text: string): SkillForm {
+  const normalized = text.replace(/^﻿/, "");
+  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(normalized);
+  if (!match) {
+    return {
+      name: "",
+      description: "",
+      body: normalized.replace(/^\n+/, ""),
+      extraFrontmatter: "",
+    };
+  }
+  const yaml = match[1];
+  const entry = lenientEntry(yaml, "Skill");
+  const extra = removeManagedKeys(yaml).trim();
+  return {
+    name: lenientScalar(yaml, entry, "name"),
+    description: lenientScalar(yaml, entry, "description"),
+    body: match[2].replace(/^\n+/, ""),
+    extraFrontmatter: extra,
+  };
+}
+
+export function renderSkill(form: SkillForm): string {
+  const lines: string[] = [];
+  if (form.name.trim()) lines.push(renderTextField("name", form.name.trim()));
+  if (form.description.trim()) {
+    lines.push(renderTextField("description", form.description.trim()));
+  }
+  if (form.extraFrontmatter.trim()) lines.push(form.extraFrontmatter.trimEnd());
+  const frontmatter = lines.length > 0 ? `---\n${lines.join("\n")}\n---\n\n` : "";
+  return `${frontmatter}${form.body.replace(/\n+$/, "")}\n`;
+}
+
+/**
+ * 从 frontmatter 里去掉 name/description 及其缩进续行（块标量），
+ * 其余行原样保留。只删顶层键，嵌套块里的同名字段不受影响。
+ */
+function removeManagedKeys(yaml: string): string {
+  const kept: string[] = [];
+  let skipping = false;
+  for (const line of yaml.split(/\r?\n/)) {
+    if (/^(name|description):/.test(line)) {
+      skipping = true;
+      continue;
+    }
+    if (skipping) {
+      if (line.trim() === "" || /^\s/.test(line)) continue;
+      skipping = false;
+    }
+    kept.push(line);
+  }
+  return kept.join("\n");
+}
+
 export function parseHook(text: string): HookForm {
   const entry = readYaml(text, "hook");
   return {
@@ -221,6 +326,25 @@ export function renderHook(form: HookForm): string {
   else lines.push("command_windows: null");
   if (form.timeout) lines.push(`timeout: ${Number(form.timeout)}`);
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * 第三方 SKILL/提示词的 frontmatter 可能超出我们的 YAML 子集；这里只取需要的
+ * 顶层标量，读不懂的写法不阻断编辑（整段仍会原样保留）。
+ */
+function lenientEntry(yaml: string, kind: string): Map<string, Entry> {
+  try {
+    return readYaml(yaml, kind);
+  } catch {
+    return new Map();
+  }
+}
+
+function lenientScalar(yaml: string, entry: Map<string, Entry>, key: string): string {
+  const parsed = scalar(entry, key);
+  if (parsed) return parsed;
+  const line = yaml.split(/\r?\n/).find((item) => item.startsWith(`${key}:`));
+  return line ? unquote(line.slice(key.length + 1).trim()) : "";
 }
 
 /** markdown 文件切成 frontmatter 与正文；没有 frontmatter 时整份当正文。 */

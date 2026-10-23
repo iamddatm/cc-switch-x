@@ -16,23 +16,25 @@ beforeEach(() => {
   vi.mocked(api.getSettings).mockResolvedValue({
     storeRoot: "C:/Users/me/.ccswitchx",
     theme: "system",
+    enabledAgents: null,
   });
   vi.mocked(api.setTheme).mockResolvedValue({
     storeRoot: "C:/Users/me/.ccswitchx",
     theme: "dark",
+    enabledAgents: null,
   });
   vi.mocked(api.setStoreRoot).mockResolvedValue(true);
 });
 
 test("changes theme and persists it", async () => {
-  render(<SettingsPanel />);
+  render(<SettingsPanel theme="system" onThemeChange={() => {}} />);
   const select = await screen.findByLabelText("主题");
   fireEvent.change(select, { target: { value: "dark" } });
   await waitFor(() => expect(api.setTheme).toHaveBeenCalledWith("dark"));
 });
 
 test("changes store root and warns about restart", async () => {
-  render(<SettingsPanel />);
+  render(<SettingsPanel theme="system" onThemeChange={() => {}} />);
   const input = await screen.findByLabelText("存储位置");
   fireEvent.change(input, { target: { value: "D:/data/ccswitchx" } });
   fireEvent.click(screen.getByRole("button", { name: "保存存储位置" }));

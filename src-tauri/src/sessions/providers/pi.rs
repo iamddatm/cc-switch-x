@@ -667,6 +667,7 @@ mod tests {
             updated_at: 0,
             message_count: 0,
             parse_error: None,
+            preview: None,
         };
         assert_eq!(
             resume_pi(&summary).as_deref(),

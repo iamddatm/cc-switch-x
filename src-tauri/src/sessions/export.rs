@@ -157,6 +157,7 @@ mod tests {
             updated_at: 1_700_000_000_000,
             message_count: 4,
             parse_error: None,
+            preview: None,
         }
     }
 

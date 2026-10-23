@@ -57,7 +57,10 @@ pub struct SessionFileRow {
     pub parse_error: Option<String>,
 }
 
-const SUMMARY_SELECT: &str = "SELECT s.agent_id,s.session_id,s.title,s.project_path,s.source_path,s.created_at,s.updated_at,s.message_count,f.parse_error \
+const SUMMARY_SELECT: &str = "SELECT s.agent_id,s.session_id,s.title,s.project_path,s.source_path,s.created_at,s.updated_at,s.message_count,f.parse_error, \
+     (SELECT m.content FROM session_messages m \
+      WHERE m.agent_id=s.agent_id AND m.session_id=s.session_id AND m.kind='text' \
+      ORDER BY m.seq DESC LIMIT 1) AS preview \
      FROM sessions s LEFT JOIN session_files f ON f.agent_id=s.agent_id AND f.source_path=s.source_path";
 
 impl Index {
@@ -528,7 +531,22 @@ fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSummary> {
         updated_at: row.get(6)?,
         message_count: u32::try_from(row.get::<_, i64>(7)?).unwrap_or(u32::MAX),
         parse_error: row.get(8)?,
+        preview: row
+            .get::<_, Option<String>>(9)?
+            .map(|text| make_preview(&text)),
     })
+}
+
+/// 摘要只用于列表行：压掉换行、限制长度，不把大段正文塞进 IPC。
+fn make_preview(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = flat.chars();
+    let short: String = chars.by_ref().take(160).collect();
+    if chars.next().is_some() {
+        format!("{short}…")
+    } else {
+        short
+    }
 }
 
 fn row_to_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionFileRow> {

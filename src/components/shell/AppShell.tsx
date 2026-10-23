@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import type { Pane, Theme } from "../../types";
 import { api } from "../../lib/api";
 import { useTheme } from "../../hooks/useTheme";
-import { ImportDialog } from "../ImportDialog";
 import { Sidebar } from "./Sidebar";
+import { AgentsPanel } from "../../panels/AgentsPanel";
 import { HooksPanel } from "../../panels/HooksPanel";
 import { McpPanel } from "../../panels/McpPanel";
 import { PromptsPanel } from "../../panels/PromptsPanel";
@@ -16,9 +16,8 @@ import { SubagentsPanel } from "../../panels/SubagentsPanel";
 export function AppShell() {
   const [pane, setPane] = useState<Pane>("mcp");
   const [theme, setTheme] = useState<Theme>("system");
-  const [importing, setImporting] = useState(false);
 
-  // 主题在壳层生效：否则只有打开过 Settings 才会应用已保存的主题。
+  // 主题只在壳层应用一次：Settings 改完回传这里，避免两个 useTheme 互相覆盖。
   useEffect(() => {
     void api
       .getSettings()
@@ -35,24 +34,14 @@ export function AppShell() {
     subagent: <SubagentsPanel />,
     hook: <HooksPanel />,
     sessions: <SessionsPanel />,
-    settings: <SettingsPanel />,
+    agents: <AgentsPanel />,
+    settings: <SettingsPanel theme={theme} onThemeChange={setTheme} />,
   }[pane];
+
   return (
-    <div className="flex h-full">
+    <div className="flex h-full bg-app">
       <Sidebar pane={pane} onSelect={setPane} />
-      <main className="flex-1 overflow-auto p-6">
-        <div className="mb-4 flex justify-end">
-          <button
-            type="button"
-            className="rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-700"
-            onClick={() => setImporting(true)}
-          >
-            从 cc-switch 导入
-          </button>
-        </div>
-        {content}
-        {importing && <ImportDialog onClose={() => setImporting(false)} />}
-      </main>
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col">{content}</main>
     </div>
   );
 }

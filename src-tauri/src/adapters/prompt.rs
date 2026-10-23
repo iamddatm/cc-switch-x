@@ -117,6 +117,11 @@ pub fn activate(
                     name: new_id.clone(),
                     updated_at: chrono::Utc::now().timestamp_millis(),
                     hash: sha256_hex(saved.as_bytes()),
+                    description: None,
+                    source: None,
+                    mtime: None,
+                    transport: None,
+                    size: None,
                 })?;
             }
         }

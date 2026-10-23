@@ -58,6 +58,21 @@ pub struct AssetSummary {
     pub name: String,
     pub updated_at: i64,
     pub hash: String,
+    /// 列表行的副标题；由 `AssetService` 从真源内容补齐，不落索引表。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Skill 的来源仓库（owner/repo）；其他资产或本地 skill 为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// 真源文件的真实修改时间（毫秒）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime: Option<i64>,
+    /// 真源文件字节数，列表行展示大小用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<i64>,
+    /// MCP 的传输方式，用于行内 badge。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
 }
 
 /// 「资产 × agent」四态（spec 3.3）：未同步 / 已写入 / 已生效 / 有漂移。

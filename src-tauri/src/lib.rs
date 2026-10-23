@@ -51,6 +51,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ping,
             commands::agents::activate_prompt,
+            commands::agents::deactivate_prompt,
             commands::agents::list_agents,
             commands::agents::set_mcp_enabled,
             commands::agents::set_skill_enabled,
@@ -58,6 +59,7 @@ pub fn run() {
             commands::assets::read_asset,
             commands::assets::write_asset,
             commands::assets::delete_asset,
+            commands::assets::import_skill_dir,
             commands::drift::list_drifts,
             commands::drift::rescan_drift,
             commands::drift::resolve_drift,
@@ -80,6 +82,7 @@ pub fn run() {
             commands::subagents::scan_subagents,
             commands::subagents::set_subagent_enabled,
             commands::settings::get_settings,
+            commands::settings::set_enabled_agents,
             commands::settings::set_theme,
             commands::settings::set_store_root,
         ])

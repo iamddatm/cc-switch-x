@@ -2,10 +2,12 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { SessionsPanel } from "../panels/SessionsPanel";
 import { api } from "../lib/api";
+import { agentStatus } from "../test/agents";
 import type { SessionProviderStatus, SessionSummary } from "../types";
 
 vi.mock("../lib/api", () => ({
   api: {
+    listAgents: vi.fn(),
     listSessions: vi.fn(),
     sessionProviders: vi.fn(),
     scanSessions: vi.fn(),
@@ -48,12 +50,18 @@ function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
     updatedAt: Date.now(),
     messageCount: 2,
     parseError: null,
+    preview: null,
     ...overrides,
   };
 }
 
+function agent(id: string, displayName: string) {
+  return agentStatus({ id, displayName });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(api.listAgents).mockResolvedValue([agent("claude", "Claude Code")]);
   vi.mocked(api.listSessions).mockResolvedValue([]);
   vi.mocked(api.sessionProviders).mockResolvedValue([]);
   vi.mocked(api.scanSessions).mockResolvedValue({
@@ -92,6 +100,11 @@ test("first_run_offers_a_manual_scan_and_does_not_autoscan", async () => {
 });
 
 test("empty_state_names_each_provider_and_why_it_has_no_sessions", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agent("claude", "Claude Code"),
+    agent("pi", "Pi Coding Agent"),
+    agent("gemini", "Gemini CLI"),
+  ]);
   vi.mocked(api.sessionProviders).mockResolvedValue([
     provider({
       agentId: "claude",
@@ -128,6 +141,7 @@ test("empty_state_names_each_provider_and_why_it_has_no_sessions", async () => {
 });
 
 test("files_found_through_an_env_root_are_not_reported_as_missing", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([agent("opencode", "OpenCode")]);
   vi.mocked(api.sessionProviders).mockResolvedValue([
     provider({
       agentId: "opencode",
@@ -156,6 +170,7 @@ test("unverified_provider_sessions_carry_a_warning_badge", async () => {
 
   render(<SessionsPanel />);
 
+  fireEvent.click(await screen.findByRole("button", { name: /repo/ }));
   await screen.findByText("未实测会话");
   expect(screen.getAllByText("解析器未实测").length).toBeGreaterThan(0);
 });
@@ -170,32 +185,27 @@ test("search_shows_the_matching_snippet_and_session", async () => {
 
   render(<SessionsPanel />);
 
-  const input = await screen.findByPlaceholderText("搜索会话内容");
+  const input = await screen.findByLabelText("搜索会话内容");
   fireEvent.change(input, { target: { value: "关键字" } });
-  fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+  fireEvent.keyDown(input, { key: "Enter" });
 
   expect(await screen.findByText("这里包含关键字片段")).toBeInTheDocument();
   expect(screen.getByText("登录问题")).toBeInTheDocument();
   expect(screen.getByText("命中")).toBeInTheDocument();
-  expect(api.searchSessions).toHaveBeenCalledWith("关键字");
+  expect(api.searchSessions).toHaveBeenCalledWith("关键字", 500);
 });
 
-test("session_list_can_load_more_than_the_first_page", async () => {
-  const first = Array.from({ length: 50 }, (_, index) =>
-    session({ sessionId: `s${index}`, title: `会话${index}` }),
-  );
-  const second = [session({ sessionId: "s50", title: "第 51 个会话" })];
-  vi.mocked(api.listSessions)
-    .mockResolvedValueOnce(first)
-    .mockResolvedValueOnce(second);
+test("loads_all_sessions_in_one_request_for_complete_project_groups", async () => {
+  const target = session({ sessionId: "s50", title: "第 51 个会话" });
+  vi.mocked(api.listSessions).mockResolvedValue([target]);
   vi.mocked(api.sessionProviders).mockResolvedValue([provider()]);
 
   render(<SessionsPanel />);
 
-  fireEvent.click(await screen.findByRole("button", { name: "载入更多" }));
-
+  fireEvent.click(await screen.findByRole("button", { name: /repo/ }));
   expect(await screen.findByText("第 51 个会话")).toBeInTheDocument();
-  expect(api.listSessions).toHaveBeenLastCalledWith(undefined, undefined, 50, 50);
+  expect(api.listSessions).toHaveBeenCalledWith(undefined, undefined, 0, 2000);
+  expect(screen.queryByRole("button", { name: "载入更多" })).not.toBeInTheDocument();
 });
 
 test("opening_a_session_and_returning_keeps_the_search_term", async () => {
@@ -215,15 +225,15 @@ test("opening_a_session_and_returning_keeps_the_search_term", async () => {
 
   render(<SessionsPanel />);
 
-  const input = await screen.findByPlaceholderText("搜索会话内容");
+  const input = await screen.findByLabelText("搜索会话内容");
   fireEvent.change(input, { target: { value: "关键字" } });
-  fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+  fireEvent.keyDown(input, { key: "Enter" });
   await screen.findByText("关键字片段");
   fireEvent.click(screen.getByRole("button", { name: /登录问题/ }));
   expect(await screen.findByText("会话正文")).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "返回列表" }));
-  expect(screen.getByPlaceholderText("搜索会话内容")).toHaveValue("关键字");
+  expect(screen.getByLabelText("搜索会话内容")).toHaveValue("关键字");
   expect(screen.getByText("关键字片段")).toBeInTheDocument();
 });
 

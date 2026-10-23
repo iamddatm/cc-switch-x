@@ -2,6 +2,7 @@ use crate::domain::{AssetSummary, AssetType};
 use crate::error::AppError;
 use crate::services::assets::AssetService;
 use crate::state::AppState;
+use std::path::PathBuf;
 use tauri::State;
 
 #[tauri::command]
@@ -50,4 +51,17 @@ pub fn delete_asset(
         .lock()
         .map_err(|_| AppError::InvalidInput("index 锁失败".into()))?;
     AssetService::delete(&state.store, &mut index, asset_type, &id)
+}
+
+/// 从本地目录导入一个 skill。`source` 是用户通过目录选择器挑的绝对路径。
+#[tauri::command]
+pub fn import_skill_dir(
+    state: State<'_, AppState>,
+    source: PathBuf,
+) -> Result<AssetSummary, AppError> {
+    let mut index = state
+        .index
+        .lock()
+        .map_err(|_| AppError::InvalidInput("index 锁失败".into()))?;
+    AssetService::import_skill_dir(&state.store, &mut index, &source)
 }

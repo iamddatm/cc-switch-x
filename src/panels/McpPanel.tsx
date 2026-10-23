@@ -1,133 +1,283 @@
-import { useEffect, useState } from "react";
-import { AgentMatrix } from "../components/AgentMatrix";
-import { JsonEditor } from "../components/JsonEditor";
+import { useState } from "react";
+import { Plus, Server } from "lucide-react";
+import { AgentColumnCells } from "../components/assets/AgentColumnCells";
+import { AgentColumnsHeader } from "../components/assets/AgentColumnsHeader";
+import { AssetRow } from "../components/assets/AssetRow";
+import { ImportDialog } from "../components/ImportDialog";
+import { McpFormSheet } from "../components/mcp/McpFormSheet";
+import { Badge } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
+import { EmptyState } from "../components/ui/EmptyState";
+import { Menu } from "../components/ui/Menu";
+import { Notice } from "../components/ui/Notice";
+import { PageHeader } from "../components/ui/PageHeader";
+import { SearchField } from "../components/ui/SearchField";
+import { Select } from "../components/ui/Select";
 import { useAgents } from "../hooks/useAgents";
 import { useAssets } from "../hooks/useAssets";
 import { api } from "../lib/api";
+import { emptyMcpForm, parseMcp, type McpForm } from "../lib/mcp";
+import { supported, type AssetSummary } from "../types";
+
+type Editing =
+  | { mode: "create"; form: McpForm }
+  | { mode: "edit"; id: string; form: McpForm };
 
 export function McpPanel() {
-  const { items, error, refresh } = useAssets("mcp");
-  const { agents, refresh: refreshAgents } = useAgents();
-  const [selected, setSelected] = useState<string | null>(null);
-  const [content, setContent] = useState("");
-  const [newId, setNewId] = useState("");
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const { items, error, loading, refresh } = useAssets("mcp");
+  const { agents, enabledAgents, refresh: refreshAgents } = useAgents();
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState("all");
+  const [editing, setEditing] = useState<Editing | null>(null);
+  const [loadingEdit, setLoadingEdit] = useState(false);
+  const [deleting, setDeleting] = useState<AssetSummary | null>(null);
+  const [pendingDelete, setPendingDelete] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
 
-  useEffect(() => {
-    if (!selected) {
-      setContent("");
-      return;
+  const agentsForType = enabledAgents.filter((agent) => supported(agent, "mcp"));
+  const refreshAll = () => {
+    void refresh();
+    void refreshAgents();
+  };
+
+  const normalized = query.trim().toLowerCase();
+  const visible = items.filter((item) => {
+    if (
+      normalized &&
+      [item.name, item.id, item.description ?? "", item.transport ?? ""]
+        .join(" ")
+        .toLowerCase()
+        .includes(normalized)
+    ) {
+      return false;
     }
-    // 新建但尚未落盘的 ID 不在列表里，此时保留编辑器里的模板内容
-    if (!items.some((item) => item.id === selected)) return;
-    void api
-      .readAsset("mcp", selected)
-      .then(setContent)
-      .catch((e) => setSaveError(String(e)));
-  }, [selected, items]);
+    if (filter === "all") return true;
+    if (filter === "off") {
+      return !agentsForType.some((agent) => agent.enabledMcp.includes(item.id));
+    }
+    const agentId = filter.slice("on:".length);
+    return agents.find((agent) => agent.id === agentId)?.enabledMcp.includes(item.id) === true;
+  });
+
+  const openEdit = async (item: AssetSummary) => {
+    setLoadingEdit(true);
+    setActionError(null);
+    try {
+      const text = await api.readAsset("mcp", item.id);
+      setEditing({ mode: "edit", id: item.id, form: parseMcp(text) });
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setLoadingEdit(false);
+    }
+  };
 
   const create = () => {
-    const id = newId.trim();
-    if (!id) return;
-    setSelected(id);
-    setContent(JSON.stringify({ id, name: id, transport: "stdio", command: "", args: [] }, null, 2));
-    setNewId("");
+    setEditing({ mode: "create", form: emptyMcpForm() });
   };
 
-  const save = async () => {
-    if (!selected) return;
+  const deleteServer = async () => {
+    if (!deleting) return;
+    setPendingDelete(true);
+    setActionError(null);
     try {
-      JSON.parse(content);
-    } catch {
-      setSaveError("JSON 无效");
-      return;
-    }
-    try {
-      await api.writeAsset("mcp", selected, content);
-      setSaveError(null);
-      await refresh();
+      for (const agent of agents) {
+        if (agent.enabledMcp.includes(deleting.id)) {
+          await api.setMcpEnabled(deleting.id, agent.id, false);
+        }
+      }
+      await api.deleteAsset("mcp", deleting.id);
+      setDeleting(null);
+      refreshAll();
     } catch (e) {
-      setSaveError(String(e));
+      setActionError(String(e));
+    } finally {
+      setPendingDelete(false);
     }
   };
 
-  const remove = async () => {
-    if (!selected || !window.confirm("确定删除该 MCP 服务器？")) return;
-    await api.deleteAsset("mcp", selected);
-    setSelected(null);
-    await refresh();
+  const deployedTo = deleting
+    ? agents.filter((agent) => agent.enabledMcp.includes(deleting.id))
+    : [];
+
+  const restartHint = (id: string) => {
+    const names = enabledAgents
+      .filter((agent) => agent.enabledMcp.includes(id) && agent.mcpNeedsRestart !== false)
+      .map((agent) => agent.displayName);
+    return names.length > 0 ? `${names.join("、")} 需重启或 reload` : null;
   };
 
   return (
-    <div className="grid grid-cols-[240px_1fr] gap-6">
-      <section>
-        <h2 className="mb-3 text-xl font-semibold">MCP</h2>
-        {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
-        <ul className="space-y-1">
-          {items.map((item) => (
-            <li key={item.id}>
-              <button
-                type="button"
-                className="w-full rounded px-2 py-1 text-left hover:bg-slate-100 dark:hover:bg-slate-700"
-                onClick={() => setSelected(item.id)}
-              >
-                {item.name}
-              </button>
-            </li>
-          ))}
-        </ul>
-        <div className="mt-4 flex gap-2">
-          <input
-            aria-label="新 MCP ID"
-            className="min-w-0 flex-1 rounded border border-slate-300 bg-white px-2 py-1 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
-            placeholder="新 MCP ID"
-            value={newId}
-            onChange={(e) => setNewId(e.target.value)}
-          />
-          <button
-            type="button"
-            className="rounded border border-slate-300 px-2 py-1 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-700"
-            onClick={create}
-          >
-            新建
-          </button>
-        </div>
-      </section>
-      <section>
-        {selected ? (
+    <div className="relative flex h-full min-h-0 flex-col">
+      <PageHeader
+        icon={Server}
+        title="MCP"
+        actions={
           <>
-            <div className="mb-3 flex gap-2">
-              <button
-                type="button"
-                className="rounded bg-slate-800 px-3 py-1.5 text-sm text-white dark:bg-slate-600"
-                onClick={save}
-              >
-                保存
-              </button>
-              <button
-                type="button"
-                className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700 dark:border-red-800 dark:text-red-300"
-                onClick={remove}
-              >
-                删除
-              </button>
-            </div>
-            {saveError && <p className="mb-2 text-sm text-red-600 dark:text-red-400">{saveError}</p>}
-            <JsonEditor value={content} onChange={setContent} />
-            <AgentMatrix
-              assetType="mcp"
-              id={selected}
-              agents={agents}
-              onChanged={() => {
-                void refresh();
-                void refreshAgents();
-              }}
+            <Button variant="primary" onClick={create}>
+              <Plus size={14} aria-hidden />
+              添加 MCP
+            </Button>
+            <Menu
+              label="MCP 的更多操作"
+              items={[
+                { label: "从 cc-switch 导入", onSelect: () => setImporting(true) },
+                { label: "刷新列表", onSelect: refreshAll },
+              ]}
             />
           </>
-        ) : (
-          <p className="text-sm text-slate-500 dark:text-slate-400">选择左侧 MCP 服务器进行编辑。</p>
+        }
+      />
+
+      <div className="flex h-12 shrink-0 items-center gap-3 px-6">
+        <SearchField
+          className="w-[320px]"
+          value={query}
+          onValueChange={setQuery}
+          placeholder="搜索名称、描述或类型…"
+          ariaLabel="搜索 MCP"
+        />
+        <Select
+          aria-label="按 Agent 筛选"
+          value={filter}
+          onChange={(event) => setFilter(event.target.value)}
+        >
+          <option value="all">全部 Agent</option>
+          <option value="off">未启用任何 Agent</option>
+          {agentsForType.map((agent) => (
+            <option key={agent.id} value={`on:${agent.id}`}>
+              已启用给 {agent.displayName}
+            </option>
+          ))}
+        </Select>
+        <span className="ml-auto text-caption text-fg-3">
+          {visible.length} / {items.length} 个 MCP
+        </span>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-auto px-6 pb-5">
+        {(error || actionError) && (
+          <Notice tone="danger" className="mb-3">
+            {error ?? actionError}
+          </Notice>
         )}
-      </section>
+        {actionMessage && (
+          <Notice tone="success" className="mb-3">
+            {actionMessage}
+          </Notice>
+        )}
+        {enabledAgents.length === 0 && (
+          <Notice tone="warning" className="mb-3">
+            还没有启用任何 Agent，右侧不会出现勾选列。去左侧 Agents 页选择要管理的 Agent。
+          </Notice>
+        )}
+        {loadingEdit && <p className="mb-2 text-caption text-fg-3">正在读取 MCP 配置…</p>}
+
+        {loading && items.length === 0 ? (
+          <p className="py-10 text-center text-caption text-fg-3">正在读取 MCP…</p>
+        ) : items.length === 0 ? (
+          <EmptyState
+            icon={Server}
+            title="还没有 MCP 服务器"
+            description="添加一个服务器，或从 cc-switch 导入已有配置。"
+            actions={
+              <>
+                <Button variant="primary" onClick={create}>
+                  添加 MCP
+                </Button>
+                <Button onClick={() => setImporting(true)}>从 cc-switch 导入</Button>
+              </>
+            }
+          />
+        ) : visible.length === 0 ? (
+          <EmptyState icon={Server} title="没有匹配的 MCP" description="换个关键词或筛选条件。" />
+        ) : (
+          <div className="overflow-hidden rounded-panel border border-border bg-surface">
+            <div className="flex h-11 items-center bg-subtle pe-3 ps-4">
+              <span className="flex-1 text-caption font-semibold text-fg-2">名称</span>
+              <AgentColumnsHeader assetType="mcp" agents={agentsForType} items={visible} />
+              <span className="w-12" />
+            </div>
+            <ul>
+              {visible.map((item) => (
+                <AssetRow
+                  key={item.id}
+                  title={item.name}
+                  subtitle={item.id}
+                  description={item.description ?? undefined}
+                  titleBadges={<Badge mono>{item.transport ?? "?"}</Badge>}
+                  agentCells={
+                    <AgentColumnCells
+                      assetType="mcp"
+                      id={item.id}
+                      agents={agentsForType}
+                      onChanged={refreshAll}
+                      onError={setActionError}
+                      onOutcome={(label) => {
+                        setActionError(null);
+                        setActionMessage(`实测：${label}`);
+                      }}
+                    />
+                  }
+                  footer={restartHint(item.id)}
+                  footerTone="warning"
+                  actions={
+                    <Menu
+                      label={`${item.name} 的更多操作`}
+                      items={[
+                        { label: "编辑", onSelect: () => void openEdit(item) },
+                        { label: "删除", danger: true, onSelect: () => setDeleting(item) },
+                      ]}
+                    />
+                  }
+                  onOpen={() => void openEdit(item)}
+                />
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      {editing && (
+        <McpFormSheet
+          mode={editing.mode}
+          initial={editing.form}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            refreshAll();
+          }}
+        />
+      )}
+
+      {importing && (
+        <ImportDialog
+          onClose={() => {
+            setImporting(false);
+            refreshAll();
+          }}
+        />
+      )}
+
+      <ConfirmDialog
+        open={deleting !== null}
+        title={`删除 ${deleting?.name ?? ""}？`}
+        danger
+        pending={pendingDelete}
+        confirmLabel="删除 MCP"
+        body={
+          <p>
+            会删除真源里的 MCP 配置，不可撤销。
+            {deployedTo.length > 0 &&
+              ` 删除前会先从 ${deployedTo.map((agent) => agent.displayName).join("、")} 的配置里移除。`}
+          </p>
+        }
+        onConfirm={() => void deleteServer()}
+        onCancel={() => setDeleting(null)}
+      />
     </div>
   );
 }

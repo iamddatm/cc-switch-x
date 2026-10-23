@@ -183,6 +183,8 @@ pub struct AgentDescriptor {
     pub id: String,
     pub display_name: String,
     pub config_root: String,
+    /// 该 agent 的独立 CLI 命令名；只用于「CLI 是否安装」徽标，不参与写入门禁。
+    pub cli_program: &'static str,
     /// 按资产类型逐一标注；`AssetKind::ALL` 每格都有值（缺失补 OFF）。
     pub support: SupportMap,
     pub paths: AgentPaths,
@@ -241,6 +243,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
             id: "claude".into(),
             display_name: "Claude Code".into(),
             config_root: "~/.claude".into(),
+            cli_program: "claude",
             // MCP/Skills 属 A（沙箱真机写入）；prompt/hooks 属 B（CLAUDE.md 与 settings.json 实测）；
             // subagent 属 C（本机 ~/.claude/agents 不存在，只有 teamai 代码级证据）
             support: supports(&[
@@ -274,6 +277,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
             id: "codex".into(),
             display_name: "Codex".into(),
             config_root: "~/.codex".into(),
+            cli_program: "codex",
             support: supports(&[
                 (AssetKind::Mcp, AssetSupport::VERIFIED),
                 (AssetKind::Skill, AssetSupport::VERIFIED),
@@ -310,6 +314,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
             id: "gemini".into(),
             display_name: "Gemini CLI".into(),
             config_root: "~/.gemini".into(),
+            cli_program: "gemini",
             // 本机只见到 GEMINI.md、settings.json.mcpServers 与一个空的 skills/
             support: supports(&[
                 (AssetKind::Mcp, AssetSupport::VERIFIED),
@@ -333,6 +338,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
             id: "qoder".into(),
             display_name: "Qoder".into(),
             config_root: "~/.qoder".into(),
+            cli_program: "qoder",
             // A2b：IDE 究竟读 mcp.json 还是 settings.json.mcpServers 未确证，所以全部只标不验证
             support: supports(&[
                 (AssetKind::Mcp, AssetSupport::UNVERIFIED),
@@ -364,6 +370,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
             id: "qoder-cn".into(),
             display_name: "Qoder CN".into(),
             config_root: "~/.qoder-cn".into(),
+            cli_program: "qoderclicn",
             // MCP 有二进制自带 config schema（requiresRestart），skills 目录本机可见；
             // prompt 属 B：本机 ~/.qoder-cn/AGENTS.md 确实被 Qoder CN CLI 当作全局约定读进来了；
             // rules/agents 两目录本机根本不存在、也没有任何样本文件 → C 档，不开开关。
@@ -401,6 +408,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
             // 与 dist/extensions/mcp/config.js（读 <agentDir>/mcp.json 的 mcpServers）。
             // 提示词落点已用 sha1 与 cc-switch 的 pi 行比对一致。
             config_root: "~/.pi/agent".into(),
+            cli_program: "pi",
             support: supports(&[
                 (AssetKind::Mcp, AssetSupport::UNVERIFIED),
                 (AssetKind::Skill, AssetSupport::VERIFIED),

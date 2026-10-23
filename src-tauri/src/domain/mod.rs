@@ -8,7 +8,16 @@ pub mod prompt;
 pub mod rule;
 pub mod secret;
 pub mod session;
+pub mod skill;
 pub mod subagent;
+
+/// 列表行需要的、不落索引的可选元数据。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AssetDetails {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub transport: Option<String>,
+}
 
 pub use agent::{is_known_agent, AssetKind, AssetSupport, CapabilityStatus, SupportMap};
 pub use asset::{AssetState, AssetSummary, AssetType, DriftKind};
@@ -82,6 +91,110 @@ pub fn parse_and_validate(
             Ok(())
         }
         AssetType::Skill => Ok(()),
+    }
+}
+
+/// 从真源内容提取列表展示字段。解析失败只返回空元数据，不能影响资产本身。
+pub fn describe(asset_type: AssetType, id: &str, bytes: &[u8]) -> AssetDetails {
+    let Ok(text) = as_text(bytes) else {
+        return AssetDetails::default();
+    };
+    match asset_type {
+        AssetType::Skill => {
+            let meta = skill::parse_metadata(text);
+            AssetDetails {
+                name: meta.name,
+                description: meta.description,
+                transport: None,
+            }
+        }
+        AssetType::Mcp => {
+            let Ok(server) = serde_json::from_slice::<mcp::McpServer>(bytes) else {
+                return AssetDetails::default();
+            };
+            let transport = match server.transport {
+                mcp::Transport::Stdio => "stdio",
+                mcp::Transport::Http => "http",
+                mcp::Transport::Sse => "sse",
+                mcp::Transport::Ws => "ws",
+            }
+            .to_string();
+            AssetDetails {
+                name: Some(server.name.clone()),
+                description: Some(mcp_summary(&server)),
+                transport: Some(transport),
+            }
+        }
+        AssetType::Prompt => match prompt::parse_prompt(id, text) {
+            Ok(prompt) => AssetDetails {
+                name: prompt.meta.title.clone(),
+                description: prompt
+                    .meta
+                    .description
+                    .filter(|value| !value.trim().is_empty())
+                    .or_else(|| first_line(&prompt.body)),
+                transport: None,
+            },
+            Err(_) => AssetDetails::default(),
+        },
+        AssetType::Rule => match rule::parse_rule(id, text) {
+            Ok(rule) => AssetDetails {
+                name: Some(rule.meta.name),
+                description: non_empty(rule.meta.description),
+                transport: None,
+            },
+            Err(_) => AssetDetails::default(),
+        },
+        AssetType::Subagent => match subagent::parse_subagent(text) {
+            Ok(agent) => AssetDetails {
+                name: Some(agent.name),
+                description: non_empty(agent.description),
+                transport: None,
+            },
+            Err(_) => AssetDetails::default(),
+        },
+        AssetType::Hook => match hook::parse_hook(text) {
+            Ok(hook) => AssetDetails {
+                name: Some(hook.name),
+                description: non_empty(hook.event),
+                transport: None,
+            },
+            Err(_) => AssetDetails::default(),
+        },
+    }
+}
+
+fn mcp_summary(server: &mcp::McpServer) -> String {
+    let description = server.description.trim();
+    if !description.is_empty() {
+        return description.to_string();
+    }
+    match server.transport {
+        mcp::Transport::Stdio => {
+            let mut parts = Vec::new();
+            if let Some(command) = server.command.as_deref() {
+                parts.push(command.to_string());
+            }
+            parts.extend(server.args.iter().cloned());
+            parts.join(" ")
+        }
+        _ => server.url.clone().unwrap_or_default(),
+    }
+}
+
+fn first_line(body: &str) -> Option<String> {
+    body.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+fn non_empty(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 

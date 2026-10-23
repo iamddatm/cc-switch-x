@@ -458,6 +458,13 @@ mod tests {
         let first = list_sessions(&fx.index, Some("claude"), None, None, Some(1)).unwrap();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].session_id, "s2");
+        assert!(
+            first[0]
+                .preview
+                .as_deref()
+                .is_some_and(|text| !text.is_empty()),
+            "列表摘要应当带上最后一条文本消息"
+        );
         let second = list_sessions(&fx.index, Some("claude"), None, Some(1), Some(1)).unwrap();
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].session_id, "s1");

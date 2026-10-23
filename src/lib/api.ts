@@ -30,9 +30,12 @@ export const api = {
     invoke<AssetSummary>("write_asset", { assetType, id, content }),
   deleteAsset: (assetType: AssetType, id: string) =>
     invoke<boolean>("delete_asset", { assetType, id }),
+  importSkillDir: (source: string) => invoke<AssetSummary>("import_skill_dir", { source }),
   getSettings: () => invoke<AppSettings>("get_settings"),
   setTheme: (theme: Theme) => invoke<AppSettings>("set_theme", { theme }),
   setStoreRoot: (storeRoot: string) => invoke<boolean>("set_store_root", { storeRoot }),
+  setEnabledAgents: (agentIds: string[]) =>
+    invoke<AppSettings>("set_enabled_agents", { agentIds }),
 
   listAgents: () => invoke<AgentStatus[]>("list_agents"),
   importPreview: () => invoke<ImportPreview>("import_preview"),
@@ -54,6 +57,8 @@ export const api = {
       confirm: options?.confirm ?? false,
       saveExistingAs: options?.saveExistingAs,
     }),
+  deactivatePrompt: (agentId: string) =>
+    invoke<boolean>("deactivate_prompt", { agentId }),
 
   /** 返回实测标签：written / removed / absent；外来内容会直接报错 */
   setRuleEnabled: (id: string, agentId: string, enabled: boolean) =>

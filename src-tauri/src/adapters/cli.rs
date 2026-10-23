@@ -113,7 +113,7 @@ impl QoderCli {
     /// 在 `PATH` 里找可执行文件，**不假设安装位置**。找不到就返回 `None`（不是错误：
     /// 没有 CLI 时照样能用文件路径落盘，只是少一层「已生效」的确认）。
     pub fn discover() -> Option<Self> {
-        let program = discover_program()?;
+        let program = discover_program(PROGRAM)?;
         Some(Self {
             program,
             run: spawn,
@@ -155,36 +155,96 @@ impl QoderCli {
 }
 
 #[cfg(target_os = "windows")]
-fn candidate_names() -> Vec<String> {
+fn candidate_names(program: &str) -> Vec<String> {
     // Windows 上 PATH 里可能是 .exe / .cmd / .bat；PATHEXT 的顺序我们不复刻，
     // 只按这个固定顺序找，找到一个就用。
     ["exe", "cmd", "bat", ""]
         .iter()
         .map(|ext| {
             if ext.is_empty() {
-                PROGRAM.to_string()
+                program.to_string()
             } else {
-                format!("{PROGRAM}.{ext}")
+                format!("{program}.{ext}")
             }
         })
         .collect()
 }
 
 #[cfg(not(target_os = "windows"))]
-fn candidate_names() -> Vec<String> {
-    vec![PROGRAM.to_string()]
+fn candidate_names(program: &str) -> Vec<String> {
+    vec![program.to_string()]
 }
 
-fn discover_program() -> Option<PathBuf> {
+/// 在 PATH 里找可执行文件；找不到返回 None。
+pub fn discover_program(program: &str) -> Option<PathBuf> {
     for dir in std::env::split_paths(&std::env::var("PATH").ok()?) {
-        for name in candidate_names() {
-            let candidate = dir.join(&name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
+        if let Some(found) = find_in_dir(&dir, program) {
+            return Some(found);
         }
     }
     None
+}
+
+/// 「CLI 是否安装」徽标用：PATH 之外再看常见安装目录。
+/// GUI 进程的 PATH 常常缺 shell 里的 npm / fnm 路径，只扫 PATH 会把已装的工具报成未安装。
+pub fn discover_cli(program: &str, home: &Path) -> Option<PathBuf> {
+    discover_program(program).or_else(|| {
+        common_install_dirs(home)
+            .into_iter()
+            .find_map(|dir| find_in_dir(&dir, program))
+    })
+}
+
+fn find_in_dir(dir: &Path, program: &str) -> Option<PathBuf> {
+    candidate_names(program)
+        .into_iter()
+        .map(|name| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn common_install_dirs(home: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![
+        home.join(".local/bin"),
+        home.join(".npm-global/bin"),
+        home.join(".volta/bin"),
+        home.join(".cargo/bin"),
+    ];
+    if let Some(data) = dirs::data_dir() {
+        // Windows 的 npm 全局目录在 %APPDATA%\npm；其他平台多一层兜底。
+        dirs.push(data.join("npm"));
+        dirs.push(data.join("pnpm"));
+        collect_fnm_dirs(&data, &mut dirs);
+    }
+    if let Some(local) = dirs::data_local_dir() {
+        dirs.push(local.join("pnpm"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        dirs.push(PathBuf::from("/usr/local/bin"));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        dirs.push(PathBuf::from("/usr/local/bin"));
+        dirs.push(PathBuf::from("/usr/bin"));
+    }
+    dirs
+}
+
+/// fnm 的全局安装目录（GUI 进程通常拿不到 multishell 的 PATH）：
+/// Windows 在 `<data>/fnm/node-versions/<ver>/installation`，Unix 再下一层 `bin`。
+fn collect_fnm_dirs(data_dir: &Path, out: &mut Vec<PathBuf>) {
+    let root = data_dir.join("fnm").join("node-versions");
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let installation = entry.path().join("installation");
+        #[cfg(target_os = "windows")]
+        out.push(installation);
+        #[cfg(not(target_os = "windows"))]
+        out.push(installation.join("bin"));
+    }
 }
 
 /// 真正的执行：`Command` + 参数数组，捕获 stdout；失败时带上 stderr。
@@ -416,11 +476,26 @@ mod tests {
 
     #[test]
     fn candidate_names_cover_the_windows_suffixes() {
-        let names = candidate_names();
+        let names = candidate_names(PROGRAM);
         assert!(names.iter().any(|n| n == PROGRAM));
         if cfg!(target_os = "windows") {
             assert!(names.iter().any(|n| n == "qoderclicn.exe"));
             assert!(names.iter().any(|n| n == "qoderclicn.cmd"));
         }
+    }
+
+    #[test]
+    fn finds_a_platform_candidate_in_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = "ccsx-cli-probe";
+        #[cfg(target_os = "windows")]
+        let name = format!("{program}.cmd");
+        #[cfg(not(target_os = "windows"))]
+        let name = program.to_string();
+        std::fs::write(dir.path().join(&name), b"").unwrap();
+
+        let found = find_in_dir(dir.path(), program).expect("应找到候选文件");
+        assert_eq!(found, dir.path().join(name));
+        assert_eq!(find_in_dir(dir.path(), "ccsx-missing"), None);
     }
 }

@@ -80,7 +80,7 @@ export function RulesPanel() {
   };
 
   return (
-    <div className="grid grid-cols-[240px_1fr] gap-6">
+    <div className="grid h-full grid-cols-[240px_1fr] gap-6 overflow-auto px-6 py-5">
       <section>
         <h2 className="mb-3 text-xl font-semibold">Rules</h2>
         {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}

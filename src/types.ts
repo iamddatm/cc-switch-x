@@ -1,5 +1,5 @@
 export type AssetType = "mcp" | "skill" | "prompt" | "rule" | "subagent" | "hook";
-export type Pane = AssetType | "sessions" | "settings";
+export type Pane = AssetType | "sessions" | "agents" | "settings";
 export type Theme = "light" | "dark" | "system";
 
 export interface AssetSummary {
@@ -8,11 +8,23 @@ export interface AssetSummary {
   name: string;
   updatedAt: number;
   hash: string;
+  /** 列表行副标题；由后端从真源内容补齐。 */
+  description?: string | null;
+  /** Skill 来源仓库 owner/repo。 */
+  source?: string | null;
+  /** 真源文件 mtime（毫秒）。 */
+  mtime?: number | null;
+  /** 真源文件字节数。 */
+  size?: number | null;
+  /** MCP 传输方式。 */
+  transport?: string | null;
 }
 
 export interface AppSettings {
   storeRoot: string;
   theme: Theme;
+  /** null = 全部启用；空数组 = 全部禁用。 */
+  enabledAgents: string[] | null;
 }
 
 /** 后端 AssetState 的 snake_case 序列化结果 */
@@ -33,10 +45,20 @@ export interface AgentStatus {
   id: string;
   displayName: string;
   detected: boolean;
+  /** PATH 与常见安装目录中是否找得到 CLI；只用于展示，不参与写入门禁。 */
+  cliAvailable: boolean;
+  /** 探测用的命令名。 */
+  cliProgram: string;
   capabilities: CapabilityStatus[];
   /** null = 未实测，UI 保守提示「可能需要重启」 */
   mcpNeedsRestart: boolean | null;
   mcpPath: string;
+  /** 提示词整文件落点。 */
+  promptPath: string;
+  /** skills 目录落点。 */
+  skillsDir: string;
+  /** 是否在全局启用范围内；false 时面板不展示这一列。 */
+  enabled: boolean;
   enabledMcp: string[];
   enabledSkills: string[];
   enabledRules: string[];
@@ -191,6 +213,8 @@ export interface SessionSummary {
   updatedAt: number;
   messageCount: number;
   parseError: string | null;
+  /** 最后一条文本消息摘要。 */
+  preview?: string | null;
 }
 
 export interface SessionMessage {

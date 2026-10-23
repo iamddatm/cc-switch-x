@@ -1,5 +1,6 @@
 use crate::commands::agents::override_base;
 use crate::error::AppError;
+use crate::services::agents::ensure_agent_detected;
 use crate::services::drift::{self, DriftRecord, ResolveAction, ResolveOutcome};
 use crate::state::AppState;
 use tauri::State;
@@ -24,6 +25,11 @@ pub fn resolve_drift(
     agent_id: String,
 ) -> Result<ResolveOutcome, AppError> {
     let base = override_base(&state, &agent_id)?;
+    // 重刷会把文件重新写回磁盘；配置根已不在时不再替用户创建。
+    // 采纳磁盘只改真源，不受检测门禁影响。
+    if action == ResolveAction::RepushSource {
+        ensure_agent_detected(&state.store, &state.home, &agent_id)?;
+    }
     let mut index = state
         .index
         .lock()

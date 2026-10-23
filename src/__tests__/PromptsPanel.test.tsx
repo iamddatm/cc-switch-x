@@ -10,6 +10,9 @@ vi.mock("../lib/api", () => ({
     readAsset: vi.fn(),
     listAgents: vi.fn(),
     activatePrompt: vi.fn(),
+    deactivatePrompt: vi.fn(),
+    writeAsset: vi.fn(),
+    deleteAsset: vi.fn(),
   },
 }));
 
@@ -22,6 +25,38 @@ beforeEach(() => {
   ]);
   vi.mocked(api.readAsset).mockResolvedValue("---\ntitle: team\n---\n\n正文\n");
   vi.mocked(api.listAgents).mockResolvedValue([claude]);
+  vi.mocked(api.deactivatePrompt).mockResolvedValue(true);
+  vi.mocked(api.writeAsset).mockResolvedValue({
+    assetType: "prompt",
+    id: "team",
+    name: "团队",
+    updatedAt: 2,
+    hash: "h2",
+  });
+});
+
+test("creates a prompt from the form", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([]);
+  render(<PromptsPanel />);
+  const [add] = await screen.findAllByRole("button", { name: "添加提示词" });
+  fireEvent.click(add);
+  fireEvent.change(await screen.findByLabelText(/^ID/), {
+    target: { value: "team" },
+  });
+  fireEvent.change(screen.getByLabelText(/^名称/), {
+    target: { value: "团队" },
+  });
+  fireEvent.change(screen.getByLabelText(/^正文/), {
+    target: { value: "# 团队\n\n正文\n" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  await waitFor(() =>
+    expect(api.writeAsset).toHaveBeenCalledWith(
+      "prompt",
+      "team",
+      expect.stringContaining("title: 团队"),
+    ),
+  );
 });
 
 test("foreign target asks for a decision instead of overwriting", async () => {
@@ -30,15 +65,14 @@ test("foreign target asks for a decision instead of overwriting", async () => {
     path: "C:/x/.claude/CLAUDE.md",
   });
   render(<PromptsPanel />);
-  fireEvent.click(await screen.findByText("team"));
-  fireEvent.click(await screen.findByRole("button", { name: "激活到 Claude Code" }));
+  fireEvent.click(await screen.findByRole("button", { name: "启用" }));
 
   expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "确认覆盖" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "把现有内容另存为一条 prompt" })).toBeInTheDocument();
   // 只问了一次；没确认前不能再发写请求
   expect(api.activatePrompt).toHaveBeenCalledTimes(1);
-  expect(api.activatePrompt).toHaveBeenCalledWith("claude-team", "claude", undefined);
+  expect(api.activatePrompt).toHaveBeenCalledWith("claude-team", "claude");
 });
 
 test("confirming sends an explicit overwrite", async () => {
@@ -46,8 +80,7 @@ test("confirming sends an explicit overwrite", async () => {
     .mockResolvedValueOnce({ kind: "needsConfirmation", path: "C:/x/.claude/CLAUDE.md" })
     .mockResolvedValueOnce({ kind: "activated", path: "C:/x/.claude/CLAUDE.md" });
   render(<PromptsPanel />);
-  fireEvent.click(await screen.findByText("team"));
-  fireEvent.click(await screen.findByRole("button", { name: "激活到 Claude Code" }));
+  fireEvent.click(await screen.findByRole("button", { name: "启用" }));
   fireEvent.click(await screen.findByRole("button", { name: "确认覆盖" }));
 
   await waitFor(() =>
@@ -63,8 +96,7 @@ test("salvaging stores the old content under a new prompt id", async () => {
     .mockResolvedValueOnce({ kind: "needsConfirmation", path: "C:/x/.claude/CLAUDE.md" })
     .mockResolvedValueOnce({ kind: "activated", path: "C:/x/.claude/CLAUDE.md" });
   render(<PromptsPanel />);
-  fireEvent.click(await screen.findByText("team"));
-  fireEvent.click(await screen.findByRole("button", { name: "激活到 Claude Code" }));
+  fireEvent.click(await screen.findByRole("button", { name: "启用" }));
   fireEvent.click(
     await screen.findByRole("button", { name: "把现有内容另存为一条 prompt" }),
   );
@@ -84,9 +116,13 @@ test("an unverified prompt target is named but not activatable", async () => {
     }),
   ]);
   render(<PromptsPanel />);
-  fireEvent.click(await screen.findByText("team"));
+  fireEvent.change(await screen.findByLabelText("选择 Agent"), {
+    target: { value: "qoder" },
+  });
 
-  expect(await screen.findByText(/Qoder：未实测，暂不提供激活/)).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "激活到 Qoder" })).not.toBeInTheDocument();
+  expect(
+    await screen.findByText(/Qoder 的提示词落点未实测/),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "启用" })).toBeDisabled();
   expect(api.activatePrompt).not.toHaveBeenCalled();
 });

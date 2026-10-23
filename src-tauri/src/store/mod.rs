@@ -78,10 +78,14 @@ impl Store {
     }
 
     pub fn write(&self, asset_type: AssetType, id: &str, bytes: &[u8]) -> Result<(), StoreError> {
-        if asset_type == AssetType::Skill {
-            return Err(StoreError::Unsupported(asset_type));
-        }
         let path = self.entry_path(asset_type, id)?;
+        // skill 是目录资产：写的是 <id>/SKILL.md，辅助文件保持不动。
+        let path = if asset_type == AssetType::Skill {
+            fs::create_dir_all(&path)?;
+            path.join("SKILL.md")
+        } else {
+            path
+        };
         atomic::write_atomic(&path, bytes)?;
         Ok(())
     }

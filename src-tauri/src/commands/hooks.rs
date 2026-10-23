@@ -5,6 +5,7 @@ use crate::domain::hook::Hook;
 use crate::domain::{AssetKind, AssetType};
 use crate::error::AppError;
 use crate::import::update_matrix;
+use crate::services::agents::ensure_agent_detected;
 use crate::services::apply::{ApplyReport, ApplyService};
 use crate::state::AppState;
 use tauri::State;
@@ -28,6 +29,8 @@ pub fn set_hook_enabled(
     let descriptor = descriptor_for(&agent_id, AssetKind::Hook)?;
     let hook = read_hook(&state, &id)?;
     let base = override_base(&state, &agent_id)?;
+    // 取消也会把合并后的文件写回去；没检测到就两边都不写。
+    ensure_agent_detected(&state.store, &state.home, &agent_id)?;
 
     let plan = if enabled {
         hooks::plan_enable(&descriptor, &id, &hook, &state.home, base.as_deref())?

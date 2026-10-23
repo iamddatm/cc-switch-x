@@ -1,12 +1,34 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState } from "react";
+import { Folder, History, Search, Users } from "lucide-react";
+import { AgentGlyph } from "../components/agents/AgentGlyph";
+import { SessionGroupHeader } from "../components/sessions/SessionGroupHeader";
 import { SessionReader } from "../components/sessions/SessionReader";
+import { Badge } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
+import { Dialog } from "../components/ui/Dialog";
+import { EmptyState } from "../components/ui/EmptyState";
+import { Menu } from "../components/ui/Menu";
+import { Notice } from "../components/ui/Notice";
+import { PageHeader } from "../components/ui/PageHeader";
+import { SearchField } from "../components/ui/SearchField";
+import { SegmentedControl } from "../components/ui/SegmentedControl";
+import { Select } from "../components/ui/Select";
+import { useAgents } from "../hooks/useAgents";
 import { useSessions } from "../hooks/useSessions";
-import { groupSessions } from "../lib/sessionGroups";
+import { formatRelativeTime } from "../lib/format";
+import {
+  groupSessionsByProject,
+  groupSessionsByTime,
+  projectName,
+  projectOf,
+} from "../lib/sessionGroups";
 import type {
   SessionProviderStatus,
   SessionSearchHit,
   SessionSummary,
 } from "../types";
+
+type GroupMode = "time" | "project";
 
 export function SessionsPanel() {
   const {
@@ -15,292 +37,396 @@ export function SessionsPanel() {
     hits,
     loading,
     scanning,
-    hasMore,
     scanReport,
     error,
     scan,
-    loadMore,
+    reload,
     search,
     clearSearch,
   } = useSessions();
+  const { enabledAgents } = useAgents();
   const [query, setQuery] = useState("");
-  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [selectedAgent, setSelectedAgent] = useState("all");
+  const [groupMode, setGroupMode] = useState<GroupMode>("project");
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [openSession, setOpenSession] = useState<SessionSummary | null>(null);
+  const [sourcesOpen, setSourcesOpen] = useState(false);
 
+  const enabledIds = new Set(enabledAgents.map((agent) => agent.id));
+  const presentProviders = providers.filter(
+    (provider) => enabledIds.has(provider.agentId) && provider.sessionCount > 0,
+  );
   const providerFor = (agentId: string) =>
     providers.find((provider) => provider.agentId === agentId);
-  const presentProviders = providers.filter(
-    (provider) => provider.sessionCount > 0,
-  );
-  const visibleSessions = sessions.filter(
-    (session) => !selectedAgent || session.agentId === selectedAgent,
-  );
-  const visibleHits = hits?.filter(
-    (hit) => !selectedAgent || hit.session.agentId === selectedAgent,
-  );
-  const groups = groupSessions(visibleSessions, new Date());
 
-  const submitSearch = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    void search(query);
-  };
-  const clear = () => {
-    setQuery("");
-    clearSearch();
+  useEffect(() => {
+    if (
+      selectedAgent !== "all" &&
+      !presentProviders.some((provider) => provider.agentId === selectedAgent)
+    ) {
+      setSelectedAgent("all");
+    }
+  }, [presentProviders, selectedAgent]);
+
+  const matchesAgent = (agentId: string) =>
+    (selectedAgent === "all" || agentId === selectedAgent) && enabledIds.has(agentId);
+
+  const visibleSessions = sessions.filter((session) => matchesAgent(session.agentId));
+  const visibleHits = hits?.filter((hit) => matchesAgent(hit.session.agentId)) ?? null;
+  const totalCount = presentProviders.reduce((sum, provider) => sum + provider.sessionCount, 0);
+  const allAgents = selectedAgent === "all";
+
+  const toggleGroup = (project: string) => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(project)) next.delete(project);
+      else next.add(project);
+      return next;
+    });
   };
 
   if (openSession) {
     return (
-      <SessionReader
-        session={openSession}
-        agentName={
-          providerFor(openSession.agentId)?.displayName ?? openSession.agentId
-        }
-        onBack={() => setOpenSession(null)}
-      />
+      <div className="h-full overflow-auto px-6 py-5">
+        <SessionReader
+          session={openSession}
+          agentName={providerFor(openSession.agentId)?.displayName ?? openSession.agentId}
+          onBack={() => setOpenSession(null)}
+        />
+      </div>
     );
   }
 
+  const projectGroups = groupSessionsByProject(visibleSessions);
+  const timeGroups = groupSessionsByTime(visibleSessions, Date.now());
+
   return (
-    <section className="space-y-4">
-      <h2 className="text-xl font-semibold">Sessions</h2>
+    <div className="flex h-full min-h-0 flex-col">
+      <PageHeader
+        icon={History}
+        title="会话"
+        actions={
+          <Menu
+            label="会话的更多操作"
+            items={[
+              {
+                label: scanning
+                  ? "正在扫描…"
+                  : sessions.length === 0
+                    ? "扫描本机会话"
+                    : "重新扫描",
+                disabled: scanning,
+                onSelect: () => void scan(),
+              },
+              { label: "会话记录在哪里", onSelect: () => setSourcesOpen(true) },
+              { label: "刷新列表", onSelect: () => void reload() },
+            ]}
+          />
+        }
+      />
 
-      <form className="flex flex-wrap items-center gap-2" onSubmit={submitSearch}>
-        <input
-          aria-label="搜索会话内容"
-          className="min-w-64 flex-1 rounded border border-slate-300 px-3 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800"
-          placeholder="搜索会话内容"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-        <button
-          type="submit"
-          className="rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-700"
-        >
-          搜索
-        </button>
-        {hits !== null && (
-          <button
-            type="button"
-            className="rounded px-3 py-1.5 text-sm text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700"
-            onClick={clear}
+      <div className="flex flex-wrap items-center gap-2 px-6 py-3">
+        <div className="flex items-center gap-2">
+          {selectedAgent === "all" ? (
+            <span className="flex h-[18px] w-[18px] items-center justify-center text-fg-3">
+              <Users size={16} aria-hidden />
+            </span>
+          ) : (
+            <AgentGlyph
+              agentId={selectedAgent}
+              label={providerFor(selectedAgent)?.displayName}
+              size={18}
+            />
+          )}
+          <Select
+            aria-label="按应用筛选"
+            value={selectedAgent}
+            onChange={(event) => setSelectedAgent(event.target.value)}
           >
-            清除
-          </button>
-        )}
-      </form>
-
-      {error && (
-        <p role="alert" className="rounded border border-red-300 bg-red-50 p-2 text-sm text-red-700">
-          读取会话失败：{error}
-        </p>
-      )}
-
-      {loading && sessions.length === 0 ? (
-        <p className="text-sm text-slate-500">正在读取会话索引…</p>
-      ) : (
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            className="rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:hover:bg-slate-700"
-            disabled={scanning}
-            onClick={() => void scan()}
-          >
-            {scanning
-              ? "正在扫描…"
-              : sessions.length === 0
-                ? "扫描本机会话"
-                : "重新扫描"}
-          </button>
-          {sessions.length === 0 && (
-            <p className="text-xs text-slate-500">
-              首次扫描会读取本机全部会话；Claude 主会话可能约 710 MB，请耐心等待。
-            </p>
-          )}
-        </div>
-      )}
-
-      {scanReport && (
-        <section
-          aria-label="扫描结果"
-          className="rounded border border-slate-200 p-3 text-sm dark:border-slate-700"
-        >
-          <p>
-            新增 {scanReport.added}，更新 {scanReport.updated}，移除{" "}
-            {scanReport.removed}，未变 {scanReport.unchanged}
-          </p>
-          {scanReport.failures.length > 0 && (
-            <ul className="mt-2 space-y-1 text-red-700">
-              {scanReport.failures.map((failure) => (
-                <li key={`${failure.agentId}:${failure.file}`}>
-                  <span>{failure.file}</span>：<span>{failure.reason}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-          {scanReport.warnings.length > 0 && (
-            <ul className="mt-2 space-y-1 text-amber-700">
-              {scanReport.warnings.map((warning, index) => (
-                <li
-                  key={`${warning.agentId}:${warning.file}:${warning.line}:${index}`}
-                >
-                  <span>
-                    {warning.file}:{warning.line}
-                  </span>
-                  ：<span>{warning.message}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-      )}
-
-      {sessions.length === 0 ? (
-        <section aria-label="会话来源" className="space-y-2 text-sm">
-          <p className="text-slate-500">还没有会话索引，先扫描一次。</p>
-          <ul className="space-y-1">
-            {providers.map((provider) => (
-              <li key={provider.agentId} className="rounded border border-slate-200 p-2 dark:border-slate-700">
-                <span className="font-medium">{provider.displayName}</span>
-                <span className="ml-2 text-slate-500">{providerReason(provider)}</span>
-                <span className="ml-2 block text-xs text-slate-400">
-                  {provider.roots.join("、")}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : (
-        <>
-          <div className="flex flex-wrap items-center gap-2 text-sm" aria-label="按工具筛选">
-            <button
-              type="button"
-              aria-pressed={selectedAgent === null}
-              className="rounded border border-slate-300 px-2 py-1 aria-pressed:bg-slate-200 dark:border-slate-600 dark:aria-pressed:bg-slate-700"
-              onClick={() => setSelectedAgent(null)}
-            >
-              全部
-            </button>
+            <option value="all">全部应用 ({totalCount})</option>
             {presentProviders.map((provider) => (
-              <button
-                key={provider.agentId}
-                type="button"
-                aria-pressed={selectedAgent === provider.agentId}
-                className="rounded border border-slate-300 px-2 py-1 aria-pressed:bg-slate-200 dark:border-slate-600 dark:aria-pressed:bg-slate-700"
-                onClick={() => setSelectedAgent(provider.agentId)}
-              >
-                <span>{provider.displayName}</span>
-                {!provider.verified && (
-                  <span className="ml-1 rounded bg-amber-100 px-1 text-xs text-amber-800">
-                    解析器未实测
-                  </span>
-                )}
-              </button>
+              <option key={provider.agentId} value={provider.agentId}>
+                {provider.displayName} ({provider.sessionCount})
+              </option>
             ))}
-          </div>
+          </Select>
+        </div>
 
-          {hits !== null ? (
-            <section aria-label="搜索结果" className="space-y-2">
-              {visibleHits && visibleHits.length > 0 ? (
-                <ul className="space-y-2">
-                  {visibleHits.map((hit) => (
-                    <SearchHitRow
-                      key={`${hit.session.agentId}:${hit.session.sessionId}`}
-                      hit={hit}
-                      provider={providerFor(hit.session.agentId)}
-                      onOpen={setOpenSession}
-                    />
+        <SearchField
+          className="min-w-[220px] flex-1"
+          value={query}
+          onValueChange={(value) => {
+            setQuery(value);
+            if (!value.trim()) clearSearch();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void search(query);
+            }
+          }}
+          placeholder="搜索标题、目录、首条消息或会话 ID…"
+          ariaLabel="搜索会话内容"
+        />
+
+        <SegmentedControl
+          ariaLabel="会话分组方式"
+          value={groupMode}
+          onValueChange={setGroupMode}
+          items={[
+            { value: "time", label: "按时间" },
+            { value: "project", label: "按项目" },
+          ]}
+        />
+        <span className="w-[92px] text-right text-caption text-fg-3">
+          {visibleHits !== null ? `${visibleHits.length} 个匹配` : `${visibleSessions.length} 个会话`}
+        </span>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-auto px-6 pb-5">
+        {error && (
+          <Notice tone="danger" className="mb-3">
+            读取会话失败：{error}
+          </Notice>
+        )}
+
+        {scanReport && (
+          <Notice
+            tone={
+              scanReport.failures.length > 0 || scanReport.warnings.length > 0
+                ? "warning"
+                : "success"
+            }
+            className="mb-3"
+          >
+            <p>
+              新增 {scanReport.added}，更新 {scanReport.updated}，移除 {scanReport.removed}，未变{" "}
+              {scanReport.unchanged}
+            </p>
+            {(scanReport.failures.length > 0 || scanReport.warnings.length > 0) && (
+              <details className="mt-1">
+                <summary className="cursor-pointer">查看详情</summary>
+                <ul className="mt-1 space-y-0.5">
+                  {scanReport.failures.map((failure) => (
+                    <li key={`${failure.agentId}:${failure.file}`}>
+                      {failure.file}：{failure.reason}
+                    </li>
+                  ))}
+                  {scanReport.warnings.map((warning, index) => (
+                    <li key={`${warning.agentId}:${warning.file}:${warning.line}:${index}`}>
+                      {warning.file}:{warning.line}：{warning.message}
+                    </li>
                   ))}
                 </ul>
-              ) : (
-                <p className="text-sm text-slate-500">没有匹配的会话。</p>
-              )}
-            </section>
-          ) : groups.length === 0 ? (
-            <p className="text-sm text-slate-500">没有匹配的会话。</p>
-          ) : (
-            <div className="space-y-5">
-              {groups.map((group) => (
-                <section key={group.project} aria-label={`项目 ${group.project}`}>
-                  <h3 className="mb-2 break-all text-sm font-semibold text-slate-700 dark:text-slate-200">
-                    {group.project}
-                  </h3>
-                  <div className="space-y-3">
-                    {group.buckets.map((bucket) => (
-                      <div key={bucket.label}>
-                        <h4 className="mb-1 text-xs font-medium text-slate-500">
-                          {bucket.label}
-                        </h4>
-                        <ul className="space-y-1">
-                          {bucket.sessions.map((session) => (
-                            <li key={`${session.agentId}:${session.sessionId}`}>
-                              <SessionRow
-                                session={session}
-                                provider={providerFor(session.agentId)}
-                                onOpen={setOpenSession}
-                              />
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    ))}
+              </details>
+            )}
+          </Notice>
+        )}
+
+        {loading && sessions.length === 0 ? (
+          <p className="py-10 text-center text-caption text-fg-3">正在读取会话索引…</p>
+        ) : sessions.length === 0 ? (
+          <>
+            <EmptyState
+              icon={History}
+              title="还没有会话索引"
+              description="首次扫描会读取本机全部会话，可能需要一些时间；之后只增量解析变化的文件。"
+              actions={
+                <>
+                  <Button variant="primary" loading={scanning} onClick={() => void scan()}>
+                    扫描本机会话
+                  </Button>
+                  <Button onClick={() => setSourcesOpen(true)}>会话记录在哪里</Button>
+                </>
+              }
+            />
+            <div className="mx-auto max-w-2xl space-y-1">
+              {providers
+                .filter((provider) => enabledIds.has(provider.agentId))
+                .map((provider) => (
+                  <div
+                    key={provider.agentId}
+                    className="flex items-center gap-2 rounded-control border border-border px-3 py-2 text-caption"
+                  >
+                    <AgentGlyph
+                      agentId={provider.agentId}
+                      label={provider.displayName}
+                      size={16}
+                    />
+                    <span className="font-medium text-fg-1">{provider.displayName}</span>
+                    <span className="text-fg-3">{providerReason(provider)}</span>
+                    <span className="ml-auto min-w-0 truncate font-mono text-fg-3">
+                      {provider.roots.join("、")}
+                    </span>
                   </div>
-                </section>
-              ))}
+                ))}
             </div>
-          )}
-          {hits === null && hasMore && (
-            <button
-              type="button"
-              className="rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:hover:bg-slate-700"
-              disabled={loading}
-              onClick={() => void loadMore()}
-            >
-              载入更多
-            </button>
-          )}
-        </>
-      )}
-    </section>
+          </>
+        ) : visibleHits !== null ? (
+          visibleHits.length === 0 ? (
+            <EmptyState icon={Search} title="没有匹配的会话" description="换个关键词试试。" />
+          ) : (
+            <div className="overflow-hidden rounded-panel border border-border bg-surface">
+              <ul>
+                {visibleHits.map((hit) => (
+                  <SearchHitRow
+                    key={`${hit.session.agentId}:${hit.session.sessionId}`}
+                    hit={hit}
+                    provider={providerFor(hit.session.agentId)}
+                    onOpen={setOpenSession}
+                  />
+                ))}
+              </ul>
+            </div>
+          )
+        ) : visibleSessions.length === 0 ? (
+          <EmptyState icon={History} title="没有匹配的会话" description="换个应用或关键词试试。" />
+        ) : (
+          <div className="overflow-hidden rounded-panel border border-border bg-surface">
+            {groupMode === "project" ? (
+              projectGroups.map((group) => {
+                const isOpen = expanded.has(group.project);
+                return (
+                  <section key={group.project} aria-label={`项目 ${group.project}`}>
+                    <SessionGroupHeader
+                      project={group.project}
+                      count={group.sessions.length}
+                      latest={group.latest}
+                      expanded={isOpen}
+                      onToggle={() => toggleGroup(group.project)}
+                    />
+                    {isOpen && (
+                      <ul>
+                        {group.sessions.map((session) => (
+                          <SessionRow
+                            key={`${session.agentId}:${session.sessionId}`}
+                            session={session}
+                            provider={providerFor(session.agentId)}
+                            showAgent={allAgents}
+                            showProject={false}
+                            onOpen={setOpenSession}
+                          />
+                        ))}
+                      </ul>
+                    )}
+                  </section>
+                );
+              })
+            ) : (
+              timeGroups.map((group) => (
+                <section key={group.label} aria-label={`时间 ${group.label}`}>
+                  <h3 className="border-t border-border bg-subtle px-4 py-1 text-caption font-semibold text-fg-2 first:border-t-0">
+                    {group.label}
+                  </h3>
+                  <ul>
+                    {group.sessions.map((session) => (
+                      <SessionRow
+                        key={`${session.agentId}:${session.sessionId}`}
+                        session={session}
+                        provider={providerFor(session.agentId)}
+                        showAgent={allAgents}
+                        showProject
+                        onOpen={setOpenSession}
+                      />
+                    ))}
+                  </ul>
+                </section>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+
+      <Dialog
+        open={sourcesOpen}
+        onClose={() => setSourcesOpen(false)}
+        title="会话记录在哪里"
+        description="本应用从这些位置读取会话；文件只读，不会修改。"
+        footer={<Button onClick={() => setSourcesOpen(false)}>关闭</Button>}
+      >
+        <ul className="space-y-2">
+          {providers.map((provider) => (
+            <li key={provider.agentId} className="rounded-control border border-border p-2.5">
+              <div className="flex items-center gap-2">
+                <AgentGlyph agentId={provider.agentId} label={provider.displayName} size={18} />
+                <span className="text-body font-medium text-fg-1">{provider.displayName}</span>
+                <Badge tone={provider.verified ? "neutral" : "warning"}>
+                  {provider.verified ? "已实测" : "解析器未实测"}
+                </Badge>
+                <span className="ml-auto text-caption text-fg-3">
+                  {providerReason(provider)}
+                </span>
+              </div>
+              <p className="mt-1 break-all font-mono text-caption text-fg-3">
+                {provider.roots.join("、") || "无声明根目录"}
+              </p>
+            </li>
+          ))}
+        </ul>
+      </Dialog>
+    </div>
   );
 }
 
 function SessionRow({
   session,
   provider,
+  showAgent,
+  showProject,
   onOpen,
 }: {
   session: SessionSummary;
   provider?: SessionProviderStatus;
+  showAgent: boolean;
+  showProject: boolean;
   onOpen: (session: SessionSummary) => void;
 }) {
   return (
-    <button
-      type="button"
-      className="w-full rounded border border-slate-200 px-3 py-2 text-left text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
-      onClick={() => onOpen(session)}
-    >
-      <span className="flex flex-wrap items-center gap-2">
-        <span className="font-medium">{session.title}</span>
-        {provider && !provider.verified && (
-          <span className="rounded bg-amber-100 px-1 text-xs text-amber-800">
-            解析器未实测
-          </span>
+    <li className="border-t border-border first:border-t-0">
+      <button
+        type="button"
+        onClick={() => onOpen(session)}
+        className="flex min-h-14 w-full items-center gap-3 px-4 py-2 text-left transition-colors duration-150 hover:bg-subtle"
+      >
+        {showAgent && (
+          <AgentGlyph
+            agentId={session.agentId}
+            label={provider?.displayName ?? session.agentId}
+            size={20}
+          />
         )}
-        {session.parseError && (
-          <span
-            className="rounded bg-red-100 px-1 text-xs text-red-700"
-            title={session.parseError}
-          >
-            解析失败
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="truncate text-body font-medium text-fg-1">{session.title}</span>
+            {provider && !provider.verified && <Badge tone="warning">解析器未实测</Badge>}
+            {session.parseError && (
+              <span title={session.parseError}>
+                <Badge tone="danger">解析失败</Badge>
+              </span>
+            )}
           </span>
-        )}
-      </span>
-      <span className="mt-1 block text-xs text-slate-500">
-        {provider?.displayName ?? session.agentId} · {session.messageCount} 条 ·{" "}
-        {formatTime(session.updatedAt)}
-      </span>
-    </button>
+          <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-caption text-fg-2">
+            {showProject && (
+              <>
+                <Folder size={12} className="shrink-0 text-fg-3" aria-hidden />
+                <span className="max-w-[180px] truncate">
+                  {projectName(projectOf(session))}
+                </span>
+                <span className="text-fg-3">·</span>
+              </>
+            )}
+            {session.preview && session.preview !== session.title ? (
+              <span className="truncate">最后：{session.preview}</span>
+            ) : (
+              <span className="text-fg-3">{session.messageCount} 条消息</span>
+            )}
+          </span>
+        </span>
+        <span className="shrink-0 text-caption tabular-nums text-fg-3">
+          {formatRelativeTime(session.updatedAt)}
+        </span>
+      </button>
+    </li>
   );
 }
 
@@ -314,28 +440,29 @@ function SearchHitRow({
   onOpen: (session: SessionSummary) => void;
 }) {
   return (
-    <li className="rounded border border-slate-200 text-sm dark:border-slate-700">
+    <li className="border-t border-border first:border-t-0">
       <button
         type="button"
-        className="w-full px-3 py-2 text-left hover:bg-slate-50 dark:hover:bg-slate-800"
         onClick={() => onOpen(hit.session)}
+        className="flex w-full items-start gap-3 px-4 py-2.5 text-left transition-colors duration-150 hover:bg-subtle"
       >
-        <span className="flex flex-wrap items-center gap-2">
-          <span className="rounded bg-slate-100 px-1 text-xs text-slate-600 dark:bg-slate-700 dark:text-slate-200">
-            命中
-          </span>
-          <span className="font-medium">{hit.session.title}</span>
-          <span className="text-xs text-slate-500">
-            {provider?.displayName ?? hit.session.agentId}
-          </span>
-          {provider && !provider.verified && (
-            <span className="rounded bg-amber-100 px-1 text-xs text-amber-800">
-              解析器未实测
+        <AgentGlyph
+          agentId={hit.session.agentId}
+          label={provider?.displayName ?? hit.session.agentId}
+          size={20}
+        />
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-2">
+            <Badge tone="brand">命中</Badge>
+            <span className="truncate text-body font-medium text-fg-1">{hit.session.title}</span>
+            <span className="text-caption text-fg-3">
+              {provider?.displayName ?? hit.session.agentId}
             </span>
-          )}
+          </span>
+          <span className="mt-0.5 block line-clamp-2 text-caption text-fg-2">{hit.snippet}</span>
         </span>
-        <span className="mt-1 block text-slate-600 dark:text-slate-300">
-          {hit.snippet}
+        <span className="shrink-0 text-caption tabular-nums text-fg-3">
+          {formatRelativeTime(hit.session.updatedAt)}
         </span>
       </button>
     </li>
@@ -346,8 +473,6 @@ function providerReason(provider: SessionProviderStatus): string {
   if (!provider.parseReady) {
     return "解析器未接入";
   }
-  // 环境变量根（XDG/HERMES_HOME 等）可能不在声明根里，但文件确实发现了；
-  // 先看实际发现结果，避免把「有文件」误报成「目录不存在」。
   if (provider.sessionCount > 0) {
     return `已索引 ${provider.sessionCount} 个会话`;
   }
@@ -358,13 +483,4 @@ function providerReason(provider: SessionProviderStatus): string {
     return "目录不存在";
   }
   return "未发现文件";
-}
-
-function formatTime(timestamp: number): string {
-  const date = new Date(timestamp);
-  const month = date.getMonth() + 1;
-  const day = String(date.getDate()).padStart(2, "0");
-  const hour = String(date.getHours()).padStart(2, "0");
-  const minute = String(date.getMinutes()).padStart(2, "0");
-  return `${month}-${day} ${hour}:${minute}`;
 }

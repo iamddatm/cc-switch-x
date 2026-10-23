@@ -29,6 +29,8 @@ pub enum AppError {
     InvalidInput(String),
     #[error("暂不支持：{0}")]
     Unsupported(String),
+    #[error("未检测到：{0}")]
+    NotDetected(String),
     #[error("有未解决的漂移：{0}")]
     DriftUnresolved(String),
 }

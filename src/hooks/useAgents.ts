@@ -16,5 +16,5 @@ export function useAgents() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
-  return { agents, error, refresh };
+  return { agents, enabledAgents: agents.filter((agent) => agent.enabled), error, refresh };
 }

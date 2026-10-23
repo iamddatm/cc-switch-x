@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   fromList,
   parseHook,
+  parsePrompt,
   parseRule,
+  parseSkill,
   parseSubagent,
   renderHook,
+  renderPrompt,
   renderRule,
+  renderSkill,
   renderSubagent,
   toList,
 } from "../lib/canonical";
@@ -89,6 +93,48 @@ describe("subagents 编解码", () => {
   it("逗号输入变成列表", () => {
     expect(toList("Read, Grep ,")).toEqual(["Read", "Grep"]);
     expect(fromList(["Read", "Grep"])).toBe("Read, Grep");
+  });
+});
+
+describe("prompts 编解码", () => {
+  it("读写 title/description/body，正文不带 frontmatter", () => {
+    const text = "---\ntitle: 团队\ndescription: 说明\n---\n\n正文\n";
+    const form = parsePrompt(text);
+    expect(form.title).toBe("团队");
+    expect(form.description).toBe("说明");
+    expect(form.body).toBe("正文\n");
+    expect(renderPrompt(form)).toBe(text);
+  });
+
+  it("没有 frontmatter 时整份当正文", () => {
+    const form = parsePrompt("只有正文\n");
+    expect(form.title).toBe("");
+    expect(form.body).toBe("只有正文\n");
+    expect(renderPrompt(form)).toBe("只有正文\n");
+  });
+});
+
+describe("skills 编解码", () => {
+  it("保留 name/description 以外的 frontmatter", () => {
+    const text =
+      "---\nname: demo\ndescription: 描述\nallowed-tools:\n- Read\n- Grep\n---\n\n正文\n";
+    const form = parseSkill(text);
+    expect(form.name).toBe("demo");
+    expect(form.description).toBe("描述");
+    expect(form.extraFrontmatter).toBe("allowed-tools:\n- Read\n- Grep");
+    expect(renderSkill(form)).toContain("allowed-tools:\n- Read\n- Grep");
+  });
+
+  it("多行 description 的续行不会被重复写进其他 frontmatter", () => {
+    const text =
+      "---\nname: demo\ndescription: |\n  第一行\n  第二行\nallowed-tools:\n- Read\n---\n\n正文\n";
+    const form = parseSkill(text);
+    expect(form.description).toBe("第一行\n第二行");
+    expect(form.extraFrontmatter).toBe("allowed-tools:\n- Read");
+    const rendered = renderSkill(form);
+    expect(rendered.match(/第一行/g)?.length).toBe(1);
+    expect(parseSkill(rendered).description).toBe("第一行\n第二行");
+    expect(parseSkill(rendered).extraFrontmatter).toBe("allowed-tools:\n- Read");
   });
 });
 

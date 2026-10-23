@@ -7,7 +7,9 @@ import type {
   SessionSummary,
 } from "../types";
 
-const PAGE_SIZE = 50;
+/** 一次加载足够覆盖本机会话的摘要；按项目分组需要完整数据，不能只取一页。 */
+const ALL_LIMIT = 2000;
+const SEARCH_LIMIT = 500;
 
 export interface SessionsState {
   sessions: SessionSummary[];
@@ -15,12 +17,10 @@ export interface SessionsState {
   hits: SessionSearchHit[] | null;
   loading: boolean;
   scanning: boolean;
-  hasMore: boolean;
   scanReport: SessionScanReport | null;
   error: string | null;
   reload: () => Promise<void>;
   scan: () => Promise<void>;
-  loadMore: () => Promise<void>;
   search: (query: string) => Promise<void>;
   clearSearch: () => void;
 }
@@ -35,7 +35,6 @@ export function useSessions(): SessionsState {
   const [hits, setHits] = useState<SessionSearchHit[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
-  const [hasMore, setHasMore] = useState(false);
   const [scanReport, setScanReport] = useState<SessionScanReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,11 +43,10 @@ export function useSessions(): SessionsState {
     setError(null);
     try {
       const [nextSessions, nextProviders] = await Promise.all([
-        api.listSessions(undefined, undefined, 0, PAGE_SIZE),
+        api.listSessions(undefined, undefined, 0, ALL_LIMIT),
         api.sessionProviders(),
       ]);
       setSessions(nextSessions);
-      setHasMore(nextSessions.length === PAGE_SIZE);
       setProviders(nextProviders);
     } catch (cause) {
       setError(String(cause));
@@ -64,11 +62,10 @@ export function useSessions(): SessionsState {
       const report = await api.scanSessions();
       setScanReport(report);
       const [nextSessions, nextProviders] = await Promise.all([
-        api.listSessions(undefined, undefined, 0, PAGE_SIZE),
+        api.listSessions(undefined, undefined, 0, ALL_LIMIT),
         api.sessionProviders(),
       ]);
       setSessions(nextSessions);
-      setHasMore(nextSessions.length === PAGE_SIZE);
       setProviders(nextProviders);
       setHits(null);
     } catch (cause) {
@@ -77,35 +74,6 @@ export function useSessions(): SessionsState {
       setScanning(false);
     }
   }, []);
-
-  const loadMore = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const next = await api.listSessions(
-        undefined,
-        undefined,
-        sessions.length,
-        PAGE_SIZE,
-      );
-      setSessions((current) => {
-        const seen = new Set(
-          current.map((session) => `${session.agentId}:${session.sessionId}`),
-        );
-        return [
-          ...current,
-          ...next.filter(
-            (session) => !seen.has(`${session.agentId}:${session.sessionId}`),
-          ),
-        ];
-      });
-      setHasMore(next.length === PAGE_SIZE);
-    } catch (cause) {
-      setError(String(cause));
-    } finally {
-      setLoading(false);
-    }
-  }, [sessions.length]);
 
   const search = useCallback(async (raw: string) => {
     const query = raw.trim();
@@ -116,7 +84,7 @@ export function useSessions(): SessionsState {
     setLoading(true);
     setError(null);
     try {
-      setHits(await api.searchSessions(query));
+      setHits(await api.searchSessions(query, SEARCH_LIMIT));
     } catch (cause) {
       setError(String(cause));
     } finally {
@@ -136,12 +104,10 @@ export function useSessions(): SessionsState {
     hits,
     loading,
     scanning,
-    hasMore,
     scanReport,
     error,
     reload,
     scan,
-    loadMore,
     search,
     clearSearch,
   };

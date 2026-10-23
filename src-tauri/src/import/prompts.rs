@@ -102,6 +102,11 @@ pub fn run(
             name: row.name.clone(),
             updated_at: chrono::Utc::now().timestamp_millis(),
             hash: sha256_hex(bytes),
+            description: None,
+            source: None,
+            mtime: None,
+            transport: None,
+            size: None,
         })?;
 
         if row.enabled {

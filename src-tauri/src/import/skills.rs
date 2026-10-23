@@ -162,6 +162,11 @@ pub fn run(
             },
             updated_at: chrono::Utc::now().timestamp_millis(),
             hash: sha256_hex(&skill_bytes),
+            description: None,
+            source: None,
+            mtime: None,
+            transport: None,
+            size: None,
         })?;
 
         for (app, on) in &row.enabled {

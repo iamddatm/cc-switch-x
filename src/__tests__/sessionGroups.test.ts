@@ -1,5 +1,10 @@
 import { expect, test } from "vitest";
-import { groupSessions } from "../lib/sessionGroups";
+import {
+  groupSessions,
+  groupSessionsByProject,
+  groupSessionsByTime,
+  projectName,
+} from "../lib/sessionGroups";
 import type { SessionSummary } from "../types";
 
 const NOW = new Date("2026-10-22T12:00:00");
@@ -68,6 +73,28 @@ test("missing_project_and_this_week_bucket_are_handled", () => {
   expect(groups[0].project).toBe("未知项目");
   expect(groups[0].buckets.map((bucket) => bucket.label)).toEqual(["本周"]);
   expect(groups[0].buckets[0].sessions[0].title).toBe("未知项目会话");
+});
+
+test("project_view_keeps_all_sessions_of_a_project_together", () => {
+  const groups = groupSessionsByProject([
+    session({ title: "A 早", projectPath: "D:/repo-a", updatedAt: 1 }),
+    session({ title: "B 新", projectPath: "D:/repo-b", updatedAt: 4 }),
+    session({ title: "A 新", projectPath: "D:/repo-a", updatedAt: 3 }),
+  ]);
+
+  expect(groups.map((group) => projectName(group.project))).toEqual(["repo-b", "repo-a"]);
+  expect(groups[1].sessions.map((item) => item.title)).toEqual(["A 新", "A 早"]);
+});
+
+test("time_view_returns_only_non_empty_buckets_in_order", () => {
+  const groups = groupSessionsByTime(
+    [
+      session({ title: "今天", updatedAt: new Date("2026-10-22T11:00:00").getTime() }),
+      session({ title: "更早", updatedAt: new Date("2026-09-01T10:00:00").getTime() }),
+    ],
+    NOW,
+  );
+  expect(groups.map((group) => group.label)).toEqual(["今天", "更早"]);
 });
 
 test("sessions_inside_one_bucket_are_sorted_by_updated_at_desc", () => {

@@ -293,6 +293,11 @@ pub fn run(
             name: server.name.clone(),
             updated_at: chrono::Utc::now().timestamp_millis(),
             hash: sha256_hex(&canonical),
+            description: None,
+            source: None,
+            mtime: None,
+            transport: None,
+            size: None,
         })?;
 
         for (app, on) in &row.enabled {

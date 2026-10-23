@@ -1,14 +1,26 @@
 import { useEffect, useState } from "react";
-import { useTheme } from "../hooks/useTheme";
+import { Settings } from "lucide-react";
+import { ImportDialog } from "../components/ImportDialog";
+import { Button } from "../components/ui/Button";
+import { Input } from "../components/ui/Input";
+import { Notice } from "../components/ui/Notice";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Select } from "../components/ui/Select";
 import { api } from "../lib/api";
 import type { AppSettings, Theme } from "../types";
 
-export function SettingsPanel() {
+export function SettingsPanel({
+  theme,
+  onThemeChange,
+}: {
+  theme: Theme;
+  onThemeChange: (theme: Theme) => void;
+}) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [storeRoot, setStoreRoot] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useTheme(settings?.theme ?? "system");
+  const [importing, setImporting] = useState(false);
 
   useEffect(() => {
     void api
@@ -20,10 +32,11 @@ export function SettingsPanel() {
       .catch((e) => setError(String(e)));
   }, []);
 
-  const changeTheme = async (theme: Theme) => {
+  const changeTheme = async (next: Theme) => {
     try {
-      const updated = await api.setTheme(theme);
+      const updated = await api.setTheme(next);
       setSettings(updated);
+      onThemeChange(updated.theme);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -41,45 +54,59 @@ export function SettingsPanel() {
   };
 
   return (
-    <div className="max-w-2xl space-y-8">
-      <h2 className="text-xl font-semibold">Settings</h2>
-      {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
-      <section>
-        <label className="mb-2 block text-sm font-medium" htmlFor="theme">
-          主题
-        </label>
-        <select
-          id="theme"
-          className="rounded border border-slate-300 bg-white px-3 py-1.5 text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
-          value={settings?.theme ?? "system"}
-          onChange={(e) => void changeTheme(e.target.value as Theme)}
-        >
-          <option value="system">跟随系统</option>
-          <option value="light">浅色</option>
-          <option value="dark">深色</option>
-        </select>
-      </section>
-      <section>
-        <label className="mb-2 block text-sm font-medium" htmlFor="store-root">
-          存储位置
-        </label>
-        <div className="flex gap-2">
-          <input
-            id="store-root"
-            className="flex-1 rounded border border-slate-300 bg-white px-3 py-1.5 font-mono text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
-            value={storeRoot}
-            onChange={(e) => setStoreRoot(e.target.value)}
-          />
-          <button
-            type="button"
-            className="rounded bg-slate-800 px-3 py-1.5 text-sm text-white dark:bg-slate-600"
-            onClick={saveStoreRoot}
-          >
-            保存存储位置
-          </button>
+    <div className="flex h-full min-h-0 flex-col">
+      <PageHeader icon={Settings} title="Settings" />
+      <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
+        <div className="max-w-2xl space-y-8">
+          {error && <Notice tone="danger">{error}</Notice>}
+          <section className="space-y-2">
+            <label className="block text-strong text-fg-1" htmlFor="theme">
+              主题
+            </label>
+            <Select
+              id="theme"
+              value={theme}
+              onChange={(e) => void changeTheme(e.target.value as Theme)}
+            >
+              <option value="system">跟随系统</option>
+              <option value="light">浅色</option>
+              <option value="dark">深色</option>
+            </Select>
+            {settings && <p className="text-caption text-fg-3">外观设置只影响本机。</p>}
+          </section>
+
+          <section className="space-y-2">
+            <label className="block text-strong text-fg-1" htmlFor="store-root">
+              存储位置
+            </label>
+            <div className="flex gap-2">
+              <Input
+                id="store-root"
+                className="font-mono"
+                value={storeRoot}
+                onChange={(e) => setStoreRoot(e.target.value)}
+              />
+              <Button
+                variant="primary"
+                className="shrink-0"
+                onClick={() => void saveStoreRoot()}
+              >
+                保存存储位置
+              </Button>
+            </div>
+            {message && <Notice tone="success">{message}</Notice>}
+          </section>
+
+          <section className="space-y-2">
+            <h3 className="text-strong text-fg-1">导入</h3>
+            <p className="text-caption text-fg-2">
+              从 cc-switch 的本地库导入 MCP、提示词与 Skills；导入前会先预览冲突。
+            </p>
+            <Button onClick={() => setImporting(true)}>从 cc-switch 导入</Button>
+          </section>
         </div>
-        {message && <p className="mt-2 text-sm text-green-700 dark:text-green-400">{message}</p>}
-      </section>
+      </div>
+      {importing && <ImportDialog onClose={() => setImporting(false)} />}
     </div>
   );
 }

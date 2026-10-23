@@ -125,6 +125,9 @@ pub struct SessionSummary {
     pub updated_at: i64,
     pub message_count: u32,
     pub parse_error: Option<String>,
+    /// 最后一条文本消息的摘要，列表行用于「最后：…」。
+    #[serde(default)]
+    pub preview: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

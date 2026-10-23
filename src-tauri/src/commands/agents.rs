@@ -8,7 +8,7 @@ use crate::domain::mcp::McpServer;
 use crate::domain::{AssetKind, AssetType};
 use crate::error::AppError;
 use crate::import::update_matrix;
-use crate::services::agents::{detect_all, load_state, AgentStatus};
+use crate::services::agents::{detect_all, ensure_agent_detected, load_state, AgentStatus};
 use crate::services::apply::ApplyReport;
 use crate::services::drift;
 use crate::state::AppState;
@@ -36,7 +36,15 @@ pub(crate) fn override_base(state: &AppState, agent_id: &str) -> Result<Option<P
 
 #[tauri::command]
 pub fn list_agents(state: State<'_, AppState>) -> Result<Vec<AgentStatus>, AppError> {
-    detect_all(&state.store, &state.home)
+    let mut agents = detect_all(&state.store, &state.home)?;
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| AppError::InvalidInput("settings 锁失败".into()))?;
+    for agent in &mut agents {
+        agent.enabled = crate::settings::is_agent_enabled(&settings, &agent.id);
+    }
+    Ok(agents)
 }
 
 #[tauri::command]
@@ -47,9 +55,11 @@ pub fn set_mcp_enabled(
     enabled: bool,
 ) -> Result<ApplyReport, AppError> {
     let descriptor = descriptor_for(&agent_id, AssetKind::Mcp)?;
+    let base = override_base(&state, &agent_id)?;
+    // 取消 MCP 也会重写配置文件；没检测到就两边都不写，免得替用户建出目录。
+    ensure_agent_detected(&state.store, &state.home, &agent_id)?;
     let canonical = state.store.read(AssetType::Mcp, &id)?;
     let server: McpServer = serde_json::from_slice(&canonical)?;
-    let base = override_base(&state, &agent_id)?;
     // CLI 通道：只有该 agent 有官方写命令时才去 PATH 里找（Claude / Codex 等直接是 NotApplicable）。
     let target = WriteTarget::new(&state.home, base.as_deref())
         .with_channel(CliChannel::for_agent(&agent_id));
@@ -99,6 +109,7 @@ pub fn set_skill_enabled(
     let descriptor = descriptor_for(&agent_id, AssetKind::Skill)?;
     let base = override_base(&state, &agent_id)?;
     let label = if enabled {
+        ensure_agent_detected(&state.store, &state.home, &agent_id)?;
         match skills::deploy(&state.store, &descriptor, &id, &state.home, base.as_deref())? {
             Deployed::Linked(kind) => format!("{kind:?}").to_lowercase(),
             Deployed::Already => "already".to_string(),
@@ -141,6 +152,7 @@ pub fn activate_prompt(
 ) -> Result<ActivateOutcome, AppError> {
     let descriptor = descriptor_for(&agent_id, AssetKind::Prompt)?;
     let base = override_base(&state, &agent_id)?;
+    ensure_agent_detected(&state.store, &state.home, &agent_id)?;
     let takeover = match save_existing_as {
         Some(new_id) => Takeover::SaveExistingAs(new_id),
         None if confirm.unwrap_or(false) => Takeover::Confirm,
@@ -171,4 +183,19 @@ pub fn activate_prompt(
         })?;
     }
     Ok(outcome)
+}
+
+/// 取消激活：只有目标文件确实是我们写的才删除；成功后清空矩阵里的 activePrompt。
+#[tauri::command]
+pub fn deactivate_prompt(state: State<'_, AppState>, agent_id: String) -> Result<bool, AppError> {
+    let descriptor = descriptor_for(&agent_id, AssetKind::Prompt)?;
+    let base = override_base(&state, &agent_id)?;
+    // 纯删除不会创建目录：配置根不在时本来就无文件可删，不做检测门禁。
+    let removed = prompt::deactivate(&state.store, &descriptor, &state.home, base.as_deref())?;
+    if removed {
+        update_matrix(&state.store, &agent_id, |matrix| {
+            matrix.active_prompt = None;
+        })?;
+    }
+    Ok(removed)
 }

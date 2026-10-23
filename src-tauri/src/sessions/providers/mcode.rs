@@ -407,6 +407,7 @@ mod tests {
             updated_at: 0,
             message_count: 0,
             parse_error: None,
+            preview: None,
         };
         #[cfg(windows)]
         assert_eq!(

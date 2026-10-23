@@ -419,6 +419,11 @@ fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssetSummary> {
         name: row.get(2)?,
         updated_at: row.get(3)?,
         hash: row.get(4)?,
+        description: None,
+        source: None,
+        mtime: None,
+        transport: None,
+        size: None,
     })
 }
 

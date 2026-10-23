@@ -1,25 +1,40 @@
-use crate::domain::{display_name, parse_and_validate, AssetSummary, AssetType};
+use crate::domain::{describe, display_name, parse_and_validate, AssetSummary, AssetType};
 use crate::error::AppError;
 use crate::index::{sha256_hex, Index};
-use crate::store::Store;
+use crate::store::{copy_dir, Store};
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 pub struct AssetService;
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillMeta {
+    #[serde(default, alias = "repo_owner")]
+    repo_owner: Option<String>,
+    #[serde(default, alias = "repo_name")]
+    repo_name: Option<String>,
+}
+
 impl AssetService {
+    /// 列表先查索引，再读磁盘补齐描述/来源/mtime。索引仍是可随时重建的派生缓存，
+    /// 不为了几个展示字段改表结构。
     pub fn list(
-        _store: &Store,
+        store: &Store,
         index: &Index,
         asset_type: Option<AssetType>,
     ) -> Result<Vec<AssetSummary>, AppError> {
-        Ok(index.list(asset_type)?)
+        let mut rows = index.list(asset_type)?;
+        for row in &mut rows {
+            enrich(store, row);
+        }
+        Ok(rows)
     }
 
     /// 读资产的文本。skill 在真源里是目录，读的是它下面的 `SKILL.md`。
     pub fn read(store: &Store, asset_type: AssetType, id: &str) -> Result<String, AppError> {
-        let mut path = store.entry_path(asset_type, id)?;
-        if asset_type == AssetType::Skill {
-            path.push("SKILL.md");
-        }
+        let path = asset_file_path(store, asset_type, id)?;
         let bytes = std::fs::read(&path)?;
         String::from_utf8(bytes)
             .map_err(|_| AppError::InvalidInput(format!("{id} 不是 UTF-8 文件")))
@@ -38,13 +53,19 @@ impl AssetService {
         store.backup(asset_type, id)?;
         store.write(asset_type, id, bytes)?;
         let name = display_name(asset_type, id, bytes)?;
-        let summary = AssetSummary {
+        let mut summary = AssetSummary {
             asset_type,
             id: id.to_string(),
             name,
             updated_at: chrono::Utc::now().timestamp_millis(),
             hash: sha256_hex(bytes),
+            description: None,
+            source: None,
+            mtime: None,
+            transport: None,
+            size: None,
         };
+        enrich(store, &mut summary);
         index.upsert(&summary)?;
         Ok(summary)
     }
@@ -61,6 +82,104 @@ impl AssetService {
         }
         Ok(deleted)
     }
+
+    /// 从本地目录导入一个 skill：目录名就是资产 ID，必须含 `SKILL.md`。
+    pub fn import_skill_dir(
+        store: &Store,
+        index: &mut Index,
+        source: &Path,
+    ) -> Result<AssetSummary, AppError> {
+        if !source.is_dir() {
+            return Err(AppError::InvalidInput("选择的不是目录".into()));
+        }
+        if !source.join("SKILL.md").is_file() {
+            return Err(AppError::InvalidInput(
+                "选择的目录里没有 SKILL.md，不能作为 Skill 导入".into(),
+            ));
+        }
+        let id = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| AppError::InvalidInput("无法读取目录名作为 Skill ID".into()))?
+            .to_string();
+        let target = store.entry_path(AssetType::Skill, &id)?;
+        if target.exists() {
+            return Err(AppError::InvalidInput(format!(
+                "真源里已有同名 skill：{id}"
+            )));
+        }
+        copy_dir(source, &target)?;
+        let bytes = std::fs::read(target.join("SKILL.md"))?;
+        let mut summary = AssetSummary {
+            asset_type: AssetType::Skill,
+            id: id.clone(),
+            name: id,
+            updated_at: chrono::Utc::now().timestamp_millis(),
+            hash: sha256_hex(&bytes),
+            description: None,
+            source: None,
+            mtime: None,
+            transport: None,
+            size: None,
+        };
+        enrich(store, &mut summary);
+        index.upsert(&summary)?;
+        Ok(summary)
+    }
+}
+
+fn asset_file_path(
+    store: &Store,
+    asset_type: AssetType,
+    id: &str,
+) -> Result<PathBuf, crate::store::StoreError> {
+    let path = store.entry_path(asset_type, id)?;
+    Ok(if asset_type == AssetType::Skill {
+        path.join("SKILL.md")
+    } else {
+        path
+    })
+}
+
+fn enrich(store: &Store, summary: &mut AssetSummary) {
+    let Ok(path) = asset_file_path(store, summary.asset_type, &summary.id) else {
+        return;
+    };
+    if let Ok(metadata) = std::fs::metadata(&path) {
+        summary.size = Some(metadata.len() as i64);
+        summary.mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|elapsed| elapsed.as_millis() as i64);
+    }
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    let details = describe(summary.asset_type, &summary.id, &bytes);
+    if let Some(name) = details.name {
+        if !name.trim().is_empty() {
+            summary.name = name;
+        }
+    }
+    summary.description = details.description;
+    summary.transport = details.transport;
+    if summary.asset_type == AssetType::Skill {
+        summary.source = skill_source(store, &summary.id);
+    }
+}
+
+fn skill_source(store: &Store, id: &str) -> Option<String> {
+    let dir = store.entry_path(AssetType::Skill, id).ok()?;
+    let text = std::fs::read_to_string(dir.join(".meta.json")).ok()?;
+    let meta: SkillMeta = serde_json::from_str(&text).ok()?;
+    match (meta.repo_owner, meta.repo_name) {
+        (Some(owner), Some(name)) if !owner.trim().is_empty() && !name.trim().is_empty() => {
+            Some(format!("{owner}/{name}"))
+        }
+        (_, Some(name)) if !name.trim().is_empty() => Some(name),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -68,7 +187,6 @@ mod tests {
     use super::*;
     use crate::domain::AssetType;
     use crate::index::Index;
-    use crate::store::Store;
     use tempfile::tempdir;
 
     fn fixture() -> (tempfile::TempDir, Store, Index) {
@@ -86,16 +204,57 @@ mod tests {
             &mut index,
             AssetType::Mcp,
             "pw",
-            r#"{"id":"pw","name":"Playwright","transport":"stdio","command":"npx"}"#,
+            r#"{"id":"pw","name":"Playwright","transport":"stdio","command":"npx","args":["-y","pw"]}"#,
         )
         .unwrap();
         assert_eq!(summary.name, "Playwright");
-        assert_eq!(
-            AssetService::list(&store, &index, Some(AssetType::Mcp))
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(summary.transport.as_deref(), Some("stdio"));
+        assert_eq!(summary.description.as_deref(), Some("npx -y pw"));
+        let rows = AssetService::list(&store, &index, Some(AssetType::Mcp)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].mtime.is_some());
+    }
+
+    #[test]
+    fn skill_listing_uses_frontmatter_and_source_metadata() {
+        let (dir, store, mut index) = fixture();
+        let skill_dir = store.asset_dir(AssetType::Skill).join("lark");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: Lark Wiki\ndescription: 查知识库\n---\n\n正文\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skill_dir.join(".meta.json"),
+            r#"{"repoOwner":"acme","repoName":"skills"}"#,
+        )
+        .unwrap();
+        index.rebuild(&store).unwrap();
+
+        let rows = AssetService::list(&store, &index, Some(AssetType::Skill)).unwrap();
+        assert_eq!(rows[0].name, "Lark Wiki");
+        assert_eq!(rows[0].description.as_deref(), Some("查知识库"));
+        assert_eq!(rows[0].source.as_deref(), Some("acme/skills"));
+        assert!(rows[0].mtime.is_some());
+        let _ = dir;
+    }
+
+    #[test]
+    fn import_skill_dir_copies_the_whole_directory() {
+        let (dir, store, mut index) = fixture();
+        let source = dir.path().join("incoming").join("my-skill");
+        std::fs::create_dir_all(source.join("references")).unwrap();
+        std::fs::write(source.join("SKILL.md"), "---\nname: My Skill\n---\n正文\n").unwrap();
+        std::fs::write(source.join("references/note.md"), "补充\n").unwrap();
+
+        let summary = AssetService::import_skill_dir(&store, &mut index, &source).unwrap();
+        assert_eq!(summary.id, "my-skill");
+        assert_eq!(summary.name, "My Skill");
+        assert!(store
+            .asset_dir(AssetType::Skill)
+            .join("my-skill/references/note.md")
+            .is_file());
     }
 
     #[test]
