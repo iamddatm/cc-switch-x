@@ -11,7 +11,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 # preserve_order：改 agent 的 JSON 配置时必须保住原有键序，否则「非管辖键不变」无从谈起
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -30,5 +30,5 @@ tauri-plugin-dialog = "2"
 # 应用内更新：检查、下载、安装都走后端，前端不直接暴露插件命令
 tauri-plugin-updater = "2.14"
 # Skill 来源安装/更新：GitHub 归档走阻塞客户端，放进 spawn_blocking，避免占用 UI 线程
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "socks"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "socks"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }

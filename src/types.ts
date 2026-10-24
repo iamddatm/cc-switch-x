@@ -1,5 +1,5 @@
 export type AssetType = "mcp" | "skill" | "prompt" | "rule" | "subagent" | "hook";
-export type Pane = AssetType | "sessions" | "agents" | "settings";
+export type Pane = AssetType | "sessions" | "agents" | "network" | "settings";
 export type Theme = "light" | "dark" | "system";
 
 export interface AssetSummary {
@@ -44,6 +44,78 @@ export interface AppSettings {
   theme: Theme;
   /** null = 全部启用；空数组 = 全部禁用。 */
   enabledAgents: string[] | null;
+  /** 关闭窗口时隐藏到托盘。 */
+  closeToTray: boolean;
+  proxy: { url: string | null; username: string | null };
+  /** null = 使用内置默认仓库。 */
+  skillRepos: SkillRepo[] | null;
+}
+
+export interface ProxySettingsView {
+  url: string | null;
+  username: string | null;
+  hasPassword: boolean;
+}
+
+export interface ProxyTestResult {
+  success: boolean;
+  latencyMs: number;
+  error: string | null;
+}
+
+export interface DetectedProxy {
+  url: string;
+  proxyType: string;
+  port: number;
+}
+
+export interface SkillRepo {
+  owner: string;
+  name: string;
+  branch: string;
+  enabled: boolean;
+}
+
+export interface DiscoverableSkill {
+  key: string;
+  name: string;
+  description: string | null;
+  relativePath: string;
+  suggestedId: string;
+  repo: string;
+  branch: string;
+  installed: boolean;
+}
+
+export interface SkillDiscoveryReport {
+  skills: DiscoverableSkill[];
+  failures: SkillRepoFailure[];
+}
+
+export interface DiscoveredSkillInstallInput {
+  repo: string;
+  branch?: string | null;
+  relativePath?: string | null;
+  /** skills.sh 的 skillId。 */
+  directory?: string | null;
+  name?: string | null;
+}
+
+export interface SkillsShSkill {
+  key: string;
+  name: string;
+  directory: string;
+  repoOwner: string;
+  repoName: string;
+  repoBranch: string;
+  installs: number;
+  readmeUrl: string;
+}
+
+export interface SkillsShSearchResult {
+  skills: SkillsShSkill[];
+  totalCount: number;
+  query: string;
 }
 
 /** 后端 AssetState 的 snake_case 序列化结果 */

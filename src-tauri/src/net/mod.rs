@@ -13,6 +13,111 @@ use tempfile::TempDir;
 /// 单个仓库归档的下载上限（与原版 cc-switch 一致）。
 pub const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 
+/// 全局出站代理。密码由调用方从 secrets 取出，不进设置文件。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProxyConfig {
+    pub url: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+impl ProxyConfig {
+    pub fn new(url: Option<String>, username: Option<String>, password: Option<String>) -> Self {
+        Self {
+            url,
+            username,
+            password,
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty())
+    }
+
+    /// 校验用户输入；密码可以只在 secrets 里，因此不要求出现在这里。
+    pub fn validate(&self) -> Result<(), AppError> {
+        if !self.is_enabled() {
+            if self
+                .username
+                .as_deref()
+                .is_some_and(|v| !v.trim().is_empty())
+                || self.password.as_deref().is_some_and(|v| !v.is_empty())
+            {
+                return Err(AppError::InvalidInput(
+                    "填写代理用户名或密码前，请先填写代理地址".into(),
+                ));
+            }
+            return Ok(());
+        }
+        let url = self.url_with_auth()?;
+        reqwest::Proxy::all(url.as_str())
+            .map_err(|error| AppError::InvalidInput(format!("代理地址不可用：{error}")))?;
+        Ok(())
+    }
+
+    /// 把认证信息并进 URL。用户名或密码为空时不写入 userinfo。
+    pub fn url_with_auth(&self) -> Result<reqwest::Url, AppError> {
+        let raw = self
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| AppError::InvalidInput("代理地址不能为空".into()))?;
+        let mut parsed = reqwest::Url::parse(raw)
+            .map_err(|error| AppError::InvalidInput(format!("代理地址格式错误：{error}")))?;
+        if !matches!(parsed.scheme(), "http" | "https" | "socks5" | "socks5h") {
+            return Err(AppError::InvalidInput(
+                "代理只支持 http / https / socks5 / socks5h".into(),
+            ));
+        }
+        if parsed.host_str().is_none() {
+            return Err(AppError::InvalidInput("代理地址缺少主机名".into()));
+        }
+        let username = self.username.as_deref().unwrap_or_default().trim();
+        let password = self.password.as_deref().unwrap_or_default();
+        if !username.is_empty() {
+            parsed
+                .set_username(username)
+                .map_err(|_| AppError::InvalidInput("代理用户名无法写入地址".into()))?;
+            if !password.is_empty() {
+                parsed
+                    .set_password(Some(password))
+                    .map_err(|_| AppError::InvalidInput("代理密码无法写入地址".into()))?;
+            }
+        } else if !password.is_empty() {
+            return Err(AppError::InvalidInput(
+                "填写代理密码前，请先填写代理用户名".into(),
+            ));
+        }
+        Ok(parsed)
+    }
+
+    /// 返回可直接挂到 reqwest 客户端上的代理；直连时为 None。
+    pub fn proxy(&self) -> Result<Option<reqwest::Proxy>, AppError> {
+        if !self.is_enabled() {
+            return Ok(None);
+        }
+        let url = self.url_with_auth()?;
+        let proxy = reqwest::Proxy::all(url.as_str())
+            .map_err(|error| AppError::InvalidInput(format!("代理地址不可用：{error}")))?;
+        Ok(Some(proxy))
+    }
+
+    /// 把配置应用到阻塞客户端。留空时显式关闭系统代理，保证「留空 = 直连」。
+    pub fn apply_blocking(
+        &self,
+        mut builder: reqwest::blocking::ClientBuilder,
+    ) -> Result<reqwest::blocking::ClientBuilder, AppError> {
+        match self.proxy()? {
+            Some(proxy) => builder = builder.proxy(proxy),
+            None => builder = builder.no_proxy(),
+        }
+        Ok(builder)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RepoRef {
     pub owner: String,
@@ -128,11 +233,15 @@ pub struct HttpFetcher {
 }
 
 impl HttpFetcher {
-    pub fn new() -> Result<Self, AppError> {
-        let client = reqwest::blocking::Client::builder()
+    pub fn new(proxy: Option<&ProxyConfig>) -> Result<Self, AppError> {
+        let mut builder = reqwest::blocking::Client::builder()
             .user_agent(concat!("cc-switch-x/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(30))
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_secs(60));
+        if let Some(proxy) = proxy {
+            builder = proxy.apply_blocking(builder)?;
+        }
+        let client = builder
             .build()
             .map_err(|error| AppError::Network(format!("创建 HTTP 客户端失败：{error}")))?;
         Ok(Self { client })
@@ -299,6 +408,38 @@ mod tests {
                 parse_github_input("acme/demo", Some(branch.into())).is_err(),
                 "{branch}"
             );
+        }
+    }
+
+    #[test]
+    fn proxy_config_rejects_bad_schemes_and_orphan_credentials() {
+        let direct = ProxyConfig::default();
+        assert!(!direct.is_enabled());
+        assert!(direct.validate().is_ok());
+
+        let auth = ProxyConfig::new(
+            Some("http://127.0.0.1:7890".into()),
+            Some("me".into()),
+            Some("p@ss".into()),
+        );
+        assert!(auth.validate().is_ok());
+        let url = auth.url_with_auth().unwrap();
+        assert_eq!(url.username(), "me");
+        // Url 保存的是 percent-encoded userinfo，reqwest 解析代理时会还原。
+        assert_eq!(url.password(), Some("p%40ss"));
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+
+        for bad in [
+            ProxyConfig::new(Some("ftp://127.0.0.1:21".into()), None, None),
+            ProxyConfig::new(Some("not a url".into()), None, None),
+            ProxyConfig::new(
+                Some("http://127.0.0.1:7890".into()),
+                None,
+                Some("pw".into()),
+            ),
+            ProxyConfig::new(None, Some("me".into()), None),
+        ] {
+            assert!(bad.validate().is_err());
         }
     }
 

@@ -9,6 +9,7 @@ vi.mock("../lib/api", () => ({
     getSettings: vi.fn(),
     setTheme: vi.fn(),
     setStoreRoot: vi.fn(),
+    setCloseToTray: vi.fn(),
   },
 }));
 
@@ -18,11 +19,17 @@ beforeEach(() => {
     storeRoot: "C:/Users/me/.ccswitchx",
     theme: "system",
     enabledAgents: null,
+    closeToTray: true,
+    proxy: { url: null, username: null },
+    skillRepos: null,
   });
   vi.mocked(api.setTheme).mockResolvedValue({
     storeRoot: "C:/Users/me/.ccswitchx",
     theme: "dark",
     enabledAgents: null,
+    closeToTray: true,
+    proxy: { url: null, username: null },
+    skillRepos: null,
   });
   vi.mocked(api.setStoreRoot).mockResolvedValue(true);
 });

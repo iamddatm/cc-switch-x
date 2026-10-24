@@ -10,6 +10,7 @@ pub mod sessions;
 pub mod settings;
 pub mod state;
 pub mod store;
+pub mod tray;
 
 #[tauri::command]
 fn ping() -> &'static str {
@@ -35,6 +36,7 @@ pub fn run() {
         // 把原因打到标准错误，面板上的「重新检查」还能手动触发。
         .setup(|app| {
             use tauri::Manager;
+            tray::setup(app)?;
             let app_state = app.state::<state::AppState>();
             let Ok(mut index) = app_state.index.lock() else {
                 eprintln!("跳过漂移检查：index 锁已被 panic 污染，请用面板上的「重新检查」");
@@ -82,17 +84,27 @@ pub fn run() {
             commands::sessions::session_providers,
             commands::sessions::session_resume,
             commands::skills::check_skill_updates,
+            commands::skills::discover_available_skills,
+            commands::skills::get_skill_repos,
+            commands::skills::install_discovered_skill,
             commands::skills::install_skill,
             commands::skills::preview_skill_source,
+            commands::skills::search_skills_sh,
+            commands::skills::set_skill_repos,
             commands::skills::set_skills_enabled,
             commands::skills::uninstall_skills,
             commands::skills::update_skills,
             commands::subagents::scan_subagents,
             commands::subagents::set_subagent_enabled,
             commands::settings::get_settings,
+            commands::settings::get_proxy_settings,
+            commands::settings::scan_local_proxies,
+            commands::settings::set_close_to_tray,
             commands::settings::set_enabled_agents,
-            commands::settings::set_theme,
+            commands::settings::set_proxy_settings,
             commands::settings::set_store_root,
+            commands::settings::set_theme,
+            commands::settings::test_proxy_settings,
             commands::updater::check_app_update,
             commands::updater::install_app_update,
         ])

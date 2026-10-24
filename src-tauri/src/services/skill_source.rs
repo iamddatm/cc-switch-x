@@ -21,7 +21,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const PREVIEW_RECORD: &str = "preview.json";
 const CONTENT_DIR: &str = "content";
-const MAX_CANDIDATES: usize = 200;
+/// 与发现页共用同一量级：Composio 这类聚合仓库单仓就有数百个 SKILL.md，
+/// 上限太低会让「发现后直接安装」在预览阶段就失败。
+const MAX_CANDIDATES: usize = 2000;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -327,30 +329,81 @@ fn collect_candidates(
 }
 
 fn candidate_id(relative_path: &str, naming: &CandidateNaming<'_>) -> String {
-    let raw = match naming {
-        CandidateNaming::Github { owner, repo } => {
-            if relative_path == "." {
-                format!("{owner}-{repo}")
-            } else {
-                format!("{owner}-{repo}-{relative_path}")
-            }
-        }
+    match naming {
+        CandidateNaming::Github { owner, repo } => github_candidate_id(relative_path, owner, repo),
         CandidateNaming::Zip { fallback } | CandidateNaming::Directory { fallback } => {
-            if relative_path == "." {
+            let raw = if relative_path == "." {
                 (*fallback).to_string()
             } else {
                 relative_path.to_string()
-            }
+            };
+            slug(&raw).unwrap_or_else(|| safe_asset_id(fallback))
         }
+    }
+}
+
+/// 发现与安装必须算出同一个 ID，否则「已安装」判断会和实际落盘对不上。
+pub(crate) fn github_candidate_id(relative_path: &str, owner: &str, repo: &str) -> String {
+    let raw = if relative_path == "." {
+        format!("{owner}-{repo}")
+    } else {
+        format!("{owner}-{repo}-{relative_path}")
     };
     // slug 对全中文返回 None；GitHub 前缀全是 ASCII，可作为稳定兜底。
-    let fallback = match naming {
-        CandidateNaming::Github { owner, repo } => format!("{owner}-{repo}"),
-        CandidateNaming::Zip { fallback } | CandidateNaming::Directory { fallback } => {
-            (*fallback).to_string()
+    slug(&raw).unwrap_or_else(|| safe_asset_id(&format!("{owner}-{repo}")))
+}
+
+/// 发现页直接安装时用来定位候选：优先精确路径，其次目录/skillId，最后唯一的名称。
+pub(crate) fn pick_candidate<'a>(
+    candidates: &'a [SkillCandidate],
+    relative_path: Option<&str>,
+    directory: Option<&str>,
+    name: Option<&str>,
+) -> Option<&'a SkillCandidate> {
+    if let Some(relative) = relative_path.map(str::trim).filter(|v| !v.is_empty()) {
+        if let Some(found) = candidates
+            .iter()
+            .find(|item| item.relative_path == relative)
+        {
+            return Some(found);
         }
-    };
-    slug(&raw).unwrap_or_else(|| safe_asset_id(&fallback))
+    }
+    if let Some(directory) = directory.map(str::trim).filter(|v| !v.is_empty()) {
+        let directory = directory.trim_matches('/');
+        if let Some(found) = candidates
+            .iter()
+            .find(|item| item.relative_path == directory)
+        {
+            return Some(found);
+        }
+        if let Some(found) = candidates.iter().find(|item| {
+            item.relative_path
+                .rsplit('/')
+                .next()
+                .is_some_and(|leaf| leaf == directory)
+        }) {
+            return Some(found);
+        }
+        if let Some(found) = candidates
+            .iter()
+            .find(|item| item.suggested_id == directory)
+        {
+            return Some(found);
+        }
+    }
+    if let Some(name) = name.map(str::trim).filter(|v| !v.is_empty()) {
+        let needle = name.to_lowercase();
+        let mut matched = candidates
+            .iter()
+            .filter(|item| item.name.to_lowercase() == needle);
+        if let (Some(found), None) = (matched.next(), matched.next()) {
+            return Some(found);
+        }
+    }
+    if candidates.len() == 1 {
+        return candidates.first();
+    }
+    None
 }
 
 fn write_preview_record(staging: &Path, record: &PreviewRecord) -> Result<(), AppError> {
@@ -440,6 +493,54 @@ fn resolve_context(
             })
         }
     }
+}
+
+/// 发现页直接安装：重新拉一次仓库（不信任前端路径），定位候选后复用预览暂存安装。
+pub fn install_discovered<F: RepoFetcher>(
+    store: &Store,
+    home: &Path,
+    fetcher: &F,
+    repo: &str,
+    branch: Option<String>,
+    relative_path: Option<&str>,
+    directory: Option<&str>,
+    name: Option<&str>,
+    policy: ConflictPolicy,
+) -> Result<SkillInstallOutcome, AppError> {
+    let input = SkillSourceInput::Github {
+        repo: repo.to_string(),
+        branch,
+    };
+    let preview = preview(store, fetcher, &input)?;
+    let staging_id = preview.staging_id.clone();
+    let result: Result<SkillInstallOutcome, AppError> = (|| {
+        let candidate = pick_candidate(&preview.candidates, relative_path, directory, name)
+            .ok_or_else(|| {
+                AppError::Source("仓库里没有找到对应的 Skill，可能已改名，请刷新发现列表".into())
+            })?;
+        let staging_id = staging_id
+            .as_deref()
+            .ok_or_else(|| AppError::Source("缺少预览信息，请重试".into()))?;
+        let selection = InstallSelection {
+            relative_path: candidate.relative_path.clone(),
+            id: candidate.suggested_id.clone(),
+        };
+        let report = install(store, home, &input, Some(staging_id), &[selection], policy)?;
+        report
+            .outcomes
+            .into_iter()
+            .next()
+            .ok_or_else(|| AppError::InvalidInput("安装没有返回结果".into()))
+    })();
+    // 成功安装由 install() 清理暂存；定位/安装失败时这里兜底，避免留下整份仓库副本。
+    if result.is_err() {
+        if let Some(id) = staging_id.as_deref() {
+            if let Ok(path) = staging_path(store, id) {
+                let _ = fs::remove_dir_all(path);
+            }
+        }
+    }
+    result
 }
 
 pub fn install(
@@ -1286,6 +1387,30 @@ mod tests {
     }
 
     #[test]
+    fn discovered_install_locates_candidate_by_directory() {
+        let (dir, store, home) = fixture();
+        let fetcher = FakeFetcher::new(github_fixture(&dir.path().join("remote")));
+        let outcome = install_discovered(
+            &store,
+            &home,
+            &fetcher,
+            "acme/demo",
+            None,
+            None,
+            Some("demo"),
+            None,
+            ConflictPolicy::Skip,
+        )
+        .unwrap();
+        assert_eq!(outcome.status, "installed");
+        assert!(store
+            .asset_dir(AssetType::Skill)
+            .join(&outcome.id)
+            .join("SKILL.md")
+            .is_file());
+    }
+
+    #[test]
     fn install_report_always_serializes_empty_arrays() {
         let report = SkillInstallReport {
             outcomes: vec![SkillInstallOutcome {
@@ -1350,5 +1475,52 @@ mod tests {
         assert_eq!(meta.source_kind, Some(SkillSourceKind::Zip));
         assert!(meta.source_url.as_deref().unwrap().contains("skills.zip"));
         assert!(meta.repo_owner.is_none());
+    }
+
+    #[test]
+    fn pick_candidate_prefers_path_then_directory_then_unique_name() {
+        let candidate = |relative: &str, name: &str, id: &str| SkillCandidate {
+            relative_path: relative.into(),
+            name: name.into(),
+            description: None,
+            suggested_id: id.into(),
+            exists: false,
+        };
+        let candidates = vec![
+            candidate("skills/pdf", "PDF", "acme-demo-skills-pdf"),
+            candidate("writing", "Writing", "acme-demo-writing"),
+        ];
+        assert_eq!(
+            pick_candidate(&candidates, Some("writing"), None, None)
+                .unwrap()
+                .relative_path,
+            "writing"
+        );
+        assert_eq!(
+            pick_candidate(&candidates, None, Some("pdf"), None)
+                .unwrap()
+                .relative_path,
+            "skills/pdf"
+        );
+        assert_eq!(
+            pick_candidate(&candidates, None, Some("acme-demo-writing"), None)
+                .unwrap()
+                .relative_path,
+            "writing"
+        );
+        assert_eq!(
+            pick_candidate(&candidates, None, None, Some("pdf"))
+                .unwrap()
+                .relative_path,
+            "skills/pdf"
+        );
+        assert!(pick_candidate(&candidates, Some("nope"), Some("nope"), Some("nope")).is_none());
+        // 只有一个候选时允许无提示定位（skills.sh 的 skillId 与目录名不一致时兜底）。
+        assert_eq!(
+            pick_candidate(&candidates[..1], None, None, None)
+                .unwrap()
+                .relative_path,
+            "skills/pdf"
+        );
     }
 }

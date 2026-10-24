@@ -3,6 +3,7 @@ import { Settings } from "lucide-react";
 import { ImportDialog } from "../components/ImportDialog";
 import { AboutSection } from "../components/settings/AboutSection";
 import { Button } from "../components/ui/Button";
+import { Checkbox } from "../components/ui/Checkbox";
 import { Input } from "../components/ui/Input";
 import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -22,6 +23,7 @@ export function SettingsPanel({
 }) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [storeRoot, setStoreRoot] = useState("");
+  const [closeToTray, setCloseToTray] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
@@ -32,9 +34,23 @@ export function SettingsPanel({
       .then((value) => {
         setSettings(value);
         setStoreRoot(value.storeRoot);
+        setCloseToTray(value.closeToTray);
       })
       .catch((e) => setError(String(e)));
   }, []);
+
+  const toggleCloseToTray = async (enabled: boolean) => {
+    setCloseToTray(enabled);
+    setError(null);
+    try {
+      const updated = await api.setCloseToTray(enabled);
+      setSettings(updated);
+      setCloseToTray(updated.closeToTray);
+    } catch (e) {
+      setCloseToTray(!enabled);
+      setError(String(e));
+    }
+  };
 
   const changeTheme = async (next: Theme) => {
     try {
@@ -77,6 +93,19 @@ export function SettingsPanel({
               <option value="dark">深色</option>
             </Select>
             {settings && <p className="text-caption text-fg-3">外观设置只影响本机。</p>}
+          </section>
+
+          <section className="space-y-2">
+            <h3 className="text-strong text-fg-1">窗口</h3>
+            <Checkbox
+              id="close-to-tray"
+              label="关闭窗口时最小化到托盘"
+              checked={closeToTray}
+              onChange={(event) => void toggleCloseToTray(event.target.checked)}
+            />
+            <p className="text-caption text-fg-3">
+              关闭后应用继续在托盘运行；右键托盘图标选择「退出 CC Switch X」才会结束进程。
+            </p>
           </section>
 
           <section className="space-y-2">

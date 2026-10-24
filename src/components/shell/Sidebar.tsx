@@ -1,6 +1,7 @@
 import {
   BookOpen,
   Bot,
+  Globe,
   History,
   Layers,
   ScrollText,
@@ -21,6 +22,7 @@ const ITEMS: { pane: Pane; label: string; icon: LucideIcon }[] = [
   { pane: "hook", label: "Hooks", icon: Webhook },
   { pane: "sessions", label: "会话", icon: History },
   { pane: "agents", label: "Agents", icon: Layers },
+  { pane: "network", label: "网络", icon: Globe },
   { pane: "settings", label: "Settings", icon: Settings },
 ];
 

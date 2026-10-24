@@ -19,6 +19,11 @@ vi.mock("../lib/api", () => ({
     updateSkills: vi.fn(),
     uninstallSkills: vi.fn(),
     setSkillsEnabled: vi.fn(),
+    getSkillRepos: vi.fn(),
+    setSkillRepos: vi.fn(),
+    discoverSkills: vi.fn(),
+    installDiscoveredSkill: vi.fn(),
+    searchSkillsSh: vi.fn(),
   },
 }));
 
@@ -69,6 +74,47 @@ beforeEach(() => {
     warnings: [],
   });
   vi.mocked(api.installSkill).mockResolvedValue({ outcomes: [] });
+  vi.mocked(api.getSkillRepos).mockResolvedValue([
+    { owner: "acme", name: "skills", branch: "main", enabled: true },
+  ]);
+  vi.mocked(api.setSkillRepos).mockImplementation(async (repos) => repos);
+  vi.mocked(api.discoverSkills).mockResolvedValue({
+    skills: [
+      {
+        key: "acme/skills@main:pdf",
+        name: "pdf",
+        description: "PDF 处理",
+        relativePath: "pdf",
+        suggestedId: "acme-skills-pdf",
+        repo: "acme/skills",
+        branch: "main",
+        installed: false,
+      },
+    ],
+    failures: [],
+  });
+  vi.mocked(api.installDiscoveredSkill).mockResolvedValue({
+    id: "acme-skills-pdf",
+    name: "pdf",
+    status: "installed",
+    warnings: [],
+  });
+  vi.mocked(api.searchSkillsSh).mockResolvedValue({
+    skills: [
+      {
+        key: "anthropics/skills/pdf",
+        name: "pdf",
+        directory: "pdf",
+        repoOwner: "anthropics",
+        repoName: "skills",
+        repoBranch: "main",
+        installs: 1200,
+        readmeUrl: "https://github.com/anthropics/skills",
+      },
+    ],
+    totalCount: 1,
+    query: "pdf",
+  });
 });
 
 test("shows the link kind the backend actually used", async () => {
@@ -210,11 +256,88 @@ test("checks all skills and opens the update confirmation", async () => {
 test("deleting a skill goes through uninstallSkills and mentions the backup", async () => {
   render(<SkillsPanel />);
   fireEvent.click(await screen.findByRole("button", { name: "demo 的更多操作" }));
-  fireEvent.click(await screen.findByRole("menuitem", { name: "删除" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
   const dialog = await screen.findByRole("alertdialog");
   expect(within(dialog).getByText(/backups\/skills/)).toBeInTheDocument();
   fireEvent.click(within(dialog).getByRole("button", { name: "删除 Skill" }));
   await waitFor(() => expect(api.uninstallSkills).toHaveBeenCalledWith(["demo"]));
+});
+
+test("discovers repo skills and installs to all enabled agents", async () => {
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("tab", { name: /发现/ }));
+
+  expect(await screen.findByText("pdf")).toBeInTheDocument();
+  expect(api.discoverSkills).toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "安装" }));
+
+  await waitFor(() =>
+    expect(api.installDiscoveredSkill).toHaveBeenCalledWith(
+      {
+        repo: "acme/skills",
+        branch: "main",
+        relativePath: "pdf",
+        name: "pdf",
+      },
+      "skip",
+    ),
+  );
+  await waitFor(() =>
+    expect(api.setSkillsEnabled).toHaveBeenCalledWith(
+      ["acme-skills-pdf"],
+      "claude",
+      true,
+    ),
+  );
+  expect(await screen.findByText(/已安装 pdf/)).toBeInTheDocument();
+});
+
+test("adds a repository from the manager sheet", async () => {
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("tab", { name: /发现/ }));
+  await screen.findByText("pdf");
+  fireEvent.click(screen.getByRole("button", { name: "管理仓库" }));
+
+  fireEvent.change(await screen.findByLabelText("仓库地址"), {
+    target: { value: "https://github.com/new/skills" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "添加仓库" }));
+
+  await waitFor(() =>
+    expect(api.setSkillRepos).toHaveBeenCalledWith([
+      { owner: "acme", name: "skills", branch: "main", enabled: true },
+      { owner: "new", name: "skills", branch: "main", enabled: true },
+    ]),
+  );
+});
+
+test("searches skills.sh and installs by skill id", async () => {
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("tab", { name: /发现/ }));
+  await screen.findByText("pdf");
+
+  fireEvent.click(screen.getByRole("button", { name: "skills.sh" }));
+  fireEvent.change(screen.getByLabelText("搜索可发现的 Skill"), {
+    target: { value: "pdf" },
+  });
+  fireEvent.keyDown(screen.getByLabelText("搜索可发现的 Skill"), {
+    key: "Enter",
+  });
+
+  expect(await screen.findByText("skills.sh · pdf")).toBeInTheDocument();
+  expect(api.searchSkillsSh).toHaveBeenCalledWith("pdf", 20, 0);
+  fireEvent.click(screen.getByRole("button", { name: "安装" }));
+  await waitFor(() =>
+    expect(api.installDiscoveredSkill).toHaveBeenCalledWith(
+      {
+        repo: "anthropics/skills",
+        branch: "main",
+        directory: "pdf",
+        name: "pdf",
+      },
+      "skip",
+    ),
+  );
 });
 
 test("selecting rows enables batch actions scoped to the selection", async () => {

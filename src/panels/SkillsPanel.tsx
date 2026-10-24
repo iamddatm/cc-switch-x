@@ -6,6 +6,7 @@ import { AgentColumnsHeader } from "../components/assets/AgentColumnsHeader";
 import { AssetRow } from "../components/assets/AssetRow";
 import { ImportDialog } from "../components/ImportDialog";
 import { SkillBatchBar } from "../components/skills/SkillBatchBar";
+import { SkillDiscoveryPanel } from "../components/skills/SkillDiscoveryPanel";
 import { SkillInstallSheet } from "../components/skills/SkillInstallSheet";
 import { SkillSourceBadge } from "../components/skills/SkillSourceBadge";
 import { SkillFormSheet } from "../components/skills/SkillFormSheet";
@@ -47,6 +48,8 @@ function sourceKey(item: AssetSummary): string {
 export function SkillsPanel() {
   const { items, error, loading, refresh } = useAssets("skill");
   const { agents, enabledAgents, refresh: refreshAgents } = useAgents();
+  const [view, setView] = useState<"installed" | "discover">("installed");
+  const [discoverMounted, setDiscoverMounted] = useState(false);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -332,8 +335,46 @@ export function SkillsPanel() {
         }
       />
 
-      <div className="flex h-12 shrink-0 items-center gap-3 px-6">
-        <SearchField
+      <div
+        role="tablist"
+        aria-label="Skills 视图"
+        className="flex h-10 shrink-0 items-center gap-1 border-b border-border px-6"
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === "installed"}
+          onClick={() => setView("installed")}
+          className={`relative flex h-full items-center gap-1.5 px-2 text-body transition-colors ${
+            view === "installed"
+              ? "font-medium text-fg-1 after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:bg-action"
+              : "text-fg-2 hover:text-fg-1"
+          }`}
+        >
+          已安装
+          <span className="text-caption text-fg-3">{items.length}</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === "discover"}
+          onClick={() => {
+            setView("discover");
+            setDiscoverMounted(true);
+          }}
+          className={`relative flex h-full items-center px-2 text-body transition-colors ${
+            view === "discover"
+              ? "font-medium text-fg-1 after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:bg-action"
+              : "text-fg-2 hover:text-fg-1"
+          }`}
+        >
+          发现
+        </button>
+      </div>
+
+      <div className={view === "installed" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+        <div className="flex h-12 shrink-0 items-center gap-3 px-6">
+          <SearchField
           className="w-[280px]"
           value={query}
           onValueChange={setQuery}
@@ -540,7 +581,19 @@ export function SkillsPanel() {
             </ul>
           </div>
         )}
+        </div>
       </div>
+
+      {discoverMounted && (
+        <div className={view === "discover" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+          <SkillDiscoveryPanel
+            installedItems={items}
+            agents={agentsForType}
+            onInstalled={refreshAll}
+            onShowInstalled={() => setView("installed")}
+          />
+        </div>
+      )}
 
       {editing && (
         <SkillFormSheet

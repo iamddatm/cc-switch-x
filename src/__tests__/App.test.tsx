@@ -8,6 +8,9 @@ vi.mock("../lib/api", () => ({
       storeRoot: "C:/Users/me/.ccswitchx",
       theme: "system",
       enabledAgents: null,
+      closeToTray: true,
+      proxy: { url: null, username: null },
+      skillRepos: null,
     }),
     listAgents: vi.fn().mockResolvedValue([]),
     listAssets: vi.fn().mockResolvedValue([]),
@@ -27,6 +30,7 @@ test("renders all sidebar entries and switches panes", () => {
     "Hooks",
     "会话",
     "Agents",
+    "网络",
     "Settings",
   ]) {
     expect(screen.getByRole("button", { name: label })).toBeInTheDocument();

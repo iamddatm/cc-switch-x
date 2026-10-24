@@ -1,10 +1,11 @@
 //! 应用内更新：检查、下载、安装都由后端完成，前端只负责触发和展示进度。
 
 use crate::error::AppError;
+use crate::state::AppState;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::UpdaterExt;
 
 pub const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "update-download-progress";
@@ -31,8 +32,16 @@ pub struct UpdateDownloadProgress {
 }
 
 fn build_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, AppError> {
-    app.updater_builder()
-        .timeout(CHECK_TIMEOUT)
+    let proxy = app.state::<AppState>().proxy_config()?;
+    let mut builder = app.updater_builder().timeout(CHECK_TIMEOUT);
+    // 更新器自己建 reqwest 客户端，必须显式传入代理，不能只依赖进程环境变量。
+    if proxy.is_enabled() {
+        builder = builder.proxy(proxy.url_with_auth()?);
+    } else {
+        // 与「留空 = 直连」保持一致；不能悄悄沿用系统代理。
+        builder = builder.no_proxy();
+    }
+    builder
         .build()
         .map_err(|error| AppError::Update(format!("初始化更新器失败：{error}")))
 }

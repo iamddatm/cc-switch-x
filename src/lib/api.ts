@@ -6,6 +6,8 @@ import type {
   AssetSummary,
   AssetType,
   ConflictPolicy,
+  DetectedProxy,
+  DiscoveredSkillInstallInput,
   DriftRecord,
   HooksNeedUserAction,
   ImportPreview,
@@ -14,14 +16,20 @@ import type {
   ResolveOutcome,
   ResumeInfo,
   InstallSelection,
+  ProxySettingsView,
+  ProxyTestResult,
   ScanReport,
   SkillBatchReport,
   SkillCheckReport,
+  SkillDiscoveryReport,
+  SkillInstallOutcome,
   SkillInstallReport,
+  SkillRepo,
   SkillSourceInput,
   SkillSourcePreview,
   SkillUninstallReport,
   SkillUpdateReport,
+  SkillsShSearchResult,
   SessionDetail,
   SessionMatch,
   SessionProviderStatus,
@@ -65,8 +73,25 @@ export const api = {
   getSettings: () => invoke<AppSettings>("get_settings"),
   setTheme: (theme: Theme) => invoke<AppSettings>("set_theme", { theme }),
   setStoreRoot: (storeRoot: string) => invoke<boolean>("set_store_root", { storeRoot }),
+  setCloseToTray: (enabled: boolean) =>
+    invoke<AppSettings>("set_close_to_tray", { enabled }),
   setEnabledAgents: (agentIds: string[]) =>
     invoke<AppSettings>("set_enabled_agents", { agentIds }),
+  getProxySettings: () => invoke<ProxySettingsView>("get_proxy_settings"),
+  /** password: null = 保留已保存密码，空串 = 清除。 */
+  setProxySettings: (url: string, username: string, password: string | null) =>
+    invoke<ProxySettingsView>("set_proxy_settings", { url, username, password }),
+  testProxySettings: (url: string, username: string, password: string | null) =>
+    invoke<ProxyTestResult>("test_proxy_settings", { url, username, password }),
+  scanLocalProxies: () => invoke<DetectedProxy[]>("scan_local_proxies"),
+  getSkillRepos: () => invoke<SkillRepo[]>("get_skill_repos"),
+  setSkillRepos: (repos: SkillRepo[]) =>
+    invoke<SkillRepo[]>("set_skill_repos", { repos }),
+  discoverSkills: () => invoke<SkillDiscoveryReport>("discover_available_skills"),
+  installDiscoveredSkill: (input: DiscoveredSkillInstallInput, policy: ConflictPolicy) =>
+    invoke<SkillInstallOutcome>("install_discovered_skill", { input, policy }),
+  searchSkillsSh: (query: string, limit: number, offset: number) =>
+    invoke<SkillsShSearchResult>("search_skills_sh", { query, limit, offset }),
   checkAppUpdate: () => invoke<UpdateInfo | null>("check_app_update"),
   installAppUpdate: () => invoke<boolean>("install_app_update"),
 

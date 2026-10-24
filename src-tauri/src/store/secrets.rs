@@ -49,6 +49,15 @@ impl Secrets {
             .insert(secret_ref.key.clone(), value.to_string());
     }
 
+    pub fn remove(&mut self, secret_ref: &SecretRef) {
+        if let Some(scope) = self.values.get_mut(&secret_ref.scope) {
+            scope.remove(&secret_ref.key);
+            if scope.is_empty() {
+                self.values.remove(&secret_ref.scope);
+            }
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.values.values().all(|scope| scope.is_empty())
     }

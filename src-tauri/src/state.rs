@@ -1,5 +1,7 @@
 use crate::error::AppError;
 use crate::index::Index;
+use crate::net::ProxyConfig;
+use crate::services::settings::proxy_secret_ref;
 use crate::settings::AppSettings;
 use crate::store::secrets::{secrets_path, Secrets};
 use crate::store::Store;
@@ -30,6 +32,32 @@ impl Drop for SkillJobGuard {
 }
 
 impl AppState {
+    /// 网络任务启动前取一份代理快照；密码只从 secrets 读，不进设置文件。
+    pub fn proxy_config(&self) -> Result<ProxyConfig, AppError> {
+        let settings = self
+            .settings
+            .lock()
+            .map_err(|_| AppError::InvalidInput("settings 锁失败".into()))?;
+        let secrets = self
+            .secrets
+            .lock()
+            .map_err(|_| AppError::InvalidInput("secrets 锁失败".into()))?;
+        let password = secrets.get(&proxy_secret_ref()).map(str::to_string);
+        Ok(ProxyConfig::new(
+            settings.proxy.url.clone(),
+            settings.proxy.username.clone(),
+            password,
+        ))
+    }
+
+    /// 托盘尚未建好时也按「关闭到托盘」处理，避免窗口被误关。
+    pub fn close_to_tray(&self) -> bool {
+        self.settings
+            .lock()
+            .map(|settings| settings.close_to_tray)
+            .unwrap_or(true)
+    }
+
     pub fn begin_skill_job(&self) -> Result<SkillJobGuard, AppError> {
         self.skill_busy
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)

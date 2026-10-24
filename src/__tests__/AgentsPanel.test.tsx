@@ -29,6 +29,9 @@ beforeEach(() => {
     storeRoot: "C:/Users/me/.ccswitchx",
     theme: "system",
     enabledAgents: ["claude", "pi"],
+    closeToTray: true,
+    proxy: { url: null, username: null },
+    skillRepos: null,
   });
 });
 

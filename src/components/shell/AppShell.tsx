@@ -7,6 +7,7 @@ import { Sidebar } from "./Sidebar";
 import { AgentsPanel } from "../../panels/AgentsPanel";
 import { HooksPanel } from "../../panels/HooksPanel";
 import { McpPanel } from "../../panels/McpPanel";
+import { NetworkPanel } from "../../panels/NetworkPanel";
 import { PromptsPanel } from "../../panels/PromptsPanel";
 import { RulesPanel } from "../../panels/RulesPanel";
 import { SessionsPanel } from "../../panels/SessionsPanel";
@@ -37,6 +38,7 @@ export function AppShell() {
     hook: <HooksPanel />,
     sessions: <SessionsPanel />,
     agents: <AgentsPanel />,
+    network: <NetworkPanel />,
     settings: <SettingsPanel theme={theme} onThemeChange={setTheme} update={update} />,
   }[pane];
 
