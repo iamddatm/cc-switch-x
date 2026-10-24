@@ -96,6 +96,7 @@ beforeEach(() => {
       },
     ],
     failures: [],
+    repos: [{ owner: "acme", name: "skills", branch: "main", enabled: true }],
   });
   vi.mocked(api.installDiscoveredSkill).mockResolvedValue({
     id: "acme-skills-pdf",
@@ -202,7 +203,7 @@ test("the unassigned filter ignores deployments of disabled agents", async () =>
   render(<SkillsPanel />);
   await screen.findByText(/还没有启用任何 Agent/);
   fireEvent.change(screen.getByLabelText("按启用状态筛选"), { target: { value: "off" } });
-  expect(screen.getByRole("button", { name: "编辑 demo" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "查看 demo" })).toBeInTheDocument();
 });
 
 test("splits the agent and status filters", async () => {
@@ -215,29 +216,29 @@ test("splits the agent and status filters", async () => {
     agentStatus({ id: "qoder", displayName: "Qoder CN", enabledSkills: ["other"] }),
   ]);
   render(<SkillsPanel />);
-  await screen.findByRole("button", { name: "编辑 demo" });
-  expect(screen.getByRole("button", { name: "编辑 other" })).toBeInTheDocument();
+  await screen.findByRole("button", { name: "查看 demo" });
+  expect(screen.getByRole("button", { name: "查看 other" })).toBeInTheDocument();
 
   // 选中具体 Agent + 已启用：只剩该 Agent 启用的项。
   fireEvent.change(screen.getByLabelText("按 Agent 筛选"), { target: { value: "qoder" } });
   fireEvent.change(screen.getByLabelText("按启用状态筛选"), { target: { value: "on" } });
-  expect(screen.queryByRole("button", { name: "编辑 demo" })).not.toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "编辑 other" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "查看 demo" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "查看 other" })).toBeInTheDocument();
 
   // 该 Agent 的未启用项。
   fireEvent.change(screen.getByLabelText("按启用状态筛选"), { target: { value: "off" } });
-  expect(screen.getByRole("button", { name: "编辑 demo" })).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "编辑 other" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "查看 demo" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "查看 other" })).not.toBeInTheDocument();
 
   // 全部 Agent 的未启用项（当前两个都被某个 Agent 启用，应该都隐藏）。
   fireEvent.change(screen.getByLabelText("按 Agent 筛选"), { target: { value: "all" } });
-  expect(screen.queryByRole("button", { name: "编辑 demo" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "编辑 other" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "查看 demo" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "查看 other" })).not.toBeInTheDocument();
 
   // 默认就是「全部 Agent + 全部状态」，回到初始时两项都在。
   fireEvent.change(screen.getByLabelText("按启用状态筛选"), { target: { value: "all" } });
-  expect(screen.getByRole("button", { name: "编辑 demo" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "编辑 other" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "查看 demo" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "查看 other" })).toBeInTheDocument();
 });
 
 test("a rejected deployment shows the reason instead of a fake success", async () => {
@@ -457,6 +458,94 @@ test("selecting rows enables batch actions scoped to the selection", async () =>
   await waitFor(() => expect(api.checkSkillUpdates).toHaveBeenCalledWith(["demo"]));
 });
 
+test("clicking a skill opens a read-only detail and can continue to edit", async () => {
+  vi.mocked(api.readAsset).mockResolvedValue(
+    "---\nname: demo\ndescription: 演示\n---\n\n# 正文\n",
+  );
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "查看 demo" }));
+
+  expect(await screen.findByRole("button", { name: "编辑" })).toBeInTheDocument();
+  expect(screen.getByText("# 正文")).toBeInTheDocument();
+  expect(screen.getByText("演示")).toBeInTheDocument();
+  expect(api.writeAsset).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+  expect(await screen.findByLabelText(/正文（SKILL.md）/)).toHaveValue("# 正文\n");
+});
+
+test("filters installed skills by multiple source repos", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([
+    {
+      assetType: "skill",
+      id: "demo",
+      name: "demo",
+      updatedAt: 1,
+      hash: "h",
+      origin: { kind: "github", repo: "acme/demo", updateAvailable: false, updatable: true },
+    },
+    {
+      assetType: "skill",
+      id: "other",
+      name: "other",
+      updatedAt: 1,
+      hash: "h",
+      origin: { kind: "github", repo: "beta/other", updateAvailable: false, updatable: true },
+    },
+  ]);
+  render(<SkillsPanel />);
+  expect(await screen.findByRole("button", { name: "查看 demo" })).toBeInTheDocument();
+  expect(screen.getByText("仓库：全部（2）")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("checkbox", { name: "acme/demo" }));
+  expect(screen.queryByRole("button", { name: "查看 demo" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "查看 other" })).toBeInTheDocument();
+  expect(screen.getByText("仓库：1/2")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("checkbox", { name: "全部仓库" }));
+  expect(screen.getByRole("button", { name: "查看 demo" })).toBeInTheDocument();
+  expect(screen.getByText("仓库：全部（2）")).toBeInTheDocument();
+});
+
+test("discovery repo filter includes repos only known from installed skills", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([
+    {
+      assetType: "skill",
+      id: "ask-ui",
+      name: "ask-ui",
+      updatedAt: 1,
+      hash: "h",
+      origin: { kind: "github", repo: "iamddatm/skills", updateAvailable: false, updatable: true },
+    },
+  ]);
+  vi.mocked(api.discoverSkills).mockResolvedValue({
+    skills: [
+      {
+        key: "iamddatm/skills@main:ask-ui",
+        name: "ask-ui",
+        description: "提问 UI",
+        relativePath: "skills/ask-ui",
+        suggestedId: "iamddatm-skills-ask-ui",
+        repo: "iamddatm/skills",
+        branch: "main",
+        installed: true,
+      },
+    ],
+    failures: [],
+    repos: [
+      { owner: "acme", name: "skills", branch: "main", enabled: true },
+      { owner: "iamddatm", name: "skills", branch: "main", enabled: true },
+    ],
+  });
+
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("tab", { name: /发现/ }));
+  expect(await screen.findByRole("checkbox", { name: "iamddatm/skills" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "仓库 · 2" })).toBeInTheDocument();
+  // 已安装页仍挂载在隐藏容器里，同名 Skill 会出现两次。
+  expect(screen.getAllByText("ask-ui").length).toBeGreaterThan(0);
+});
+
 test("source filter hides skills from other origins", async () => {
   vi.mocked(api.listAssets).mockResolvedValue([
     {
@@ -477,8 +566,8 @@ test("source filter hides skills from other origins", async () => {
     },
   ]);
   render(<SkillsPanel />);
-  await screen.findByRole("button", { name: "编辑 demo" });
+  await screen.findByRole("button", { name: "查看 demo" });
   fireEvent.change(screen.getByLabelText("按来源筛选"), { target: { value: "zip" } });
-  expect(screen.getByRole("button", { name: "编辑 demo" })).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "编辑 other" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "查看 demo" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "查看 other" })).not.toBeInTheDocument();
 });

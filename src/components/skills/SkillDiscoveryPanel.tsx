@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, Download, RefreshCw, Sparkles } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Download, RefreshCw, Sparkles } from "lucide-react";
 import { api } from "../../lib/api";
 import type {
   AgentStatus,
@@ -12,6 +12,7 @@ import type {
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { Checkbox } from "../ui/Checkbox";
+import { CheckOption, CheckPopover } from "../ui/CheckPopover";
 import { EmptyState } from "../ui/EmptyState";
 import { IconButton } from "../ui/IconButton";
 import { Notice } from "../ui/Notice";
@@ -39,21 +40,6 @@ function mergeShPage(
   if (replace) return page;
   const seen = new Set(previous.map((item) => item.key));
   return [...previous, ...page.filter((item) => !seen.has(item.key))];
-}
-
-/** 多选筛选的下拉层；用原生 details，点选不会像菜单那样立即收起。 */
-function CheckPopover({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <details className="relative shrink-0">
-      <summary className="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-control border border-border bg-surface px-2.5 text-caption text-fg-2 transition-colors hover:bg-subtle hover:text-fg-1 [&::-webkit-details-marker]:hidden">
-        {label}
-        <ChevronDown size={12} aria-hidden />
-      </summary>
-      <div className="absolute end-0 z-30 mt-1 max-h-72 w-64 overflow-auto rounded-panel border border-border bg-surface p-2 shadow-v7-md">
-        {children}
-      </div>
-    </details>
-  );
 }
 
 export function SkillDiscoveryPanel({
@@ -153,7 +139,13 @@ export function SkillDiscoveryPanel({
     void loadTrending(0);
   }, [source, loadTrending]);
 
-  const enabledRepos = useMemo(() => repos.filter((repo) => repo.enabled), [repos]);
+  // 发现结果可能来自配置仓库之外的「已安装 Skill 来源仓库」，
+  // 报告没回来之前先用配置列表兜底，避免筛选区闪烁。
+  const discoveryRepos = report?.repos ?? repos;
+  const enabledRepos = useMemo(
+    () => discoveryRepos.filter((repo) => repo.enabled),
+    [discoveryRepos],
+  );
   const selectedRepoKeys = useMemo(
     () =>
       new Set(
@@ -633,31 +625,24 @@ export function SkillDiscoveryPanel({
             <CheckPopover
               label={`仓库：${selectedRepoKeys.size}/${enabledRepos.length}`}
             >
-              <label className="flex items-center gap-2 rounded-control px-1.5 py-1 text-caption text-fg-2">
-                <Checkbox
-                  checked={
-                    enabledRepos.length > 0 &&
-                    selectedRepoKeys.size === enabledRepos.length
-                  }
-                  onChange={(event) => toggleAllRepos(event.target.checked)}
-                />
-                全部启用仓库
-              </label>
+              <CheckOption
+                label="全部启用仓库"
+                checked={
+                  enabledRepos.length > 0 &&
+                  selectedRepoKeys.size === enabledRepos.length
+                }
+                onChange={toggleAllRepos}
+              />
               {enabledRepos.map((repo) => {
                 const key = repoKey(repo);
                 return (
-                  <label
+                  <CheckOption
                     key={key}
-                    className="flex items-center gap-2 rounded-control px-1.5 py-1 text-caption text-fg-2"
-                  >
-                    <Checkbox
-                      checked={selectedRepoKeys.has(key)}
-                      onChange={(event) => toggleRepo(key, event.target.checked)}
-                    />
-                    <span className="truncate font-mono">
-                      {repo.owner}/{repo.name}
-                    </span>
-                  </label>
+                    mono
+                    label={`${repo.owner}/${repo.name}`}
+                    checked={selectedRepoKeys.has(key)}
+                    onChange={(checked) => toggleRepo(key, checked)}
+                  />
                 );
               })}
             </CheckPopover>
@@ -690,16 +675,12 @@ export function SkillDiscoveryPanel({
             </p>
           ) : (
             agents.map((agent) => (
-              <label
+              <CheckOption
                 key={agent.id}
-                className="flex items-center gap-2 rounded-control px-1.5 py-1 text-caption text-fg-2"
-              >
-                <Checkbox
-                  checked={!deselectedTargets.has(agent.id)}
-                  onChange={(event) => toggleTarget(agent.id, event.target.checked)}
-                />
-                {agent.displayName}
-              </label>
+                label={agent.displayName}
+                checked={!deselectedTargets.has(agent.id)}
+                onChange={(checked) => toggleTarget(agent.id, checked)}
+              />
             ))
           )}
         </CheckPopover>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderInput, Plus, RefreshCw, Sparkles } from "lucide-react";
 import { AgentColumnCells } from "../components/assets/AgentColumnCells";
@@ -6,6 +6,7 @@ import { AgentColumnsHeader } from "../components/assets/AgentColumnsHeader";
 import { AssetRow } from "../components/assets/AssetRow";
 import { ImportDialog } from "../components/ImportDialog";
 import { SkillBatchBar } from "../components/skills/SkillBatchBar";
+import { SkillDetailSheet } from "../components/skills/SkillDetailSheet";
 import { SkillDiscoveryPanel } from "../components/skills/SkillDiscoveryPanel";
 import { SkillInstallSheet } from "../components/skills/SkillInstallSheet";
 import { originRepoLabel, SkillSourceBadge } from "../components/skills/SkillSourceBadge";
@@ -13,6 +14,7 @@ import { SkillFormSheet } from "../components/skills/SkillFormSheet";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Checkbox } from "../components/ui/Checkbox";
+import { CheckOption, CheckPopover } from "../components/ui/CheckPopover";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Menu, type MenuItem } from "../components/ui/Menu";
@@ -46,6 +48,25 @@ function sourceKey(item: AssetSummary): string {
   return item.origin?.kind ?? (item.source ? "github" : "local");
 }
 
+/** 仓库筛选里「没有来源仓库」的桶：本地目录、无法识别来源的旧数据。 */
+const NO_REPO_KEY = "__no_repo__";
+
+function repoLabelOf(item: AssetSummary): string | null {
+  return item.origin?.repo ?? item.source ?? null;
+}
+
+function repoKeyOf(item: AssetSummary): string {
+  return repoLabelOf(item)?.toLowerCase() ?? NO_REPO_KEY;
+}
+
+/** 多选筛选的集合增删；`present` 为真时加入，返回新 Set 便于直接放进 state。 */
+function toggled(set: Set<string>, value: string, present: boolean): Set<string> {
+  const next = new Set(set);
+  if (present) next.add(value);
+  else next.delete(value);
+  return next;
+}
+
 export function SkillsPanel() {
   const { items, error, loading, refresh } = useAssets("skill");
   const { agents, enabledAgents, refresh: refreshAgents } = useAgents();
@@ -56,7 +77,9 @@ export function SkillsPanel() {
   const [agentFilter, setAgentFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "on" | "off">("all");
   const [sourceFilter, setSourceFilter] = useState("all");
+  const [deselectedRepos, setDeselectedRepos] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<Editing | null>(null);
+  const [viewing, setViewing] = useState<{ item: AssetSummary; form: SkillForm } | null>(null);
   const [loadingEdit, setLoadingEdit] = useState(false);
   const [deleting, setDeleting] = useState<AssetSummary[] | null>(null);
   const [pendingDelete, setPendingDelete] = useState(false);
@@ -101,6 +124,30 @@ export function SkillsPanel() {
   }, [checkPrompt, checkReport, consumePrompt]);
 
   const normalized = query.trim().toLowerCase();
+  const repoOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    let hasNoRepo = false;
+    for (const item of items) {
+      const repo = repoLabelOf(item);
+      if (repo) map.set(repo.toLowerCase(), repo);
+      else hasNoRepo = true;
+    }
+    const repos = [...map.entries()]
+      .sort((left, right) => left[1].localeCompare(right[1]))
+      .map(([key, label]) => ({ key, label }));
+    return {
+      repos,
+      hasNoRepo,
+      allKeys: [...repos.map((repo) => repo.key), ...(hasNoRepo ? [NO_REPO_KEY] : [])],
+    };
+  }, [items]);
+  const selectedRepoKeys = useMemo(
+    () => new Set(repoOptions.allKeys.filter((key) => !deselectedRepos.has(key))),
+    [repoOptions, deselectedRepos],
+  );
+  const allReposSelected =
+    repoOptions.allKeys.length > 0 && selectedRepoKeys.size === repoOptions.allKeys.length;
+
   const statusAgents =
     agentFilter === "all"
       ? agentsForType
@@ -116,6 +163,7 @@ export function SkillsPanel() {
       return false;
     }
     if (sourceFilter !== "all" && sourceKey(item) !== sourceFilter) return false;
+    if (!selectedRepoKeys.has(repoKeyOf(item))) return false;
     if (statusFilter === "all") return true;
     const enabled = statusAgents.some((agent) => enabledFor(agent, "skill").includes(item.id));
     return statusFilter === "on" ? enabled : !enabled;
@@ -133,12 +181,7 @@ export function SkillsPanel() {
   const updatableSelected = selectedItems.filter((item) => item.origin?.updatable).length;
 
   const toggleSelected = (id: string, checked: boolean) => {
-    setSelected((previous) => {
-      const next = new Set(previous);
-      if (checked) next.add(id);
-      else next.delete(id);
-      return next;
-    });
+    setSelected((previous) => toggled(previous, id, checked));
   };
 
   const toggleAllVisible = () => {
@@ -153,17 +196,47 @@ export function SkillsPanel() {
     });
   };
 
-  const openEdit = async (item: AssetSummary) => {
+  const toggleRepo = (key: string, checked: boolean) => {
+    // 存的是「已排除」集合，勾选对应移出。
+    setDeselectedRepos((previous) => toggled(previous, key, !checked));
+  };
+
+  const toggleAllRepos = (checked: boolean) => {
+    setDeselectedRepos(checked ? new Set() : new Set(repoOptions.allKeys));
+  };
+
+  // 查看与编辑都要先读真源；失败时统一报错并返回 null。
+  const readSkill = async (item: AssetSummary): Promise<string | null> => {
     setLoadingEdit(true);
     setActionError(null);
     try {
-      const text = await api.readAsset("skill", item.id);
-      setEditing({ mode: "edit", id: item.id, form: parseSkill(text) });
+      return await api.readAsset("skill", item.id);
     } catch (e) {
       setActionError(String(e));
+      return null;
     } finally {
       setLoadingEdit(false);
     }
+  };
+
+  const openView = async (item: AssetSummary) => {
+    const text = await readSkill(item);
+    if (text === null) return;
+    setEditing(null);
+    setViewing({ item, form: parseSkill(text) });
+  };
+
+  const openEdit = async (item: AssetSummary) => {
+    const text = await readSkill(item);
+    if (text === null) return;
+    setViewing(null);
+    setEditing({ mode: "edit", id: item.id, form: parseSkill(text) });
+  };
+
+  const editViewed = () => {
+    if (!viewing) return;
+    setEditing({ mode: "edit", id: viewing.item.id, form: viewing.form });
+    setViewing(null);
   };
 
   const create = () => {
@@ -289,7 +362,10 @@ export function SkillsPanel() {
   };
 
   const rowMenuItems = (item: AssetSummary): MenuItem[] => {
-    const menu: MenuItem[] = [{ label: "编辑", onSelect: () => void openEdit(item) }];
+    const menu: MenuItem[] = [
+      { label: "查看", onSelect: () => void openView(item) },
+      { label: "编辑", onSelect: () => void openEdit(item) },
+    ];
     if (item.origin?.updatable) {
       menu.push(
         { label: "检查更新", onSelect: () => void checkUpdates([item.id]) },
@@ -412,52 +488,83 @@ export function SkillsPanel() {
       </div>
 
       <div className={view === "installed" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-        <div className="flex h-12 shrink-0 items-center gap-3 px-6">
+        <div className="flex h-12 shrink-0 items-center gap-2 px-6">
           <SearchField
-          className="w-[280px]"
-          value={query}
-          onValueChange={setQuery}
-          placeholder="搜索名称、描述、来源或仓库…"
-          ariaLabel="搜索 Skill"
-        />
-        <Select
-          aria-label="按 Agent 筛选"
-          value={agentFilter}
-          onChange={(event) => setAgentFilter(event.target.value)}
-        >
-          <option value="all">全部 Agent</option>
-          {agentsForType.map((agent) => (
-            <option key={agent.id} value={agent.id}>
-              {agent.displayName}
-            </option>
-          ))}
-        </Select>
-        <Select
-          aria-label="按启用状态筛选"
-          value={statusFilter}
-          onChange={(event) =>
-            setStatusFilter(event.target.value as "all" | "on" | "off")
-          }
-        >
-          <option value="all">全部状态</option>
-          <option value="on">已启用</option>
-          <option value="off">未启用</option>
-        </Select>
-        <Select
-          aria-label="按来源筛选"
-          value={sourceFilter}
-          onChange={(event) => setSourceFilter(event.target.value)}
-        >
-          {SOURCE_FILTERS.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </Select>
-        <span className="ml-auto text-caption text-fg-3">
-          {visible.length} / {items.length} 个 Skill
-        </span>
-      </div>
+            className="w-[240px]"
+            value={query}
+            onValueChange={setQuery}
+            placeholder="搜索名称、描述、来源或仓库…"
+            ariaLabel="搜索 Skill"
+          />
+          {repoOptions.allKeys.length > 0 && (
+            <CheckPopover
+              label={
+                allReposSelected
+                  ? `仓库：全部（${repoOptions.allKeys.length}）`
+                  : `仓库：${selectedRepoKeys.size}/${repoOptions.allKeys.length}`
+              }
+            >
+              <CheckOption
+                label="全部仓库"
+                checked={allReposSelected}
+                onChange={toggleAllRepos}
+              />
+              {repoOptions.repos.map((repo) => (
+                <CheckOption
+                  key={repo.key}
+                  mono
+                  label={repo.label}
+                  checked={selectedRepoKeys.has(repo.key)}
+                  onChange={(checked) => toggleRepo(repo.key, checked)}
+                />
+              ))}
+              {repoOptions.hasNoRepo && (
+                <CheckOption
+                  label="无来源仓库"
+                  checked={selectedRepoKeys.has(NO_REPO_KEY)}
+                  onChange={(checked) => toggleRepo(NO_REPO_KEY, checked)}
+                />
+              )}
+            </CheckPopover>
+          )}
+          <Select
+            aria-label="按 Agent 筛选"
+            value={agentFilter}
+            onChange={(event) => setAgentFilter(event.target.value)}
+          >
+            <option value="all">全部 Agent</option>
+            {agentsForType.map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {agent.displayName}
+              </option>
+            ))}
+          </Select>
+          <Select
+            aria-label="按启用状态筛选"
+            value={statusFilter}
+            onChange={(event) =>
+              setStatusFilter(event.target.value as "all" | "on" | "off")
+            }
+          >
+            <option value="all">全部状态</option>
+            <option value="on">已启用</option>
+            <option value="off">未启用</option>
+          </Select>
+          <Select
+            aria-label="按来源筛选"
+            value={sourceFilter}
+            onChange={(event) => setSourceFilter(event.target.value)}
+          >
+            {SOURCE_FILTERS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
+          <span className="ml-auto text-caption text-fg-3">
+            {visible.length} / {items.length} 个 Skill
+          </span>
+        </div>
 
       <div className="min-h-0 flex-1 overflow-auto px-6 pb-5">
         {(error || actionError || checkError) && (
@@ -584,7 +691,6 @@ export function SkillsPanel() {
                   <AssetRow
                     key={item.id}
                     title={item.name}
-                    subtitle={item.id}
                     description={detail || undefined}
                     leading={
                       <Checkbox
@@ -623,7 +729,8 @@ export function SkillsPanel() {
                         : undefined
                     }
                     footerTone="warning"
-                    onOpen={() => void openEdit(item)}
+                    openLabel={`查看 ${item.name}`}
+                    onOpen={() => void openView(item)}
                   />
                 );
               })}
@@ -642,6 +749,15 @@ export function SkillsPanel() {
             onShowInstalled={() => setView("installed")}
           />
         </div>
+      )}
+
+      {viewing && (
+        <SkillDetailSheet
+          item={viewing.item}
+          form={viewing.form}
+          onEdit={editViewed}
+          onClose={() => setViewing(null)}
+        />
       )}
 
       {editing && (

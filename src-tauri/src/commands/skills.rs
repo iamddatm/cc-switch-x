@@ -177,7 +177,9 @@ pub async fn discover_available_skills(
     let proxy = state.proxy_config()?;
     run_blocking(move || {
         let fetcher = HttpFetcher::new(Some(&proxy))?;
-        Ok(skill_discovery::discover(&store, &fetcher, &repos))
+        Ok(skill_discovery::discover_with_installed(
+            &store, &fetcher, &repos,
+        ))
     })
     .await
 }

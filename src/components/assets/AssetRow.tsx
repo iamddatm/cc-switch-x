@@ -13,6 +13,8 @@ export interface AssetRowProps {
   agentCells: ReactNode;
   actions: ReactNode;
   onOpen: () => void;
+  /** 整行按钮的无障碍名称；默认「编辑 xxx」，只读查看的页面可改成「查看 xxx」。 */
+  openLabel?: string;
   /** 行首选择框等交互元素；放在 z-10 层，避免被整行透明按钮拦截。 */
   leading?: ReactNode;
   selected?: boolean;
@@ -35,6 +37,7 @@ export function AssetRow({
   agentCells,
   actions,
   onOpen,
+  openLabel,
   leading,
   selected = false,
   error,
@@ -53,7 +56,7 @@ export function AssetRow({
       >
         <button
           type="button"
-          aria-label={`编辑 ${title}`}
+          aria-label={openLabel ?? `编辑 ${title}`}
           onClick={onOpen}
           className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-offset-[-2px]"
         />

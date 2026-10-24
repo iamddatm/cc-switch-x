@@ -90,6 +90,8 @@ export interface DiscoverableSkill {
 export interface SkillDiscoveryReport {
   skills: DiscoverableSkill[];
   failures: SkillRepoFailure[];
+  /** 本次发现使用的仓库：配置仓库 + 已安装 Skill 的来源仓库（含已停用项）。 */
+  repos: SkillRepo[];
 }
 
 export interface DiscoveredSkillInstallInput {
