@@ -35,6 +35,8 @@ pub enum ImportError {
     UnsupportedTransport(String),
     #[error("索引写入失败：{0}")]
     Index(#[from] crate::index::IndexError),
+    #[error("元数据写入失败：{0}")]
+    Meta(#[from] crate::domain::skill_meta::SkillMetaError),
 }
 
 /// 打开的导入源。SnapshotDir 要把 `db.sql` 还原进临时库，临时目录必须活得比连接久，

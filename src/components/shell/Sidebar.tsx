@@ -24,7 +24,15 @@ const ITEMS: { pane: Pane; label: string; icon: LucideIcon }[] = [
   { pane: "settings", label: "Settings", icon: Settings },
 ];
 
-export function Sidebar({ pane, onSelect }: { pane: Pane; onSelect: (pane: Pane) => void }) {
+export function Sidebar({
+  pane,
+  onSelect,
+  hasUpdate = false,
+}: {
+  pane: Pane;
+  onSelect: (pane: Pane) => void;
+  hasUpdate?: boolean;
+}) {
   return (
     <nav className="flex w-[200px] shrink-0 flex-col border-r border-border bg-sidebar">
       <div className="flex h-[52px] shrink-0 items-center gap-2 border-b border-border px-4">
@@ -43,6 +51,9 @@ export function Sidebar({ pane, onSelect }: { pane: Pane; onSelect: (pane: Pane)
                 type="button"
                 onClick={() => onSelect(item.pane)}
                 aria-current={active ? "page" : undefined}
+                title={
+                  item.pane === "settings" && hasUpdate ? "Settings（有可用更新）" : undefined
+                }
                 className={`flex h-8 w-full items-center gap-2.5 rounded-control px-2.5 text-left text-body transition-colors duration-150 ${
                   active
                     ? "bg-selected font-medium text-fg-1"
@@ -55,6 +66,12 @@ export function Sidebar({ pane, onSelect }: { pane: Pane; onSelect: (pane: Pane)
                   className={active ? "text-action-text" : "text-fg-3"}
                 />
                 <span className="truncate">{item.label}</span>
+                {item.pane === "settings" && hasUpdate && (
+                  <span
+                    className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-action"
+                    aria-hidden
+                  />
+                )}
               </button>
             </li>
           );

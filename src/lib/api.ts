@@ -13,7 +13,15 @@ import type {
   ResolveAction,
   ResolveOutcome,
   ResumeInfo,
+  InstallSelection,
   ScanReport,
+  SkillBatchReport,
+  SkillCheckReport,
+  SkillInstallReport,
+  SkillSourceInput,
+  SkillSourcePreview,
+  SkillUninstallReport,
+  SkillUpdateReport,
   SessionDetail,
   SessionMatch,
   SessionProviderStatus,
@@ -21,6 +29,7 @@ import type {
   SessionSearchHit,
   SessionSummary,
   Theme,
+  UpdateInfo,
 } from "../types";
 
 export const api = {
@@ -31,11 +40,35 @@ export const api = {
   deleteAsset: (assetType: AssetType, id: string) =>
     invoke<boolean>("delete_asset", { assetType, id }),
   importSkillDir: (source: string) => invoke<AssetSummary>("import_skill_dir", { source }),
+  previewSkillSource: (input: SkillSourceInput) =>
+    invoke<SkillSourcePreview>("preview_skill_source", { input }),
+  installSkill: (
+    input: SkillSourceInput,
+    stagingId: string | null,
+    selections: InstallSelection[],
+    policy: ConflictPolicy,
+  ) =>
+    invoke<SkillInstallReport>("install_skill", {
+      input,
+      stagingId,
+      selections,
+      policy,
+    }),
+  checkSkillUpdates: (ids?: string[]) =>
+    invoke<SkillCheckReport>("check_skill_updates", { ids }),
+  updateSkills: (ids: string[]) =>
+    invoke<SkillUpdateReport>("update_skills", { ids }),
+  uninstallSkills: (ids: string[]) =>
+    invoke<SkillUninstallReport>("uninstall_skills", { ids }),
+  setSkillsEnabled: (ids: string[], agentId: string, enabled: boolean) =>
+    invoke<SkillBatchReport>("set_skills_enabled", { ids, agentId, enabled }),
   getSettings: () => invoke<AppSettings>("get_settings"),
   setTheme: (theme: Theme) => invoke<AppSettings>("set_theme", { theme }),
   setStoreRoot: (storeRoot: string) => invoke<boolean>("set_store_root", { storeRoot }),
   setEnabledAgents: (agentIds: string[]) =>
     invoke<AppSettings>("set_enabled_agents", { agentIds }),
+  checkAppUpdate: () => invoke<UpdateInfo | null>("check_app_update"),
+  installAppUpdate: () => invoke<boolean>("install_app_update"),
 
   listAgents: () => invoke<AgentStatus[]>("list_agents"),
   importPreview: () => invoke<ImportPreview>("import_preview"),

@@ -1,0 +1,187 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name }}-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows-x64:
+    name: Build Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check release version and updater config
+        shell: bash
+        run: node scripts/check-release-version.mjs
+
+      - name: Run frontend tests
+        run: pnpm test
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Run Rust tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Build signed NSIS installer
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            throw '缺少 TAURI_SIGNING_PRIVATE_KEY secret，无法生成 updater 签名'
+          }
+          pnpm tauri build --ci --bundles nsis
+
+      - name: Verify lockfile is unchanged
+        shell: bash
+        run: git diff --exit-code -- src-tauri/Cargo.lock
+
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $conf = Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
+          $version = $conf.version
+          $installer = Get-ChildItem 'src-tauri/target/release/bundle/nsis' -Filter '*.exe' |
+            Where-Object { $_.Name -notlike '*uninstall*' } |
+            Select-Object -First 1
+          if (-not $installer) { throw '未找到 NSIS 安装包' }
+          $sig = "$($installer.FullName).sig"
+          if (-not (Test-Path $sig)) { throw '未找到 updater 签名文件' }
+
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          $asset = "CC-Switch-X_${version}_x64-setup.exe"
+          Copy-Item $installer.FullName "release-assets/$asset"
+          Copy-Item $sig "release-assets/$asset.sig"
+
+          node scripts/make-latest-json.mjs `
+            --installer "release-assets/$asset" `
+            --signature "release-assets/$asset.sig" `
+            --tag "v$version" `
+            --notes-file "docs/release-notes/v$version.md" `
+            --output "release-assets/latest.json"
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-windows-x64
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build-windows-x64
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets-windows-x64
+          path: release-assets
+
+      - name: Publish release as latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，拒绝覆盖已发布版本" >&2
+            exit 1
+          fi
+          gh release create "$TAG" release-assets/* \
+            --draft \
+            --title "CC Switch X $TAG" \
+            --notes-file "docs/release-notes/$TAG.md"
+          gh release edit "$TAG" --draft=false --latest
+
+      - name: Smoke test update manifest
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          manifest_url="https://github.com/$REPO/releases/latest/download/latest.json"
+          ok=0
+          for attempt in $(seq 1 30); do
+            if curl -fsSL "$manifest_url" -o /tmp/latest.json; then
+              if VERSION="$version" node -e '
+                const fs = require("fs");
+                const manifest = JSON.parse(fs.readFileSync("/tmp/latest.json", "utf8"));
+                const platform = manifest.platforms?.["windows-x86_64"];
+                if (manifest.version !== process.env.VERSION) process.exit(1);
+                if (!platform?.url || !platform?.signature) process.exit(1);
+              '; then
+                ok=1
+                break
+              fi
+            fi
+            sleep 3
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "latest.json 未在预期时间内指向 $version" >&2
+            cat /tmp/latest.json 2>/dev/null || true
+            exit 1
+          fi
+          VERSION="$version" node -e '
+            const fs = require("fs");
+            const manifest = JSON.parse(fs.readFileSync("/tmp/latest.json", "utf8"));
+            console.log(`manifest ok: ${manifest.platforms["windows-x86_64"].url}`);
+          '
+          asset_url=$(node -e '
+            const fs = require("fs");
+            const manifest = JSON.parse(fs.readFileSync("/tmp/latest.json", "utf8"));
+            process.stdout.write(manifest.platforms["windows-x86_64"].url);
+          ')
+          curl -fsSIL "$asset_url" >/dev/null

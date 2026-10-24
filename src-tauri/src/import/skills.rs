@@ -1,11 +1,11 @@
+use crate::domain::skill_meta::{read_meta, write_meta, SkillMeta, SkillSourceKind};
 use crate::domain::{is_known_agent, AssetSummary, AssetType};
 use crate::import::safe_asset_id;
 use crate::import::source::ImportError;
 use crate::import::update_matrix;
 use crate::index::{sha256_hex, Index};
-use crate::store::{atomic::write_atomic, copy_dir, Store};
+use crate::store::{copy_dir, Store};
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -26,19 +26,8 @@ struct SkillRow {
     repo_branch: Option<String>,
     readme_url: Option<String>,
     content_hash: Option<String>,
+    installed_at: Option<i64>,
     enabled: Vec<(String, bool)>,
-}
-
-/// 来源信息写在 skill 目录里的 `.meta.json`，不进 `agents/<agent>.json`（spec 4.2）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SkillMeta {
-    repo_owner: Option<String>,
-    repo_name: Option<String>,
-    repo_branch: Option<String>,
-    readme_url: Option<String>,
-    source_directory: String,
-    content_hash: Option<String>,
 }
 
 fn read_rows(conn: &Connection) -> Result<Vec<SkillRow>, ImportError> {
@@ -62,6 +51,7 @@ fn read_rows(conn: &Connection) -> Result<Vec<SkillRow>, ImportError> {
         "repo_branch",
         "readme_url",
         "content_hash",
+        "installed_at",
     ];
     let sql = format!(
         "SELECT {} FROM skills ORDER BY id",
@@ -92,6 +82,7 @@ fn read_rows(conn: &Connection) -> Result<Vec<SkillRow>, ImportError> {
                 repo_branch: row.get(5)?,
                 readme_url: row.get(6)?,
                 content_hash: row.get(7)?,
+                installed_at: row.get(8)?,
                 enabled,
             })
         })?
@@ -100,11 +91,6 @@ fn read_rows(conn: &Connection) -> Result<Vec<SkillRow>, ImportError> {
         out.push(row);
     }
     Ok(out)
-}
-
-fn read_meta(target: &Path) -> Option<SkillMeta> {
-    let text = std::fs::read_to_string(target.join(".meta.json")).ok()?;
-    serde_json::from_str(&text).ok()
 }
 
 pub fn run(
@@ -137,18 +123,24 @@ pub fn run(
             report.unchanged += 1;
         } else {
             copy_dir(&source, &target)?;
+            let now = chrono::Utc::now().timestamp_millis();
             let meta = SkillMeta {
                 repo_owner: row.repo_owner.clone(),
                 repo_name: row.repo_name.clone(),
                 repo_branch: row.repo_branch.clone(),
                 readme_url: row.readme_url.clone(),
-                source_directory: row.directory.clone(),
+                source_directory: Some(row.directory.clone()),
                 content_hash: row.content_hash.clone(),
+                source_kind: Some(SkillSourceKind::CcSwitch),
+                installed_at: Some(
+                    row.installed_at
+                        .map(|seconds| seconds.saturating_mul(1000))
+                        .unwrap_or(now),
+                ),
+                updated_at: Some(now),
+                ..Default::default()
             };
-            write_atomic(
-                &target.join(".meta.json"),
-                &serde_json::to_vec_pretty(&meta)?,
-            )?;
+            write_meta(&target, &meta)?;
             report.imported += 1;
         }
         let skill_bytes = std::fs::read(target.join("SKILL.md"))?;
@@ -167,6 +159,7 @@ pub fn run(
             mtime: None,
             transport: None,
             size: None,
+            origin: None,
         })?;
 
         for (app, on) in &row.enabled {

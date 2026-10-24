@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import { open } from "@tauri-apps/plugin-dialog";
 import { SkillsPanel } from "../panels/SkillsPanel";
@@ -13,6 +13,12 @@ vi.mock("../lib/api", () => ({
     importSkillDir: vi.fn(),
     listAgents: vi.fn(),
     setSkillEnabled: vi.fn(),
+    previewSkillSource: vi.fn(),
+    installSkill: vi.fn(),
+    checkSkillUpdates: vi.fn(),
+    updateSkills: vi.fn(),
+    uninstallSkills: vi.fn(),
+    setSkillsEnabled: vi.fn(),
   },
 }));
 
@@ -45,6 +51,24 @@ beforeEach(() => {
     hash: "h2",
   });
   vi.mocked(open).mockResolvedValue(null);
+  vi.mocked(api.checkSkillUpdates).mockResolvedValue({
+    checkedAt: Date.now(),
+    updates: [],
+    upToDate: [],
+    skipped: [],
+    repoFailures: [],
+    skillFailures: [],
+  });
+  vi.mocked(api.updateSkills).mockResolvedValue({ outcomes: [] });
+  vi.mocked(api.uninstallSkills).mockResolvedValue({ outcomes: [] });
+  vi.mocked(api.setSkillsEnabled).mockResolvedValue({ ok: [], failed: [] });
+  vi.mocked(api.previewSkillSource).mockResolvedValue({
+    kind: "local",
+    stagingId: null,
+    candidates: [],
+    warnings: [],
+  });
+  vi.mocked(api.installSkill).mockResolvedValue({ outcomes: [] });
 });
 
 test("shows the link kind the backend actually used", async () => {
@@ -125,4 +149,108 @@ test("a rejected deployment shows the reason instead of a fake success", async (
   expect(await screen.findByText(/别人建的目录/)).toBeInTheDocument();
   // 失败时不能再显示一条假的「实测：xxx」
   expect(screen.queryByText(/^实测：/)).not.toBeInTheDocument();
+});
+
+test("shows the source repo and update badge from metadata", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([
+    {
+      assetType: "skill",
+      id: "demo",
+      name: "demo",
+      updatedAt: 1,
+      hash: "h",
+      origin: {
+        kind: "cc-switch",
+        repo: "acme/demo",
+        branch: "main",
+        updateAvailable: true,
+        updatable: true,
+        lastCheckedAt: Date.now(),
+      },
+    },
+  ]);
+  render(<SkillsPanel />);
+  expect(await screen.findByText("acme/demo@main")).toBeInTheDocument();
+  expect(screen.getByText("可更新")).toBeInTheDocument();
+  expect(screen.getByText(/检查于/)).toBeInTheDocument();
+});
+
+test("checks all skills and opens the update confirmation", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([
+    {
+      assetType: "skill",
+      id: "demo",
+      name: "demo",
+      updatedAt: 1,
+      hash: "h",
+      origin: { kind: "cc-switch", repo: "acme/demo", updateAvailable: false, updatable: true },
+    },
+  ]);
+  vi.mocked(api.checkSkillUpdates).mockResolvedValue({
+    checkedAt: Date.now(),
+    updates: [
+      { id: "demo", name: "demo", currentHash: "h", remoteHash: "h2", missingLocal: false },
+    ],
+    upToDate: [],
+    skipped: [],
+    repoFailures: [],
+    skillFailures: [],
+  });
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
+  expect(await screen.findByText(/发现 1 个可更新/)).toBeInTheDocument();
+  expect(api.checkSkillUpdates).toHaveBeenCalledWith(undefined);
+
+  fireEvent.click(screen.getByRole("button", { name: "更新 1 个" }));
+  const dialog = await screen.findByRole("alertdialog");
+  fireEvent.click(within(dialog).getByRole("button", { name: "开始更新" }));
+  await waitFor(() => expect(api.updateSkills).toHaveBeenCalledWith(["demo"]));
+});
+
+test("deleting a skill goes through uninstallSkills and mentions the backup", async () => {
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "demo 的更多操作" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "删除" }));
+  const dialog = await screen.findByRole("alertdialog");
+  expect(within(dialog).getByText(/backups\/skills/)).toBeInTheDocument();
+  fireEvent.click(within(dialog).getByRole("button", { name: "删除 Skill" }));
+  await waitFor(() => expect(api.uninstallSkills).toHaveBeenCalledWith(["demo"]));
+});
+
+test("selecting rows enables batch actions scoped to the selection", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([
+    { assetType: "skill", id: "demo", name: "demo", updatedAt: 1, hash: "h" },
+    { assetType: "skill", id: "other", name: "other", updatedAt: 1, hash: "h" },
+  ]);
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("checkbox", { name: "选择 demo" }));
+  const bar = screen.getByText("已选 1 个").parentElement as HTMLElement;
+  fireEvent.click(within(bar).getByRole("button", { name: "检查更新" }));
+  await waitFor(() => expect(api.checkSkillUpdates).toHaveBeenCalledWith(["demo"]));
+});
+
+test("source filter hides skills from other origins", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([
+    {
+      assetType: "skill",
+      id: "demo",
+      name: "demo",
+      updatedAt: 1,
+      hash: "h",
+      origin: { kind: "zip", updateAvailable: false, updatable: false },
+    },
+    {
+      assetType: "skill",
+      id: "other",
+      name: "other",
+      updatedAt: 1,
+      hash: "h",
+      origin: { kind: "local", updateAvailable: false, updatable: false },
+    },
+  ]);
+  render(<SkillsPanel />);
+  await screen.findByRole("button", { name: "编辑 demo" });
+  fireEvent.change(screen.getByLabelText("按来源筛选"), { target: { value: "zip" } });
+  expect(screen.getByRole("button", { name: "编辑 demo" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "编辑 other" })).not.toBeInTheDocument();
 });

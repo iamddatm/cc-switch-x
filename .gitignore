@@ -10,6 +10,12 @@ local/
 backups/
 logs/
 state/
+# 发布产物、updater 签名私钥与本地联调配置
+release-assets/
+*.key
+*.key.pub
+*.key.password
+src-tauri/tauri.updater-local.conf.json
 # Agy 会话夹具复刻真实目录（.system_generated/logs/），排除项要穿透上面的 logs/ 规则
 !src-tauri/tests/fixtures/sessions/agy/**/logs/
 !src-tauri/tests/fixtures/sessions/agy/**/logs/**

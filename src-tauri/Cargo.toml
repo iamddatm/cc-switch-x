@@ -27,3 +27,8 @@ tempfile = "3"
 zstd = "0.13"
 # 会话 Markdown 导出用系统保存对话框选路径
 tauri-plugin-dialog = "2"
+# 应用内更新：检查、下载、安装都走后端，前端不直接暴露插件命令
+tauri-plugin-updater = "2.14"
+# Skill 来源安装/更新：GitHub 归档走阻塞客户端，放进 spawn_blocking，避免占用 UI 线程
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "socks"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -1,21 +1,12 @@
+use crate::domain::skill_meta::{read_meta, write_meta, SkillMeta, SkillSourceKind};
 use crate::domain::{describe, display_name, parse_and_validate, AssetSummary, AssetType};
 use crate::error::AppError;
 use crate::index::{sha256_hex, Index};
 use crate::store::{copy_dir, Store};
-use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 pub struct AssetService;
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SkillMeta {
-    #[serde(default, alias = "repo_owner")]
-    repo_owner: Option<String>,
-    #[serde(default, alias = "repo_name")]
-    repo_name: Option<String>,
-}
 
 impl AssetService {
     /// 列表先查索引，再读磁盘补齐描述/来源/mtime。索引仍是可随时重建的派生缓存，
@@ -64,6 +55,7 @@ impl AssetService {
             mtime: None,
             transport: None,
             size: None,
+            origin: None,
         };
         enrich(store, &mut summary);
         index.upsert(&summary)?;
@@ -109,18 +101,30 @@ impl AssetService {
             )));
         }
         copy_dir(source, &target)?;
+        let now = chrono::Utc::now().timestamp_millis();
+        write_meta(
+            &target,
+            &SkillMeta {
+                source_kind: Some(SkillSourceKind::Local),
+                source_url: Some(source.display().to_string()),
+                installed_at: Some(now),
+                updated_at: Some(now),
+                ..Default::default()
+            },
+        )?;
         let bytes = std::fs::read(target.join("SKILL.md"))?;
         let mut summary = AssetSummary {
             asset_type: AssetType::Skill,
             id: id.clone(),
             name: id,
-            updated_at: chrono::Utc::now().timestamp_millis(),
+            updated_at: now,
             hash: sha256_hex(&bytes),
             description: None,
             source: None,
             mtime: None,
             transport: None,
             size: None,
+            origin: None,
         };
         enrich(store, &mut summary);
         index.upsert(&summary)?;
@@ -165,20 +169,12 @@ fn enrich(store: &Store, summary: &mut AssetSummary) {
     summary.description = details.description;
     summary.transport = details.transport;
     if summary.asset_type == AssetType::Skill {
-        summary.source = skill_source(store, &summary.id);
-    }
-}
-
-fn skill_source(store: &Store, id: &str) -> Option<String> {
-    let dir = store.entry_path(AssetType::Skill, id).ok()?;
-    let text = std::fs::read_to_string(dir.join(".meta.json")).ok()?;
-    let meta: SkillMeta = serde_json::from_str(&text).ok()?;
-    match (meta.repo_owner, meta.repo_name) {
-        (Some(owner), Some(name)) if !owner.trim().is_empty() && !name.trim().is_empty() => {
-            Some(format!("{owner}/{name}"))
-        }
-        (_, Some(name)) if !name.trim().is_empty() => Some(name),
-        _ => None,
+        let meta = store
+            .entry_path(AssetType::Skill, &summary.id)
+            .ok()
+            .and_then(|dir| read_meta(&dir));
+        summary.source = meta.as_ref().and_then(SkillMeta::repo_slug);
+        summary.origin = meta.as_ref().map(SkillMeta::origin);
     }
 }
 

@@ -13,6 +13,9 @@ export interface AssetRowProps {
   agentCells: ReactNode;
   actions: ReactNode;
   onOpen: () => void;
+  /** 行首选择框等交互元素；放在 z-10 层，避免被整行透明按钮拦截。 */
+  leading?: ReactNode;
+  selected?: boolean;
   error?: string | null;
   footer?: string | null;
   footerTone?: "muted" | "warning";
@@ -32,6 +35,8 @@ export function AssetRow({
   agentCells,
   actions,
   onOpen,
+  leading,
+  selected = false,
   error,
   footer,
   footerTone = "muted",
@@ -39,7 +44,13 @@ export function AssetRow({
 }: AssetRowProps) {
   return (
     <li className="border-t border-border first:border-t-0">
-      <div className={cn("relative flex h-14 items-center hover:bg-subtle", active && "bg-subtle")}>
+      <div
+        className={cn(
+          "relative flex h-14 items-center hover:bg-subtle",
+          active && "bg-subtle",
+          selected && "bg-action-soft",
+        )}
+      >
         <button
           type="button"
           aria-label={`编辑 ${title}`}
@@ -47,6 +58,9 @@ export function AssetRow({
           className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-offset-[-2px]"
         />
         <div className="pointer-events-none relative z-10 flex min-w-0 flex-1 items-center gap-2 px-4">
+          {leading && (
+            <div className="pointer-events-auto flex shrink-0 items-center">{leading}</div>
+          )}
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-center gap-2">
               <span className="min-w-0 shrink truncate text-body font-medium text-fg-1">

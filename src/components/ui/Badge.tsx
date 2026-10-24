@@ -15,13 +15,15 @@ export interface BadgeProps {
   tone?: BadgeTone;
   mono?: boolean;
   className?: string;
+  title?: string;
   children: ReactNode;
 }
 
 /** 18px 胶囊标签，和 cc-switch 的 badge 密度一致。 */
-export function Badge({ tone = "neutral", mono = false, className, children }: BadgeProps) {
+export function Badge({ tone = "neutral", mono = false, className, title, children }: BadgeProps) {
   return (
     <span
+      title={title}
       className={cn(
         "inline-flex h-[18px] max-w-full items-center rounded-full border px-2 text-badge leading-none",
         mono && "font-mono",

@@ -9,6 +9,7 @@ pub mod rule;
 pub mod secret;
 pub mod session;
 pub mod skill;
+pub mod skill_meta;
 pub mod subagent;
 
 /// 列表行需要的、不落索引的可选元数据。

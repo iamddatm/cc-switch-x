@@ -6,3 +6,5 @@ pub mod import;
 pub mod scan;
 pub mod sessions;
 pub mod settings;
+pub mod skill_source;
+pub mod skill_update;

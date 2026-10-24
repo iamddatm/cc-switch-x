@@ -424,6 +424,7 @@ fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssetSummary> {
         mtime: None,
         transport: None,
         size: None,
+        origin: None,
     })
 }
 

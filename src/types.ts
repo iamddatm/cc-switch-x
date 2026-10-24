@@ -18,6 +18,25 @@ export interface AssetSummary {
   size?: number | null;
   /** MCP 传输方式。 */
   transport?: string | null;
+  /** Skill 的来源与更新状态。 */
+  origin?: SkillOrigin | null;
+}
+
+export type SkillSourceKind = "github" | "zip" | "local" | "cc-switch";
+
+export interface SkillOrigin {
+  kind: SkillSourceKind;
+  repo?: string | null;
+  branch?: string | null;
+  sourceUrl?: string | null;
+  readmeUrl?: string | null;
+  installedAt?: number | null;
+  updatedAt?: number | null;
+  lastCheckedAt?: number | null;
+  updateAvailable: boolean;
+  lastCheckError?: string | null;
+  /** 有 owner/repo 才能从上游检查更新。 */
+  updatable: boolean;
 }
 
 export interface AppSettings {
@@ -187,6 +206,114 @@ export interface ImportSummary {
 
 export type ConflictPolicy = "skip" | "overwrite" | "keepBoth";
 
+export type SkillSourceInput =
+  | { kind: "github"; repo: string; branch?: string | null }
+  | { kind: "zip"; path: string }
+  | { kind: "directory"; path: string };
+
+export interface SkillCandidate {
+  relativePath: string;
+  name: string;
+  description?: string | null;
+  suggestedId: string;
+  exists: boolean;
+}
+
+export interface SkillSourcePreview {
+  kind: SkillSourceKind;
+  repo?: string | null;
+  branch?: string | null;
+  stagingId?: string | null;
+  candidates: SkillCandidate[];
+  warnings: string[];
+}
+
+export interface InstallSelection {
+  relativePath: string;
+  id: string;
+}
+
+export interface SkillInstallOutcome {
+  id: string;
+  name: string;
+  status: "installed" | "overwritten" | "skipped" | "failed";
+  backupPath?: string | null;
+  error?: string | null;
+  warnings: string[];
+}
+
+export interface SkillInstallReport {
+  outcomes: SkillInstallOutcome[];
+}
+
+export interface SkillItemFailure {
+  id: string;
+  error: string;
+}
+
+export interface SkillSkipped {
+  id: string;
+  reason: string;
+}
+
+export interface SkillUpdateInfo {
+  id: string;
+  name: string;
+  currentHash?: string | null;
+  remoteHash: string;
+  missingLocal: boolean;
+}
+
+export interface SkillRepoFailure {
+  repo: string;
+  branch?: string | null;
+  error: string;
+}
+
+export interface SkillCheckReport {
+  checkedAt: number;
+  updates: SkillUpdateInfo[];
+  upToDate: string[];
+  skipped: SkillSkipped[];
+  repoFailures: SkillRepoFailure[];
+  skillFailures: SkillItemFailure[];
+}
+
+export interface SkillUpdateOutcome {
+  id: string;
+  name: string;
+  status: "updated" | "upToDate" | "failed";
+  backupPath?: string | null;
+  warnings: string[];
+  error?: string | null;
+}
+
+export interface SkillUpdateReport {
+  outcomes: SkillUpdateOutcome[];
+}
+
+export interface SkillUninstallOutcome {
+  id: string;
+  backupPath?: string | null;
+  disabledAgents: string[];
+  warnings: string[];
+  error?: string | null;
+}
+
+export interface SkillUninstallReport {
+  outcomes: SkillUninstallOutcome[];
+}
+
+export interface SkillBatchOk {
+  id: string;
+  label: string;
+}
+
+export interface SkillBatchReport {
+  ok: SkillBatchOk[];
+  failed: SkillItemFailure[];
+}
+
 export type ActivateOutcome =
   | { kind: "activated"; path: string }
   | { kind: "alreadyActive"; path: string }
@@ -282,4 +409,16 @@ export interface ResumeInfo {
   sessionId: string;
   cwd: string | null;
   command: string;
+}
+
+export interface UpdateInfo {
+  currentVersion: string;
+  version: string;
+  notes: string | null;
+  pubDate: string | null;
+}
+
+export interface UpdateDownloadProgress {
+  downloaded: number;
+  total: number | null;
 }

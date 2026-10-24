@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import { SettingsPanel } from "../panels/SettingsPanel";
 import { api } from "../lib/api";
+import { makeUpdateController } from "../test/update";
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -27,14 +28,26 @@ beforeEach(() => {
 });
 
 test("changes theme and persists it", async () => {
-  render(<SettingsPanel theme="system" onThemeChange={() => {}} />);
+  render(
+    <SettingsPanel
+      theme="system"
+      onThemeChange={() => {}}
+      update={makeUpdateController()}
+    />,
+  );
   const select = await screen.findByLabelText("主题");
   fireEvent.change(select, { target: { value: "dark" } });
   await waitFor(() => expect(api.setTheme).toHaveBeenCalledWith("dark"));
 });
 
 test("changes store root and warns about restart", async () => {
-  render(<SettingsPanel theme="system" onThemeChange={() => {}} />);
+  render(
+    <SettingsPanel
+      theme="system"
+      onThemeChange={() => {}}
+      update={makeUpdateController()}
+    />,
+  );
   const input = await screen.findByLabelText("存储位置");
   fireEvent.change(input, { target: { value: "D:/data/ccswitchx" } });
   fireEvent.click(screen.getByRole("button", { name: "保存存储位置" }));

@@ -107,6 +107,7 @@ pub fn run(
             mtime: None,
             transport: None,
             size: None,
+            origin: None,
         })?;
 
         if row.enabled {

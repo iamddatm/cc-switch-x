@@ -18,7 +18,7 @@ pub fn is_agent_enabled(settings: &AppSettings, agent_id: &str) -> bool {
     settings
         .enabled_agents
         .as_ref()
-        .map_or(true, |ids| ids.iter().any(|id| id == agent_id))
+        .is_none_or(|ids| ids.iter().any(|id| id == agent_id))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

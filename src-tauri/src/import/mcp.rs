@@ -298,6 +298,7 @@ pub fn run(
             mtime: None,
             transport: None,
             size: None,
+            origin: None,
         })?;
 
         for (app, on) in &row.enabled {

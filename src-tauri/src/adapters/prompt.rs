@@ -122,6 +122,7 @@ pub fn activate(
                     mtime: None,
                     transport: None,
                     size: None,
+                    origin: None,
                 })?;
             }
         }

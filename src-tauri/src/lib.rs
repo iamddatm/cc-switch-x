@@ -4,6 +4,7 @@ pub mod domain;
 pub mod error;
 pub mod import;
 pub mod index;
+pub mod net;
 pub mod services;
 pub mod sessions;
 pub mod settings;
@@ -28,6 +29,7 @@ pub fn run() {
     let state = state::AppState::init(settings).expect("初始化应用状态失败");
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
         // 启动后先扫一遍落盘（spec 5.4 的触发时机之一）。扫描失败不拦启动：
         // 把原因打到标准错误，面板上的「重新检查」还能手动触发。
@@ -79,12 +81,20 @@ pub fn run() {
             commands::sessions::search_sessions,
             commands::sessions::session_providers,
             commands::sessions::session_resume,
+            commands::skills::check_skill_updates,
+            commands::skills::install_skill,
+            commands::skills::preview_skill_source,
+            commands::skills::set_skills_enabled,
+            commands::skills::uninstall_skills,
+            commands::skills::update_skills,
             commands::subagents::scan_subagents,
             commands::subagents::set_subagent_enabled,
             commands::settings::get_settings,
             commands::settings::set_enabled_agents,
             commands::settings::set_theme,
             commands::settings::set_store_root,
+            commands::updater::check_app_update,
+            commands::updater::install_app_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

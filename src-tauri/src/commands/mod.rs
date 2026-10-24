@@ -6,4 +6,6 @@ pub mod import;
 pub mod rules;
 pub mod sessions;
 pub mod settings;
+pub mod skills;
 pub mod subagents;
+pub mod updater;

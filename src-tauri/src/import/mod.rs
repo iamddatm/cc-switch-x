@@ -108,10 +108,9 @@ fn list_column(conn: &Connection, table: &str, column: &str) -> Result<Vec<Strin
     for value in stmt
         .query_map([], |row| row.get::<_, Option<String>>(0))?
         .flatten()
+        .flatten()
     {
-        if let Some(value) = value {
-            out.push(value);
-        }
+        out.push(value);
     }
     Ok(out)
 }

@@ -73,6 +73,9 @@ pub struct AssetSummary {
     /// MCP 的传输方式，用于行内 badge。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
+    /// Skill 的来源与更新状态；其他资产或没有 `.meta.json` 时为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<crate::domain::skill_meta::SkillOrigin>,
 }
 
 /// 「资产 × agent」四态（spec 3.3）：未同步 / 已写入 / 已生效 / 有漂移。

@@ -1,20 +1,24 @@
 import { useEffect, useState } from "react";
 import { Settings } from "lucide-react";
 import { ImportDialog } from "../components/ImportDialog";
+import { AboutSection } from "../components/settings/AboutSection";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Select } from "../components/ui/Select";
 import { api } from "../lib/api";
+import type { UpdateController } from "../hooks/useUpdate";
 import type { AppSettings, Theme } from "../types";
 
 export function SettingsPanel({
   theme,
   onThemeChange,
+  update,
 }: {
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
+  update: UpdateController;
 }) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [storeRoot, setStoreRoot] = useState("");
@@ -104,6 +108,8 @@ export function SettingsPanel({
             </p>
             <Button onClick={() => setImporting(true)}>从 cc-switch 导入</Button>
           </section>
+
+          <AboutSection update={update} />
         </div>
       </div>
       {importing && <ImportDialog onClose={() => setImporting(false)} />}

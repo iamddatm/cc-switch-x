@@ -35,6 +35,15 @@ pub enum Removed {
     Absent,
 }
 
+/// 真源更新后的分发刷新结果。链接天然指向新内容，只有 copy 需要重拷。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshOutcome {
+    Linked,
+    Copied,
+    Foreign,
+    Absent,
+}
+
 /// 复制落地时留在目录里的归属标记：只有它才允许我们整目录删掉。
 const MARKER: &str = ".ccswitchx";
 
@@ -107,6 +116,32 @@ pub fn remove(
         return Ok(Removed::Ours(LinkKind::Copy));
     }
     Ok(Removed::Foreign)
+}
+
+/// 真源更新后刷新已落地的副本：链接不用动，copy 必须整份重拷。
+/// 目标缺失时什么都不建（矩阵可能只是陈旧记录，更新不应顺手创建目录）。
+pub fn refresh(
+    store: &Store,
+    agent: &AgentDescriptor,
+    skill_id: &str,
+    home: &Path,
+    base_override: Option<&Path>,
+) -> Result<RefreshOutcome, AppError> {
+    let source = store.entry_path(AssetType::Skill, skill_id)?;
+    let target = skills_dir(agent, home, base_override)?.join(skill_id);
+    if target.symlink_metadata().is_err() {
+        return Ok(RefreshOutcome::Absent);
+    }
+    if links_to(&target, &source) {
+        return Ok(RefreshOutcome::Linked);
+    }
+    if marker_matches(&target, &source) {
+        std::fs::remove_dir_all(&target)?;
+        copy_dir(&source, &target)?;
+        write_marker(&target, &source)?;
+        return Ok(RefreshOutcome::Copied);
+    }
+    Ok(RefreshOutcome::Foreign)
 }
 
 /// 链接是否指向我们的真源目录。`read_link` 对 symlink 与 junction 都有效。
@@ -322,6 +357,58 @@ mod tests {
         )
         .expect_err("真源里没有的 skill 不能凭空部署");
         assert!(error.to_string().contains("nope"), "{error}");
+    }
+
+    #[test]
+    fn refresh_recopies_our_copy_but_never_touches_foreign_directories() {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let source = seed_skill(&store, "demo");
+        let home = dir.path().join("home");
+        let descriptor = agent("claude");
+        let target = home.join(".claude/skills/demo");
+
+        // 手工造一个我们自己的 copy 部署（不依赖 Windows 链接权限）
+        copy_dir(&source, &target).unwrap();
+        write_marker(&target, &source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "---\nname: demo\n---\n\nv2\n").unwrap();
+
+        assert_eq!(
+            refresh(&store, &descriptor, "demo", &home, None).unwrap(),
+            RefreshOutcome::Copied
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("SKILL.md")).unwrap(),
+            "---\nname: demo\n---\n\nv2\n",
+            "copy 部署必须跟着真源更新"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join(".ccswitchx"))
+                .unwrap()
+                .trim(),
+            source.display().to_string()
+        );
+
+        // 外来目录：不删、不改、不认领
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("SKILL.md"), "别人的\n").unwrap();
+        std::fs::remove_file(target.join(".ccswitchx")).unwrap();
+        assert_eq!(
+            refresh(&store, &descriptor, "demo", &home, None).unwrap(),
+            RefreshOutcome::Foreign
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("SKILL.md")).unwrap(),
+            "别人的\n"
+        );
+
+        // 目标缺失：不凭空创建
+        std::fs::remove_dir_all(&target).unwrap();
+        assert_eq!(
+            refresh(&store, &descriptor, "demo", &home, None).unwrap(),
+            RefreshOutcome::Absent
+        );
+        assert!(!target.exists());
     }
 
     #[test]

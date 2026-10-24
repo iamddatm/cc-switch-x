@@ -19,6 +19,17 @@ pub enum AppError {
     Secrets(#[from] crate::store::secrets::SecretsError),
     #[error("导入错误：{0}")]
     Import(#[from] crate::import::ImportError),
+    #[error("元数据错误：{0}")]
+    Meta(#[from] crate::domain::skill_meta::SkillMetaError),
+    #[error("网络请求失败：{0}")]
+    Network(String),
+    // 消息由命令层带上「检查/下载/安装」上下文，这里不再重复加前缀。
+    #[error("{0}")]
+    Update(String),
+    #[error("压缩包处理失败：{0}")]
+    Archive(String),
+    #[error("来源无效：{0}")]
+    Source(String),
     #[error("会话解析失败：{0}")]
     Session(#[from] crate::domain::session::SessionError),
     #[error("JSON 处理失败：{0}")]
