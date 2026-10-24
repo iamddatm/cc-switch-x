@@ -44,6 +44,7 @@ struct Entry {
 }
 
 /// 解压 ZIP；自动剥掉 GitHub 归档唯一的顶层目录，并拒绝任何越界路径。
+/// 符号链接条目直接跳过：不落盘链接可避免越界指向，也不依赖 Windows 建链权限。
 pub fn extract_archive(
     zip_path: &Path,
     dest: &Path,
@@ -114,10 +115,7 @@ pub fn extract_archive(
         }
         validate_relative(&relative)?;
         if entry.is_symlink {
-            return Err(AppError::Archive(format!(
-                "ZIP 含符号链接，拒绝解压：{}",
-                relative.display()
-            )));
+            continue;
         }
 
         report.entries += 1;
@@ -394,6 +392,41 @@ mod tests {
         let zip_path = dir.path().join("absolute.zip");
         write_zip(&zip_path, &[("/abs.txt", b"x")]);
         assert!(extract_archive(&zip_path, &dest, &ArchiveLimits::default()).is_err());
+    }
+
+    #[test]
+    fn extraction_skips_symlink_entries_without_following_them() {
+        let dir = tempdir().unwrap();
+        let zip_path = dir.path().join("repo.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        writer
+            .add_symlink("repo-main/.opencode/skills", "../skills/", options)
+            .unwrap();
+        writer
+            .add_symlink("repo-main/AGENTS.md", "CLAUDE.md", options)
+            .unwrap();
+        writer
+            .add_symlink("repo-main/escape", "../../outside", options)
+            .unwrap();
+        writer.start_file("repo-main/CLAUDE.md", options).unwrap();
+        writer.write_all(b"# claude\n").unwrap();
+        writer
+            .start_file("repo-main/skills/demo/SKILL.md", options)
+            .unwrap();
+        writer.write_all(b"# demo\n").unwrap();
+        writer.finish().unwrap();
+
+        let dest = dir.path().join("dest");
+        let report = extract_archive(&zip_path, &dest, &ArchiveLimits::default()).unwrap();
+        assert_eq!(report.entries, 2);
+        assert!(dest.join("CLAUDE.md").is_file());
+        assert!(dest.join("skills/demo/SKILL.md").is_file());
+        assert!(!dest.join("AGENTS.md").exists());
+        assert!(!dest.join(".opencode").exists());
+        assert!(!dest.join("escape").exists());
+        assert!(!dir.path().join("outside").exists());
     }
 
     #[test]
