@@ -33,11 +33,15 @@ pub fn write_asset(
     id: String,
     content: String,
 ) -> Result<AssetSummary, AppError> {
+    let _guard = state.enter_write()?;
     let mut index = state
         .index
         .lock()
         .map_err(|_| AppError::InvalidInput("index 锁失败".into()))?;
-    AssetService::write(&state.store, &mut index, asset_type, &id, &content)
+    let summary = AssetService::write(&state.store, &mut index, asset_type, &id, &content)?;
+    drop(index);
+    state.notify_git(format!("write: {}/{id}", asset_type.dir_name()));
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -46,11 +50,17 @@ pub fn delete_asset(
     asset_type: AssetType,
     id: String,
 ) -> Result<bool, AppError> {
+    let _guard = state.enter_write()?;
     let mut index = state
         .index
         .lock()
         .map_err(|_| AppError::InvalidInput("index 锁失败".into()))?;
-    AssetService::delete(&state.store, &mut index, asset_type, &id)
+    let deleted = AssetService::delete(&state.store, &mut index, asset_type, &id)?;
+    drop(index);
+    if deleted {
+        state.notify_git(format!("delete: {}/{id}", asset_type.dir_name()));
+    }
+    Ok(deleted)
 }
 
 /// 从本地目录导入一个 skill。`source` 是用户通过目录选择器挑的绝对路径。
@@ -59,9 +69,13 @@ pub fn import_skill_dir(
     state: State<'_, AppState>,
     source: PathBuf,
 ) -> Result<AssetSummary, AppError> {
+    let _guard = state.enter_write()?;
     let mut index = state
         .index
         .lock()
         .map_err(|_| AppError::InvalidInput("index 锁失败".into()))?;
-    AssetService::import_skill_dir(&state.store, &mut index, &source)
+    let summary = AssetService::import_skill_dir(&state.store, &mut index, &source)?;
+    drop(index);
+    state.notify_git(format!("import: skills/{}", summary.id));
+    Ok(summary)
 }

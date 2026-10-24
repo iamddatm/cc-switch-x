@@ -24,6 +24,7 @@ pub fn resolve_drift(
     action: ResolveAction,
     agent_id: String,
 ) -> Result<ResolveOutcome, AppError> {
+    let _guard = state.enter_write()?;
     let base = override_base(&state, &agent_id)?;
     // 重刷会把文件重新写回磁盘；配置根已不在时不再替用户创建。
     // 采纳磁盘只改真源，不受检测门禁影响。
@@ -34,14 +35,17 @@ pub fn resolve_drift(
         .index
         .lock()
         .map_err(|_| AppError::InvalidInput("index 锁失败".into()))?;
-    drift::resolve(
+    let outcome = drift::resolve(
         &state.store,
         &mut index,
         &state.home,
         base.as_deref(),
         id,
         action,
-    )
+    )?;
+    drop(index);
+    state.notify_git(format!("drift: {action:?} {agent_id}"));
+    Ok(outcome)
 }
 
 /// 当前挂着的所有待解决漂移（不重新检查磁盘）。

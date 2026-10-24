@@ -20,6 +20,130 @@ pub struct AppSettings {
     /// Skill 发现用的仓库；None = 内置默认仓库。
     #[serde(default)]
     pub skill_repos: Option<Vec<SkillRepo>>,
+    /// 备份策略与 Git 备份；旧设置文件缺少该字段时整套取默认值。
+    #[serde(default)]
+    pub backup: BackupSettings,
+}
+
+/// 备份策略：间隔 0 表示关闭自动快照；保留份数只作用于 `backups/snapshots`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupSettings {
+    #[serde(default = "default_backup_interval")]
+    pub interval_hours: u32,
+    #[serde(default = "default_backup_retain")]
+    pub retain_count: u32,
+    #[serde(default)]
+    pub git: GitBackupSettings,
+}
+
+impl Default for BackupSettings {
+    fn default() -> Self {
+        Self {
+            interval_hours: default_backup_interval(),
+            retain_count: default_backup_retain(),
+            git: GitBackupSettings::default(),
+        }
+    }
+}
+
+/// Git 备份：enabled 只在 git init 成功后置真；关闭只停自动同步，不删仓库。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBackupSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub auto_commit: bool,
+    #[serde(default = "default_true")]
+    pub auto_pull: bool,
+    /// 远端地址只接受 https/ssh/git@；凭据交给系统 git。
+    #[serde(default)]
+    pub remote: Option<String>,
+    #[serde(default = "default_branch")]
+    pub branch: String,
+}
+
+impl Default for GitBackupSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auto_commit: true,
+            auto_pull: true,
+            remote: None,
+            branch: default_branch(),
+        }
+    }
+}
+
+fn default_backup_interval() -> u32 {
+    24
+}
+
+fn default_backup_retain() -> u32 {
+    10
+}
+
+/// Git 分支名：允许常见的 `feature/x`，但拒绝会改变 CLI 语义或以 ref 语法歧义结尾的名字。
+pub fn validate_git_branch(branch: &str) -> Result<(), String> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err("分支名不能为空".into());
+    }
+    if branch.len() > 200 {
+        return Err("分支名过长".into());
+    }
+    if branch.starts_with('-')
+        || branch.starts_with('/')
+        || branch.ends_with('/')
+        || branch.ends_with('.')
+        || branch.ends_with(".lock")
+        || branch == "HEAD"
+        || branch.contains("..")
+        || branch.contains("//")
+        || branch.contains("@{")
+        || branch.contains('\\')
+    {
+        return Err(format!("非法分支名：{branch}"));
+    }
+    if !branch
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '/' | '-'))
+    {
+        return Err(format!("分支名只能包含字母、数字、`.`、`_`、`/`、`-`：{branch}"));
+    }
+    Ok(())
+}
+
+/// 远端地址：凭据交给系统 git，因此这里只拒绝明显会把凭据写进配置/命令的写法。
+pub fn validate_git_remote(remote: &str) -> Result<(), String> {
+    let remote = remote.trim();
+    if remote.is_empty() {
+        return Err("远端地址不能为空".into());
+    }
+    if remote.starts_with('-') || remote.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+        return Err("远端地址包含非法字符".into());
+    }
+    let lower = remote.to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        let rest = &remote[remote.find("://").map(|i| i + 3).unwrap_or(0)..];
+        let host_part = rest.split('/').next().unwrap_or_default();
+        if host_part.contains('@') {
+            return Err("不要把用户名或令牌写进 https 地址，凭据请交给系统 git 管理".into());
+        }
+        return Ok(());
+    }
+    if lower.starts_with("http://") {
+        return Err("远端必须使用 https://，不接受明文 http".into());
+    }
+    if lower.starts_with("ssh://") || lower.starts_with("file://") {
+        return Ok(());
+    }
+    // scp 风格的 `git@host:path`
+    if remote.starts_with("git@") && remote.contains(':') {
+        return Ok(());
+    }
+    Err("远端地址只支持 https://、ssh://、file:// 或 git@host:path".into())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +231,7 @@ impl Default for AppSettings {
             close_to_tray: true,
             proxy: ProxySettings::default(),
             skill_repos: None,
+            backup: BackupSettings::default(),
         }
     }
 }
@@ -186,6 +311,17 @@ mod tests {
                 branch: "dev".into(),
                 enabled: false,
             }]),
+            backup: BackupSettings {
+                interval_hours: 12,
+                retain_count: 5,
+                git: GitBackupSettings {
+                    enabled: true,
+                    auto_commit: false,
+                    auto_pull: false,
+                    remote: Some("git@github.com:me/assets.git".into()),
+                    branch: "backup".into(),
+                },
+            },
         };
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path).unwrap(), settings);
@@ -224,6 +360,34 @@ mod tests {
         assert_eq!(loaded.proxy, ProxySettings::default());
         assert!(loaded.skill_repos.is_none());
         assert_eq!(effective_skill_repos(&loaded).len(), 4);
+        assert_eq!(loaded.backup, BackupSettings::default());
+        assert_eq!(loaded.backup.interval_hours, 24);
+        assert_eq!(loaded.backup.retain_count, 10);
+        assert!(!loaded.backup.git.enabled);
+    }
+
+    #[test]
+    fn partial_backup_settings_get_defaults() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let value = serde_json::json!({
+            "storeRoot": dir.path().join("data"),
+            "theme": "system",
+            "backup": {
+                "intervalHours": 6,
+                "git": { "enabled": true }
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let loaded = load_from(&path).unwrap();
+        assert_eq!(loaded.backup.interval_hours, 6);
+        assert_eq!(loaded.backup.retain_count, 10);
+        assert!(loaded.backup.git.enabled);
+        assert!(loaded.backup.git.auto_commit);
+        assert!(loaded.backup.git.auto_pull);
+        assert_eq!(loaded.backup.git.branch, "main");
+        assert!(loaded.backup.git.remote.is_none());
     }
 
     #[test]
@@ -241,5 +405,34 @@ mod tests {
         let path = dir.path().join("settings.json");
         std::fs::write(&path, "{not json").unwrap();
         assert!(load_from(&path).is_err());
+    }
+
+    #[test]
+    fn git_branch_and_remote_validation() {
+        for ok in ["main", "feature/backup", "v1.2.3", "my_branch"] {
+            assert!(validate_git_branch(ok).is_ok(), "{ok} 应当合法");
+        }
+        for bad in ["", "-x", "a..b", "a//b", "a/", "a.lock", "HEAD", "a b", "refs@{1}"] {
+            assert!(validate_git_branch(bad).is_err(), "{bad} 应当被拒绝");
+        }
+
+        for ok in [
+            "https://github.com/me/assets.git",
+            "ssh://git@example.com/me/assets.git",
+            "git@github.com:me/assets.git",
+            "file:///tmp/assets.git",
+        ] {
+            assert!(validate_git_remote(ok).is_ok(), "{ok} 应当合法");
+        }
+        for bad in [
+            "",
+            "-oProxyCommand=calc",
+            "http://example.com/repo.git",
+            "https://user:token@example.com/repo.git",
+            "ftp://example.com/repo.git",
+            "git@host:path with space",
+        ] {
+            assert!(validate_git_remote(bad).is_err(), "{bad} 应当被拒绝");
+        }
     }
 }

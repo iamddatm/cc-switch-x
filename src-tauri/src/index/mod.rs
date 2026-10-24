@@ -74,6 +74,16 @@ impl Index {
         Ok(())
     }
 
+    /// 恢复快照/拉取远端后，旧开关状态与漂移记录都不再可信。
+    /// `runs` 保留：它们是用户实际写盘的历史，恢复真源不等于那批写盘没发生。
+    pub fn reset_agent_state_and_drift(&mut self) -> Result<(), IndexError> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM agent_state", [])?;
+        tx.execute("DELETE FROM drift", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn list(&self, asset_type: Option<AssetType>) -> Result<Vec<AssetSummary>, IndexError> {
         let mut rows = Vec::new();
         match asset_type {
@@ -482,6 +492,48 @@ mod tests {
         index.rebuild(&store).unwrap();
         assert_eq!(index.search("play").unwrap().len(), 1);
         assert_eq!(index.search("pw").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reset_derived_state_keeps_runs_and_assets() {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        store
+            .write(
+                AssetType::Mcp,
+                "pw",
+                br#"{"id":"pw","name":"Playwright","transport":"stdio","command":"npx"}"#,
+            )
+            .unwrap();
+        let mut index = Index::open(&dir.path().join("index.db")).unwrap();
+        index.rebuild(&store).unwrap();
+        index
+            .set_agent_state(&AgentStateRow {
+                agent_id: "claude".into(),
+                asset_type: AssetType::Mcp,
+                asset_id: "pw".into(),
+                state: AssetState::Effective,
+                last_error: None,
+                applied_at: now_millis(),
+            })
+            .unwrap();
+        index
+            .record_run(true, "[]", "{}", &dir.path().join("backups/1"))
+            .unwrap();
+        index
+            .conn
+            .execute(
+                "INSERT INTO drift (asset_type,asset_id,agent_id,detected_at,kind) VALUES ('mcp','pw','claude',1,'modified')",
+                [],
+            )
+            .unwrap();
+
+        index.reset_agent_state_and_drift().unwrap();
+
+        assert!(index.agent_states().unwrap().is_empty());
+        assert!(index.open_drifts().unwrap().is_empty());
+        assert_eq!(index.list(Some(AssetType::Mcp)).unwrap().len(), 1);
+        assert!(index.last_unreverted_run().unwrap().is_some());
     }
 
     #[test]

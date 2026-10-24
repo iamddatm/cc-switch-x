@@ -1,6 +1,8 @@
 pub mod agents;
 pub mod assets;
+pub mod backup;
 pub mod drift;
+pub mod git;
 pub mod hooks;
 pub mod import;
 pub mod rules;

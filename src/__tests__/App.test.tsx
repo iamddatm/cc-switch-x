@@ -11,6 +11,7 @@ vi.mock("../lib/api", () => ({
       closeToTray: true,
       proxy: { url: null, username: null },
       skillRepos: null,
+      backup: { intervalHours: 24, retainCount: 10, git: { enabled: false, autoCommit: true, autoPull: true, remote: null, branch: "main" } },
     }),
     listAgents: vi.fn().mockResolvedValue([]),
     listAssets: vi.fn().mockResolvedValue([]),
@@ -31,6 +32,7 @@ test("renders all sidebar entries and switches panes", () => {
     "会话",
     "Agents",
     "网络",
+    "备份",
     "Settings",
   ]) {
     expect(screen.getByRole("button", { name: label })).toBeInTheDocument();

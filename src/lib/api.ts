@@ -5,10 +5,16 @@ import type {
   AppSettings,
   AssetSummary,
   AssetType,
+  BackupSettings,
+  BackupSnapshot,
+  BackupUsage,
   ConflictPolicy,
   DetectedProxy,
   DiscoveredSkillInstallInput,
   DriftRecord,
+  GitCommit,
+  GitRestoreReport,
+  GitStatus,
   HooksNeedUserAction,
   ImportPreview,
   ImportSummary,
@@ -18,6 +24,8 @@ import type {
   InstallSelection,
   ProxySettingsView,
   ProxyTestResult,
+  PullOutcome,
+  RestoreBackupReport,
   ScanReport,
   SkillBatchReport,
   SkillCheckReport,
@@ -85,6 +93,40 @@ export const api = {
   testProxySettings: (url: string, username: string, password: string | null) =>
     invoke<ProxyTestResult>("test_proxy_settings", { url, username, password }),
   scanLocalProxies: () => invoke<DetectedProxy[]>("scan_local_proxies"),
+
+  listBackupSnapshots: () => invoke<BackupSnapshot[]>("list_backup_snapshots"),
+  createBackupSnapshot: (name?: string) =>
+    invoke<BackupSnapshot>("create_backup_snapshot", { name: name ?? null }),
+  renameBackupSnapshot: (oldName: string, newName: string) =>
+    invoke<BackupSnapshot>("rename_backup_snapshot", { oldName, newName }),
+  deleteBackupSnapshot: (name: string) =>
+    invoke<void>("delete_backup_snapshot", { name }),
+  restoreBackupSnapshot: (name: string) =>
+    invoke<RestoreBackupReport>("restore_backup_snapshot", { name }),
+  getBackupUsage: () => invoke<BackupUsage>("get_backup_usage"),
+  getBackupSettings: () => invoke<BackupSettings>("get_backup_settings"),
+  setBackupSettings: (settings: BackupSettings) =>
+    invoke<AppSettings>("set_backup_settings", { settings }),
+  deleteBackupCategory: (id: string) =>
+    invoke<number>("delete_backup_category", { id }),
+  revealBackupLocation: (id: string) =>
+    invoke<void>("reveal_backup_location", { id }),
+
+  getGitStatus: () => invoke<GitStatus>("get_git_status"),
+  gitInit: (branch?: string) =>
+    invoke<GitStatus>("git_init", { branch: branch ?? null }),
+  gitSetRemote: (remote: string | null, branch: string) =>
+    invoke<GitStatus>("git_set_remote", { remote, branch }),
+  gitCommitNow: (message?: string) =>
+    invoke<GitStatus>("git_commit_now", { message: message ?? null }),
+  gitPushNow: () => invoke<GitStatus>("git_push_now"),
+  gitPullNow: () => invoke<PullOutcome>("git_pull_now"),
+  gitListCommits: (limit?: number) =>
+    invoke<GitCommit[]>("git_list_commits", { limit: limit ?? null }),
+  gitRestoreCommit: (hash: string) =>
+    invoke<GitRestoreReport>("git_restore_commit", { hash }),
+  gitResolveConflict: (action: "keepLocal" | "keepRemote") =>
+    invoke<GitStatus>("git_resolve_conflict", { action }),
   getSkillRepos: () => invoke<SkillRepo[]>("get_skill_repos"),
   setSkillRepos: (repos: SkillRepo[]) =>
     invoke<SkillRepo[]>("set_skill_repos", { repos }),

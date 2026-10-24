@@ -19,6 +19,7 @@ pub fn set_subagent_enabled(
     agent_id: String,
     enabled: bool,
 ) -> Result<String, AppError> {
+    let _guard = state.enter_write()?;
     let descriptor = descriptor_for(&agent_id, AssetKind::Subagent)?;
     let base = override_base(&state, &agent_id)?;
     let label = {
@@ -71,6 +72,10 @@ pub fn set_subagent_enabled(
             matrix.disable(AssetType::Subagent, &id);
         }
     })?;
+    state.notify_git(format!(
+        "{}: subagents/{id} on {agent_id}",
+        if enabled { "enable" } else { "disable" }
+    ));
     Ok(label)
 }
 
@@ -79,17 +84,21 @@ pub fn scan_subagents(
     state: State<'_, AppState>,
     agent_id: String,
 ) -> Result<ScanReport, AppError> {
+    let _guard = state.enter_write()?;
     let descriptor = descriptor_for(&agent_id, AssetKind::Subagent)?;
     let base = override_base(&state, &agent_id)?;
     let mut index = state
         .index
         .lock()
         .map_err(|_| AppError::InvalidInput("index 锁失败".into()))?;
-    scan_service::subagents(
+    let report = scan_service::subagents(
         &state.store,
         &mut index,
         &descriptor,
         &state.home,
         base.as_deref(),
-    )
+    )?;
+    drop(index);
+    state.notify_git(format!("scan: subagents on {agent_id}"));
+    Ok(report)
 }

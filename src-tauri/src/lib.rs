@@ -38,6 +38,11 @@ pub fn run() {
             use tauri::Manager;
             tray::setup(app)?;
             let app_state = app.state::<state::AppState>();
+            // 后台线程只做事后备份/同步，不阻塞启动；索引被污染也不影响它们启动。
+            if let Some(rx) = app_state.take_git_rx() {
+                services::git_sync::spawn_worker(app.handle().clone(), rx);
+            }
+            services::backup::spawn_periodic(app.handle().clone());
             let Ok(mut index) = app_state.index.lock() else {
                 eprintln!("跳过漂移检查：index 锁已被 panic 污染，请用面板上的「重新检查」");
                 return Ok(());
@@ -64,12 +69,31 @@ pub fn run() {
             commands::assets::write_asset,
             commands::assets::delete_asset,
             commands::assets::import_skill_dir,
+            commands::backup::create_backup_snapshot,
+            commands::backup::delete_backup_category,
+            commands::backup::delete_backup_snapshot,
+            commands::backup::get_backup_settings,
+            commands::backup::get_backup_usage,
+            commands::backup::list_backup_snapshots,
+            commands::backup::rename_backup_snapshot,
+            commands::backup::restore_backup_snapshot,
+            commands::backup::reveal_backup_location,
+            commands::backup::set_backup_settings,
             commands::drift::list_drifts,
             commands::drift::rescan_drift,
             commands::drift::resolve_drift,
             commands::hooks::foreign_hook_count,
             commands::hooks::hooks_gate_status,
             commands::hooks::set_hook_enabled,
+            commands::git::get_git_status,
+            commands::git::git_commit_now,
+            commands::git::git_init,
+            commands::git::git_list_commits,
+            commands::git::git_pull_now,
+            commands::git::git_push_now,
+            commands::git::git_resolve_conflict,
+            commands::git::git_restore_commit,
+            commands::git::git_set_remote,
             commands::import::import_apply,
             commands::import::import_preview,
             commands::import::revert_last,

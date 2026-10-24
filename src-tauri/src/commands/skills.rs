@@ -65,7 +65,11 @@ pub async fn install_skill(
     let _guard = state.begin_skill_job()?;
     let store = state.store.clone();
     let home = state.home.clone();
+    let maintenance = state.maintenance.clone();
     let report = run_blocking(move || {
+        let _write = maintenance
+            .read()
+            .map_err(|_| AppError::InvalidInput("maintenance 锁失败".into()))?;
         skill_source::install(
             &store,
             &home,
@@ -77,6 +81,7 @@ pub async fn install_skill(
     })
     .await?;
     rebuild_index(&state)?;
+    state.notify_git("skill: install");
     Ok(report)
 }
 
@@ -88,11 +93,18 @@ pub async fn check_skill_updates(
     let _guard = state.begin_skill_job()?;
     let store = state.store.clone();
     let proxy = state.proxy_config()?;
-    run_blocking(move || {
+    let maintenance = state.maintenance.clone();
+    let report = run_blocking(move || {
         let fetcher = HttpFetcher::new(Some(&proxy))?;
+        // 检查结果会写回 `.meta.json`，属于真源变更。
+        let _write = maintenance
+            .read()
+            .map_err(|_| AppError::InvalidInput("maintenance 锁失败".into()))?;
         skill_update::check(&store, &fetcher, ids.as_deref())
     })
-    .await
+    .await?;
+    state.notify_git("skill: check updates");
+    Ok(report)
 }
 
 #[tauri::command]
@@ -104,12 +116,17 @@ pub async fn update_skills(
     let store = state.store.clone();
     let home = state.home.clone();
     let proxy = state.proxy_config()?;
+    let maintenance = state.maintenance.clone();
     let report = run_blocking(move || {
         let fetcher = HttpFetcher::new(Some(&proxy))?;
+        let _write = maintenance
+            .read()
+            .map_err(|_| AppError::InvalidInput("maintenance 锁失败".into()))?;
         skill_update::update(&store, &home, &fetcher, &ids)
     })
     .await?;
     rebuild_index(&state)?;
+    state.notify_git("skill: update");
     Ok(report)
 }
 
@@ -121,8 +138,16 @@ pub async fn uninstall_skills(
     let _guard = state.begin_skill_job()?;
     let store = state.store.clone();
     let home = state.home.clone();
-    let report = run_blocking(move || skill_source::uninstall(&store, &home, &ids)).await?;
+    let maintenance = state.maintenance.clone();
+    let report = run_blocking(move || {
+        let _write = maintenance
+            .read()
+            .map_err(|_| AppError::InvalidInput("maintenance 锁失败".into()))?;
+        skill_source::uninstall(&store, &home, &ids)
+    })
+    .await?;
     rebuild_index(&state)?;
+    state.notify_git("skill: uninstall");
     Ok(report)
 }
 
@@ -135,7 +160,20 @@ pub async fn set_skills_enabled(
 ) -> Result<SkillBatchReport, AppError> {
     let store = state.store.clone();
     let home = state.home.clone();
-    run_blocking(move || skill_source::set_enabled(&store, &home, &ids, &agent_id, enabled)).await
+    let maintenance = state.maintenance.clone();
+    let label_agent = agent_id.clone();
+    let report = run_blocking(move || {
+        let _write = maintenance
+            .read()
+            .map_err(|_| AppError::InvalidInput("maintenance 锁失败".into()))?;
+        skill_source::set_enabled(&store, &home, &ids, &agent_id, enabled)
+    })
+    .await?;
+    state.notify_git(format!(
+        "{}: skills on {label_agent}",
+        if enabled { "enable" } else { "disable" }
+    ));
+    Ok(report)
 }
 
 #[tauri::command]
@@ -209,8 +247,12 @@ pub async fn install_discovered_skill(
     let store = state.store.clone();
     let home = state.home.clone();
     let proxy = state.proxy_config()?;
+    let maintenance = state.maintenance.clone();
     let outcome = run_blocking(move || {
         let fetcher = HttpFetcher::new(Some(&proxy))?;
+        let _write = maintenance
+            .read()
+            .map_err(|_| AppError::InvalidInput("maintenance 锁失败".into()))?;
         skill_source::install_discovered(
             &store,
             &home,
@@ -225,6 +267,7 @@ pub async fn install_discovered_skill(
     })
     .await?;
     rebuild_index(&state)?;
+    state.notify_git(format!("skill: install {}", outcome.id));
     Ok(outcome)
 }
 

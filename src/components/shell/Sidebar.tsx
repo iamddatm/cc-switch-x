@@ -1,4 +1,5 @@
 import {
+  ArchiveRestore,
   BookOpen,
   Bot,
   Globe,
@@ -23,6 +24,7 @@ const ITEMS: { pane: Pane; label: string; icon: LucideIcon }[] = [
   { pane: "sessions", label: "会话", icon: History },
   { pane: "agents", label: "Agents", icon: Layers },
   { pane: "network", label: "网络", icon: Globe },
+  { pane: "backup", label: "备份", icon: ArchiveRestore },
   { pane: "settings", label: "Settings", icon: Settings },
 ];
 

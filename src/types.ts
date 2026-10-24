@@ -1,5 +1,5 @@
 export type AssetType = "mcp" | "skill" | "prompt" | "rule" | "subagent" | "hook";
-export type Pane = AssetType | "sessions" | "agents" | "network" | "settings";
+export type Pane = AssetType | "sessions" | "agents" | "network" | "backup" | "settings";
 export type Theme = "light" | "dark" | "system";
 
 export interface AssetSummary {
@@ -49,7 +49,95 @@ export interface AppSettings {
   proxy: { url: string | null; username: string | null };
   /** null = 使用内置默认仓库。 */
   skillRepos: SkillRepo[] | null;
+  backup: BackupSettings;
 }
+
+export interface BackupSettings {
+  /** 0 = 关闭自动快照。 */
+  intervalHours: number;
+  retainCount: number;
+  git: GitBackupSettings;
+}
+
+export interface GitBackupSettings {
+  enabled: boolean;
+  autoCommit: boolean;
+  autoPull: boolean;
+  remote: string | null;
+  branch: string;
+}
+
+export type SnapshotKind = "manual" | "auto" | "preRestore" | "prePull";
+
+export interface BackupSnapshot {
+  name: string;
+  kind: SnapshotKind;
+  /** 毫秒时间戳。 */
+  createdAt: number;
+  sizeBytes: number;
+  files: number;
+}
+
+export interface BackupUsageSection {
+  id: "snapshots" | "writes" | "logs" | "index";
+  path: string;
+  bytes: number;
+  items: number;
+}
+
+export interface BackupUsage {
+  sections: BackupUsageSection[];
+  totalBytes: number;
+}
+
+export interface RestoreBackupReport {
+  safetyBackup: string;
+  restoredFiles: number;
+  removedFiles: number;
+}
+
+export type GitSyncState =
+  | "unavailable"
+  | "disabled"
+  | "idle"
+  | "syncing"
+  | "paused"
+  | "error";
+
+export interface GitStatus {
+  available: boolean;
+  initialized: boolean;
+  enabled: boolean;
+  branch: string | null;
+  remote: string | null;
+  dirty: number;
+  ahead: number;
+  behind: number;
+  lastCommitAt: number | null;
+  lastPullAt: number | null;
+  state: GitSyncState;
+  lastError: string | null;
+  conflictFiles: string[];
+}
+
+export interface GitCommit {
+  hash: string;
+  shortHash: string;
+  message: string;
+  timestamp: number;
+}
+
+export interface GitRestoreReport {
+  safetyBackup: string;
+  commit: string;
+  files: number;
+}
+
+export type PullOutcome =
+  | { kind: "upToDate" }
+  | { kind: "noRemote" }
+  | { kind: "pulled"; commits: number; safetyBackup: string }
+  | { kind: "conflict"; files: string[]; safetyBackup: string };
 
 export interface ProxySettingsView {
   url: string | null;

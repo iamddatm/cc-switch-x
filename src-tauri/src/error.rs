@@ -28,6 +28,10 @@ pub enum AppError {
     Update(String),
     #[error("压缩包处理失败：{0}")]
     Archive(String),
+    #[error("备份失败：{0}")]
+    Backup(String),
+    #[error("Git 操作失败：{0}")]
+    Git(String),
     #[error("来源无效：{0}")]
     Source(String),
     #[error("会话解析失败：{0}")]

@@ -23,6 +23,7 @@ pub fn import_apply(
     state: State<'_, AppState>,
     policy: ConflictPolicy,
 ) -> Result<ImportSummary, AppError> {
+    let _guard = state.enter_write()?;
     let home = ccswitch_home(&state)?;
     let mut index = state
         .index
@@ -32,7 +33,11 @@ pub fn import_apply(
         .secrets
         .lock()
         .map_err(|_| AppError::InvalidInput("secrets 锁失败".into()))?;
-    import_service::apply(&state.store, &mut index, &mut secrets, &home, policy)
+    let summary = import_service::apply(&state.store, &mut index, &mut secrets, &home, policy)?;
+    drop(secrets);
+    drop(index);
+    state.notify_git("import: cc-switch");
+    Ok(summary)
 }
 
 /// 回滚最近一次写入。返回的条目数是被还原的文件数。

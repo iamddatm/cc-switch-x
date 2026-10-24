@@ -19,6 +19,7 @@ pub fn set_rule_enabled(
     agent_id: String,
     enabled: bool,
 ) -> Result<String, AppError> {
+    let _guard = state.enter_write()?;
     let descriptor = descriptor_for(&agent_id, AssetKind::Rule)?;
     let base = override_base(&state, &agent_id)?;
     let label = {
@@ -72,23 +73,31 @@ pub fn set_rule_enabled(
             matrix.disable(AssetType::Rule, &id);
         }
     })?;
+    state.notify_git(format!(
+        "{}: rules/{id} on {agent_id}",
+        if enabled { "enable" } else { "disable" }
+    ));
     Ok(label)
 }
 
 /// 把该 agent 规则目录里已有的文件读成真源资产（spec 7.3 的「采纳磁盘」）。
 #[tauri::command]
 pub fn scan_rules(state: State<'_, AppState>, agent_id: String) -> Result<ScanReport, AppError> {
+    let _guard = state.enter_write()?;
     let descriptor = descriptor_for(&agent_id, AssetKind::Rule)?;
     let base = override_base(&state, &agent_id)?;
     let mut index = state
         .index
         .lock()
         .map_err(|_| AppError::InvalidInput("index 锁失败".into()))?;
-    scan_service::rules(
+    let report = scan_service::rules(
         &state.store,
         &mut index,
         &descriptor,
         &state.home,
         base.as_deref(),
-    )
+    )?;
+    drop(index);
+    state.notify_git(format!("scan: rules on {agent_id}"));
+    Ok(report)
 }

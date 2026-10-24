@@ -54,6 +54,7 @@ pub fn set_mcp_enabled(
     agent_id: String,
     enabled: bool,
 ) -> Result<ApplyReport, AppError> {
+    let _guard = state.enter_write()?;
     let descriptor = descriptor_for(&agent_id, AssetKind::Mcp)?;
     let base = override_base(&state, &agent_id)?;
     // 取消 MCP 也会重写配置文件；没检测到就两边都不写，免得替用户建出目录。
@@ -94,6 +95,10 @@ pub fn set_mcp_enabled(
             matrix.disable(AssetType::Mcp, &id);
         }
     })?;
+    state.notify_git(format!(
+        "{}: mcp/{id} on {agent_id}",
+        if enabled { "enable" } else { "disable" }
+    ));
     Ok(report)
 }
 
@@ -106,6 +111,7 @@ pub fn set_skill_enabled(
     agent_id: String,
     enabled: bool,
 ) -> Result<String, AppError> {
+    let _guard = state.enter_write()?;
     let descriptor = descriptor_for(&agent_id, AssetKind::Skill)?;
     let base = override_base(&state, &agent_id)?;
     let label = if enabled {
@@ -137,6 +143,10 @@ pub fn set_skill_enabled(
             matrix.disable(AssetType::Skill, &id);
         }
     })?;
+    state.notify_git(format!(
+        "{}: skills/{id} on {agent_id}",
+        if enabled { "enable" } else { "disable" }
+    ));
     Ok(label)
 }
 
@@ -150,6 +160,7 @@ pub fn activate_prompt(
     confirm: Option<bool>,
     save_existing_as: Option<String>,
 ) -> Result<ActivateOutcome, AppError> {
+    let _guard = state.enter_write()?;
     let descriptor = descriptor_for(&agent_id, AssetKind::Prompt)?;
     let base = override_base(&state, &agent_id)?;
     ensure_agent_detected(&state.store, &state.home, &agent_id)?;
@@ -181,6 +192,7 @@ pub fn activate_prompt(
         update_matrix(&state.store, &agent_id, move |matrix| {
             matrix.active_prompt = Some(id);
         })?;
+        state.notify_git(format!("activate: prompts/{prompt_id} on {agent_id}"));
     }
     Ok(outcome)
 }
@@ -188,6 +200,7 @@ pub fn activate_prompt(
 /// 取消激活：只有目标文件确实是我们写的才删除；成功后清空矩阵里的 activePrompt。
 #[tauri::command]
 pub fn deactivate_prompt(state: State<'_, AppState>, agent_id: String) -> Result<bool, AppError> {
+    let _guard = state.enter_write()?;
     let descriptor = descriptor_for(&agent_id, AssetKind::Prompt)?;
     let base = override_base(&state, &agent_id)?;
     // 纯删除不会创建目录：配置根不在时本来就无文件可删，不做检测门禁。
@@ -196,6 +209,7 @@ pub fn deactivate_prompt(state: State<'_, AppState>, agent_id: String) -> Result
         update_matrix(&state.store, &agent_id, |matrix| {
             matrix.active_prompt = None;
         })?;
+        state.notify_git(format!("deactivate: prompts on {agent_id}"));
     }
     Ok(removed)
 }

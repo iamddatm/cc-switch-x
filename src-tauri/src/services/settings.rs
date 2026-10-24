@@ -2,7 +2,7 @@ use crate::domain::agent::builtin_agents;
 use crate::domain::secret::SecretRef;
 use crate::error::AppError;
 use crate::net::{parse_github_input, ProxyConfig};
-use crate::settings::{self, AppSettings, SkillRepo, Theme};
+use crate::settings::{self, AppSettings, BackupSettings, SkillRepo, Theme};
 use crate::store::secrets::Secrets;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -178,6 +178,37 @@ pub fn get() -> Result<AppSettings, AppError> {
     Ok(settings::load()?)
 }
 
+/// 备份策略与 Git 偏好。间隔 0 表示关闭自动快照；保留份数只影响 snapshots。
+pub fn set_backup_settings(backup: BackupSettings) -> Result<AppSettings, AppError> {
+    set_backup_settings_at(&settings::settings_path()?, backup)
+}
+
+pub fn set_backup_settings_at(
+    config_path: &std::path::Path,
+    mut backup: BackupSettings,
+) -> Result<AppSettings, AppError> {
+    if backup.interval_hours > 720 {
+        return Err(AppError::InvalidInput("自动备份间隔不能超过 720 小时".into()));
+    }
+    if !(1..=100).contains(&backup.retain_count) {
+        return Err(AppError::InvalidInput("保留份数必须在 1 到 100 之间".into()));
+    }
+    backup.git.branch = backup.git.branch.trim().to_string();
+    settings::validate_git_branch(&backup.git.branch).map_err(AppError::InvalidInput)?;
+    backup.git.remote = backup
+        .git
+        .remote
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(remote) = &backup.git.remote {
+        settings::validate_git_remote(remote).map_err(AppError::InvalidInput)?;
+    }
+    let mut current = settings::load_from(config_path)?;
+    current.backup = backup;
+    settings::save_to(config_path, &current)?;
+    Ok(current)
+}
+
 pub fn set_theme(theme: Theme) -> Result<AppSettings, AppError> {
     let mut current = settings::load()?;
     current.theme = theme;
@@ -245,6 +276,42 @@ mod tests {
         assert!(set_enabled_agents_at(&config, vec!["nope".into()]).is_err());
         let empty = set_enabled_agents_at(&config, Vec::new()).unwrap();
         assert_eq!(empty.enabled_agents, Some(Vec::new()), "空数组表示全部禁用");
+    }
+
+    #[test]
+    fn backup_settings_are_validated_and_persisted() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let backup = BackupSettings {
+            interval_hours: 6,
+            retain_count: 5,
+            git: crate::settings::GitBackupSettings {
+                enabled: true,
+                auto_commit: true,
+                auto_pull: false,
+                remote: Some("  https://example.com/assets.git  ".into()),
+                branch: " backup/x ".into(),
+            },
+        };
+        let updated = set_backup_settings_at(&config, backup).unwrap();
+        assert_eq!(updated.backup.interval_hours, 6);
+        assert_eq!(updated.backup.retain_count, 5);
+        assert_eq!(
+            updated.backup.git.remote.as_deref(),
+            Some("https://example.com/assets.git")
+        );
+        assert_eq!(updated.backup.git.branch, "backup/x");
+
+        let invalid = BackupSettings {
+            retain_count: 0,
+            ..updated.backup.clone()
+        };
+        assert!(set_backup_settings_at(&config, invalid).is_err());
+        let invalid = BackupSettings {
+            interval_hours: 999,
+            ..updated.backup.clone()
+        };
+        assert!(set_backup_settings_at(&config, invalid).is_err());
     }
 
     #[test]

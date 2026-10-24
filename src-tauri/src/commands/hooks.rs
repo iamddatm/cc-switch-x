@@ -26,6 +26,7 @@ pub fn set_hook_enabled(
     agent_id: String,
     enabled: bool,
 ) -> Result<ApplyReport, AppError> {
+    let _guard = state.enter_write()?;
     let descriptor = descriptor_for(&agent_id, AssetKind::Hook)?;
     let hook = read_hook(&state, &id)?;
     let base = override_base(&state, &agent_id)?;
@@ -52,6 +53,10 @@ pub fn set_hook_enabled(
             matrix.disable(AssetType::Hook, &id);
         }
     })?;
+    state.notify_git(format!(
+        "{}: hooks/{id} on {agent_id}",
+        if enabled { "enable" } else { "disable" }
+    ));
     Ok(report)
 }
 
