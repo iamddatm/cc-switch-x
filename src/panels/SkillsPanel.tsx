@@ -680,7 +680,6 @@ export function SkillsPanel() {
               {visible.map((item) => {
                 const detail = [
                   item.description,
-                  item.mtime ? `更新于 ${formatRelativeTime(item.mtime)}` : null,
                   item.origin?.lastCheckedAt
                     ? `检查于 ${formatRelativeTime(item.origin.lastCheckedAt)}`
                     : null,
@@ -691,6 +690,9 @@ export function SkillsPanel() {
                   <AssetRow
                     key={item.id}
                     title={item.name}
+                    subtitle={
+                      item.mtime ? `更新于 ${formatRelativeTime(item.mtime)}` : undefined
+                    }
                     description={detail || undefined}
                     leading={
                       <Checkbox

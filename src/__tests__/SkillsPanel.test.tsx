@@ -260,6 +260,7 @@ test("shows the source repo and update badge from metadata", async () => {
       name: "demo",
       updatedAt: 1,
       hash: "h",
+      mtime: Date.now() - 3 * 24 * 60 * 60 * 1000,
       origin: {
         kind: "cc-switch",
         repo: "acme/demo",
@@ -271,7 +272,9 @@ test("shows the source repo and update badge from metadata", async () => {
     },
   ]);
   render(<SkillsPanel />);
-  expect(await screen.findByText("acme/demo@main")).toBeInTheDocument();
+  expect(await screen.findByText("更新于 3 天前")).toBeInTheDocument();
+  expect(screen.getAllByText("acme/demo").length).toBeGreaterThan(0);
+  expect(screen.queryByText("acme/demo@main")).not.toBeInTheDocument();
   expect(screen.getByText("可更新")).toBeInTheDocument();
   expect(screen.getByText(/检查于/)).toBeInTheDocument();
 });
