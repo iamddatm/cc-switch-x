@@ -80,7 +80,7 @@ export function AgentColumnCells({
                 "flex h-4 w-4 items-center justify-center rounded-[4px] border-[1.5px] transition-colors duration-150",
                 "disabled:pointer-events-none disabled:opacity-45",
                 on
-                  ? "border-action bg-action text-white"
+                  ? "border-action bg-action text-action-fg"
                   : "border-border-strong bg-surface hover:border-fg-3",
               )}
             >

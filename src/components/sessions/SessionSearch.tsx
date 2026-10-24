@@ -1,4 +1,6 @@
 import { useState, type FormEvent } from "react";
+import { Button } from "../ui/Button";
+import { Input } from "../ui/Input";
 import { api } from "../../lib/api";
 import type { SessionMatch } from "../../types";
 
@@ -39,40 +41,36 @@ export function SessionSearch({
   return (
     <div className="space-y-2">
       <form className="flex items-center gap-2" onSubmit={submit}>
-        <input
+        <Input
           aria-label="在会话内查找"
-          className="min-w-48 flex-1 rounded border border-slate-300 px-3 py-1.5 text-sm dark:border-slate-600 dark:bg-slate-800"
+          className="min-w-48 flex-1"
           placeholder="在会话内查找"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
-        <button
-          type="submit"
-          className="rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:hover:bg-slate-700"
-          disabled={loading}
-        >
+        <Button type="submit" variant="secondary" disabled={loading}>
           {loading ? "查找中…" : "查找"}
-        </button>
+        </Button>
       </form>
       {error && (
-        <p role="alert" className="text-sm text-red-700">
+        <p role="alert" className="text-body text-danger-text">
           会话内查找失败：{error}
         </p>
       )}
       {matches !== null && (
         <div className="space-y-1">
           {matches.length === 0 ? (
-            <p className="text-sm text-slate-500">没有匹配的消息。</p>
+            <p className="text-body text-fg-3">没有匹配的消息。</p>
           ) : (
             <ul className="space-y-1">
               {matches.map((match) => (
                 <li key={`${match.seq}:${match.index}`}>
                   <button
                     type="button"
-                    className="w-full rounded border border-slate-200 px-2 py-1 text-left text-sm hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800"
+                    className="w-full rounded-panel border border-border bg-surface px-2 py-1 text-left text-body text-fg-1 hover:bg-subtle"
                     onClick={() => onSelect(match, query.trim())}
                   >
-                    <span className="mr-2 text-xs text-slate-500">
+                    <span className="mr-2 text-caption text-fg-3">
                       第 {match.index + 1} 条
                     </span>
                     <span>{match.snippet}</span>

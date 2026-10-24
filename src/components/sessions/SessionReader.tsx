@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
+import { Button } from "../ui/Button";
 import { api } from "../../lib/api";
 import type {
   ResumeInfo,
@@ -194,80 +195,71 @@ export function SessionReader({
 
   return (
     <section className="space-y-4">
-      <button
-        type="button"
-        className="rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-700"
-        onClick={onBack}
-      >
+      <Button variant="secondary" onClick={onBack}>
         返回列表
-      </button>
+      </Button>
 
       <header className="space-y-1">
-        <h2 className="text-xl font-semibold">{session.title}</h2>
-        <dl className="grid gap-x-4 gap-y-1 text-sm sm:grid-cols-2">
+        <h2 className="text-page text-fg-1">{session.title}</h2>
+        <dl className="grid gap-x-4 gap-y-1 text-body sm:grid-cols-2">
           <div>
-            <dt className="inline text-slate-500">工具：</dt>
+            <dt className="inline text-fg-3">工具：</dt>
             <dd className="inline">{agentName}</dd>
           </div>
           <div>
-            <dt className="inline text-slate-500">项目：</dt>
+            <dt className="inline text-fg-3">项目：</dt>
             <dd className="inline break-all">
               {session.projectPath ?? "未知项目"}
             </dd>
           </div>
           <div className="sm:col-span-2">
-            <dt className="inline text-slate-500">源文件：</dt>
+            <dt className="inline text-fg-3">源文件：</dt>
             <dd className="inline break-all">{session.sourcePath}</dd>
           </div>
           <div>
-            <dt className="inline text-slate-500">更新时间：</dt>
+            <dt className="inline text-fg-3">更新时间：</dt>
             <dd className="inline">{formatTime(session.updatedAt)}</dd>
           </div>
         </dl>
         {session.parseError && (
-          <p className="rounded border border-red-300 bg-red-50 p-2 text-sm text-red-700">
+          <p className="rounded-panel border border-danger bg-danger-soft p-2 text-body text-danger-text">
             上次解析失败：{session.parseError}
           </p>
         )}
-        <div className="flex flex-wrap items-center gap-2 pt-1 text-sm">
+        <div className="flex flex-wrap items-center gap-2 pt-1 text-body">
           {resume ? (
             <>
-              <button
-                type="button"
-                className="rounded border border-slate-300 px-3 py-1.5 hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-700"
-                onClick={() => void copyResume()}
-              >
+              <Button variant="secondary" onClick={() => void copyResume()}>
                 复制恢复命令
-              </button>
-              {copied && <span className="text-emerald-700">已复制</span>}
+              </Button>
+              {copied && <span className="text-success-text">已复制</span>}
             </>
           ) : resumeUnavailable ? (
-            <span className="text-xs text-slate-500">
+            <span className="text-caption text-fg-3">
               该会话没有可用的恢复命令。
             </span>
           ) : null}
-          <button
-            type="button"
-            className="rounded border border-slate-300 px-3 py-1.5 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-600 dark:hover:bg-slate-700"
+          <Button
+            variant="secondary"
             disabled={exporting}
             onClick={() => void exportMarkdown()}
           >
             {exporting ? "导出中…" : "导出 Markdown"}
-          </button>
+          </Button>
         </div>
         {resume && (
-          <code className="block break-all rounded bg-slate-100 px-2 py-1 text-xs dark:bg-slate-800">
+          <code className="block break-all rounded-control bg-subtle px-2 py-1 text-caption text-fg-2">
             {resume.command}
           </code>
         )}
-        <p className="text-xs text-amber-700">
+        <p className="text-caption text-warning-text">
           会话可能包含密钥与个人信息，导出文件不受本项目保护。
         </p>
         {exportMessage && (
-          <p className="text-sm text-emerald-700">{exportMessage}</p>
+          <p className="text-body text-success-text">{exportMessage}</p>
         )}
         {actionError && (
-          <p role="alert" className="text-sm text-red-700">
+          <p role="alert" className="text-body text-danger-text">
             操作失败：{actionError}
           </p>
         )}
@@ -280,13 +272,13 @@ export function SessionReader({
       />
 
       {error && (
-        <p role="alert" className="rounded border border-red-300 bg-red-50 p-2 text-sm text-red-700">
+        <p role="alert" className="rounded-panel border border-danger bg-danger-soft p-2 text-body text-danger-text">
           读取会话失败：{error}
         </p>
       )}
 
       {loading && messages.length === 0 ? (
-        <p className="text-sm text-slate-500">正在载入会话…</p>
+        <p className="text-body text-fg-3">正在载入会话…</p>
       ) : (
         <SessionTimeline
           messages={messages}

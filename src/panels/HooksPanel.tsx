@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { AgentMatrix } from "../components/AgentMatrix";
 import { HooksSafety } from "../components/HooksSafety";
+import { Button } from "../components/ui/Button";
+import { Input, Textarea } from "../components/ui/Input";
+import { Select } from "../components/ui/Select";
 import { useAgents } from "../hooks/useAgents";
 import { useAssets } from "../hooks/useAssets";
 import { api } from "../lib/api";
@@ -92,14 +95,18 @@ export function HooksPanel() {
   return (
     <div className="grid h-full grid-cols-[240px_1fr] gap-6 overflow-auto px-6 py-5">
       <section>
-        <h2 className="mb-3 text-xl font-semibold">Hooks</h2>
-        {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
-        <ul className="space-y-1">
+        <h2 className="mb-3 text-page text-fg-1">Hooks</h2>
+        {error && <p className="text-caption text-danger-text">{error}</p>}
+        <ul className="space-y-0.5">
           {items.map((item) => (
             <li key={item.id}>
               <button
                 type="button"
-                className="w-full rounded px-2 py-1 text-left hover:bg-slate-100 dark:hover:bg-slate-700"
+                className={`w-full rounded-control px-2.5 py-1.5 text-left text-body transition-colors duration-150 ${
+                  selected === item.id
+                    ? "bg-selected text-fg-1"
+                    : "text-fg-2 hover:bg-subtle hover:text-fg-1"
+                }`}
                 onClick={() => setSelected(item.id)}
               >
                 {item.name}
@@ -108,20 +115,16 @@ export function HooksPanel() {
           ))}
         </ul>
         <div className="mt-4 flex gap-2">
-          <input
+          <Input
             aria-label="新 hook ID"
-            className="min-w-0 flex-1 rounded border border-slate-300 bg-white px-2 py-1 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+            className="min-w-0 flex-1"
             placeholder="新 hook ID"
             value={newId}
             onChange={(e) => setNewId(e.target.value)}
           />
-          <button
-            type="button"
-            className="rounded border border-slate-300 px-2 py-1 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-700"
-            onClick={create}
-          >
+          <Button variant="secondary" onClick={create}>
             新建
-          </button>
+          </Button>
         </div>
       </section>
       <section>
@@ -129,37 +132,29 @@ export function HooksPanel() {
         {selected ? (
           <>
             <div className="mb-3 flex gap-2">
-              <button
-                type="button"
-                className="rounded bg-slate-800 px-3 py-1.5 text-sm text-white dark:bg-slate-600"
-                onClick={() => void save()}
-              >
+              <Button variant="primary" onClick={() => void save()}>
                 保存
-              </button>
-              <button
-                type="button"
-                className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700 dark:border-red-800 dark:text-red-300"
-                onClick={() => void remove()}
-              >
+              </Button>
+              <Button variant="danger" onClick={() => void remove()}>
                 删除
-              </button>
+              </Button>
             </div>
-            {formError && <p className="mb-2 text-sm text-red-600 dark:text-red-400">{formError}</p>}
-            <div className="space-y-2 text-sm">
+            {formError && <p className="mb-2 text-caption text-danger-text">{formError}</p>}
+            <div className="space-y-2 text-body">
               <label className="block">
                 名称
-                <input
+                <Input
                   aria-label="hook 名称"
-                  className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+                  className="mt-1"
                   value={form.name}
                   onChange={(e) => setForm({ ...form, name: e.target.value })}
                 />
               </label>
               <label className="block">
                 事件
-                <select
+                <Select
                   aria-label="hook 事件"
-                  className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+                  className="mt-1"
                   value={form.event}
                   onChange={(e) => setForm({ ...form, event: e.target.value })}
                 >
@@ -169,44 +164,44 @@ export function HooksPanel() {
                       {event}
                     </option>
                   ))}
-                </select>
+                </Select>
               </label>
               <label className="block">
                 matcher（可留空）
-                <input
+                <Input
                   aria-label="hook matcher"
-                  className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+                  className="mt-1"
                   value={form.matcher}
                   onChange={(e) => setForm({ ...form, matcher: e.target.value })}
                 />
               </label>
               <label className="block">
                 命令
-                <textarea
+                <Textarea
                   aria-label="hook 命令"
                   rows={3}
-                  className="mt-1 w-full whitespace-pre rounded border border-slate-300 bg-white p-2 font-mono text-xs dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+                  className="mt-1 whitespace-pre font-mono text-caption"
                   value={form.command}
                   onChange={(e) => setForm({ ...form, command: e.target.value })}
                 />
               </label>
               <label className="block">
                 Windows 上的替代命令（可留空）
-                <textarea
+                <Textarea
                   aria-label="hook Windows 命令"
                   rows={2}
-                  className="mt-1 w-full whitespace-pre rounded border border-slate-300 bg-white p-2 font-mono text-xs dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+                  className="mt-1 whitespace-pre font-mono text-caption"
                   value={form.commandWindows}
                   onChange={(e) => setForm({ ...form, commandWindows: e.target.value })}
                 />
               </label>
               <label className="block">
                 超时（秒，可留空）
-                <input
+                <Input
                   aria-label="hook 超时秒数"
                   type="number"
                   min={1}
-                  className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+                  className="mt-1"
                   value={form.timeout}
                   onChange={(e) => setForm({ ...form, timeout: e.target.value })}
                 />
@@ -214,10 +209,10 @@ export function HooksPanel() {
             </div>
             {/* spec 4.2：hook 是可执行内容，必须完整展示，不许省略号截断 */}
             <div className="mt-3">
-              <p className="text-xs text-slate-500 dark:text-slate-400">将要执行的完整命令</p>
+              <p className="text-caption text-fg-3">将要执行的完整命令</p>
               <pre
                 data-testid="hook-command"
-                className="mt-1 overflow-x-auto whitespace-pre-wrap break-all rounded border border-slate-300 bg-slate-50 p-2 font-mono text-xs dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+                className="mt-1 overflow-x-auto whitespace-pre-wrap break-all rounded-control border border-border bg-subtle p-2 font-mono text-caption text-fg-1"
               >
                 {form.commandWindows ? `${form.command}\n[Windows] ${form.commandWindows}` : form.command}
               </pre>
@@ -231,13 +226,13 @@ export function HooksPanel() {
                 void refreshAgents();
               }}
             />
-            <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+            <p className="mt-2 text-caption text-fg-3">
               写入只在 hooks 子树里增删带归属标记的那一条；同文件里的其他键与你自己的
               hook 一律不动。
             </p>
           </>
         ) : (
-          <p className="text-sm text-slate-500 dark:text-slate-400">选择左侧 hook 进行编辑。</p>
+          <p className="text-body text-fg-3">选择左侧 hook 进行编辑。</p>
         )}
       </section>
     </div>

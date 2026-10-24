@@ -82,7 +82,7 @@ export function Dialog({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-overlay p-4"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -96,7 +96,7 @@ export function Dialog({
         tabIndex={-1}
         style={{ maxWidth: width }}
         className={cn(
-          "max-h-[85vh] w-full overflow-auto rounded-dialog border border-border bg-surface p-6 shadow-xl",
+          "max-h-[85vh] w-full overflow-auto rounded-dialog border border-border bg-surface p-6 shadow-v7-lg",
           className,
         )}
       >

@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { AgentMatrix } from "../components/AgentMatrix";
 import { DriftBanner } from "../components/DriftBanner";
+import { Button } from "../components/ui/Button";
+import { Input, Textarea } from "../components/ui/Input";
+import { Select } from "../components/ui/Select";
 import { useAgents } from "../hooks/useAgents";
 import { useAssets } from "../hooks/useAssets";
 import { useDrift } from "../hooks/useDrift";
@@ -82,14 +85,18 @@ export function RulesPanel() {
   return (
     <div className="grid h-full grid-cols-[240px_1fr] gap-6 overflow-auto px-6 py-5">
       <section>
-        <h2 className="mb-3 text-xl font-semibold">Rules</h2>
-        {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
-        <ul className="space-y-1">
+        <h2 className="mb-3 text-page text-fg-1">Rules</h2>
+        {error && <p className="text-caption text-danger-text">{error}</p>}
+        <ul className="space-y-0.5">
           {items.map((item) => (
             <li key={item.id}>
               <button
                 type="button"
-                className="w-full rounded px-2 py-1 text-left hover:bg-slate-100 dark:hover:bg-slate-700"
+                className={`w-full rounded-control px-2.5 py-1.5 text-left text-body transition-colors duration-150 ${
+                  selected === item.id
+                    ? "bg-selected text-fg-1"
+                    : "text-fg-2 hover:bg-subtle hover:text-fg-1"
+                }`}
                 onClick={() => setSelected(item.id)}
               >
                 {item.name}
@@ -98,35 +105,31 @@ export function RulesPanel() {
           ))}
         </ul>
         {items.length === 0 && (
-          <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+          <p className="mt-2 text-caption text-fg-3">
             真源里还没有规则。可以在下面新建，或从某个 agent 的规则目录扫描进来。
           </p>
         )}
         <div className="mt-4 flex gap-2">
-          <input
+          <Input
             aria-label="新规则 ID"
-            className="min-w-0 flex-1 rounded border border-slate-300 bg-white px-2 py-1 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+            className="min-w-0 flex-1"
             placeholder="新规则 ID"
             value={newId}
             onChange={(e) => setNewId(e.target.value)}
           />
-          <button
-            type="button"
-            className="rounded border border-slate-300 px-2 py-1 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-700"
-            onClick={create}
-          >
+          <Button variant="secondary" onClick={create}>
             新建
-          </button>
+          </Button>
         </div>
-        <button
-          type="button"
-          className="mt-2 w-full rounded border border-slate-300 px-2 py-1 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-700"
+        <Button
+          variant="secondary"
+          className="mt-2 w-full"
           onClick={() => void scanRules()}
         >
           从 agent 目录扫描导入
-        </button>
+        </Button>
         {scan && (
-          <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+          <p className="mt-2 text-caption text-fg-3">
             新增 {scan.imported}、更新 {scan.updated}、未变 {scan.unchanged}
             {scan.skipped.length > 0 && `、跳过 ${scan.skipped.length}（${scan.skipped.map((s) => s.file).join("、")}）`}
           </p>
@@ -141,56 +144,48 @@ export function RulesPanel() {
         {selected ? (
           <>
             <div className="mb-3 flex gap-2">
-              <button
-                type="button"
-                className="rounded bg-slate-800 px-3 py-1.5 text-sm text-white dark:bg-slate-600"
-                onClick={() => void save()}
-              >
+              <Button variant="primary" onClick={() => void save()}>
                 保存
-              </button>
-              <button
-                type="button"
-                className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700 dark:border-red-800 dark:text-red-300"
-                onClick={() => void remove()}
-              >
+              </Button>
+              <Button variant="danger" onClick={() => void remove()}>
                 删除
-              </button>
+              </Button>
             </div>
-            {formError && <p className="mb-2 text-sm text-red-600 dark:text-red-400">{formError}</p>}
-            {drift.error && <p className="mb-2 text-sm text-red-600 dark:text-red-400">{drift.error}</p>}
-            <div className="space-y-2 text-sm">
+            {formError && <p className="mb-2 text-caption text-danger-text">{formError}</p>}
+            {drift.error && <p className="mb-2 text-caption text-danger-text">{drift.error}</p>}
+            <div className="space-y-2 text-body">
               <label className="block">
                 名称
-                <input
+                <Input
                   aria-label="规则名称"
-                  className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+                  className="mt-1"
                   value={form.name}
                   onChange={(e) => setForm({ ...form, name: e.target.value })}
                 />
               </label>
               <label className="block">
                 说明
-                <input
+                <Input
                   aria-label="规则说明"
-                  className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+                  className="mt-1"
                   value={form.description}
                   onChange={(e) => setForm({ ...form, description: e.target.value })}
                 />
               </label>
               <label className="block">
                 生效范围（逗号分隔的 glob）
-                <input
+                <Input
                   aria-label="规则生效范围"
-                  className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+                  className="mt-1"
                   value={fromList(form.paths)}
                   onChange={(e) => setForm({ ...form, paths: toList(e.target.value) })}
                 />
               </label>
               <label className="block">
                 trigger
-                <select
+                <Select
                   aria-label="规则 trigger"
-                  className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+                  className="mt-1"
                   value={form.trigger}
                   onChange={(e) => setForm({ ...form, trigger: e.target.value })}
                 >
@@ -199,14 +194,14 @@ export function RulesPanel() {
                       {option.label}
                     </option>
                   ))}
-                </select>
+                </Select>
               </label>
               <label className="block">
                 正文（markdown）
-                <textarea
+                <Textarea
                   aria-label="规则正文"
                   rows={10}
-                  className="mt-1 w-full rounded border border-slate-300 bg-white p-2 font-mono text-xs dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+                  className="mt-1 font-mono text-caption"
                   value={form.body}
                   onChange={(e) => setForm({ ...form, body: e.target.value })}
                 />
@@ -222,13 +217,13 @@ export function RulesPanel() {
                 void drift.refresh();
               }}
             />
-            <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+            <p className="mt-2 text-caption text-fg-3">
               落盘时按各 agent 的形状渲染（Qoder 用 trigger + 单行 glob），回推只换正文，
               真源自己的生效范围不会被工具侧的派生字段反向覆盖。
             </p>
           </>
         ) : (
-          <p className="text-sm text-slate-500 dark:text-slate-400">选择左侧规则进行编辑。</p>
+          <p className="text-body text-fg-3">选择左侧规则进行编辑。</p>
         )}
       </section>
     </div>

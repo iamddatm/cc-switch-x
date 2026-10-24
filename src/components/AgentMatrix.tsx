@@ -30,9 +30,9 @@ export function AgentMatrix({
 
   return (
     <div className="mt-4">
-      <h3 className="mb-2 text-sm font-medium">同步到</h3>
-      {error && <p className="mb-2 text-sm text-danger-text">{error}</p>}
-      <ul className="space-y-1 text-sm">
+      <h3 className="mb-2 text-strong text-fg-1">同步到</h3>
+      {error && <p className="mb-2 text-caption text-danger-text">{error}</p>}
+      <ul className="space-y-1 text-body">
         {agents.map((agent) => {
           if (!agent.enabled) return null;
           if (!supported(agent, assetType)) {

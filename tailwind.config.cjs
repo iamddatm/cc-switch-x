@@ -19,10 +19,18 @@ module.exports = {
         },
         action: {
           DEFAULT: "var(--action)",
+          fg: "var(--action-fg)",
           hover: "var(--action-hover)",
           text: "var(--action-text)",
           soft: "var(--action-soft)",
         },
+        inverse: {
+          DEFAULT: "var(--inverse)",
+          fg: "var(--inverse-fg)",
+          hover: "var(--inverse-hover)",
+        },
+        overlay: "var(--overlay)",
+        "control-off": "var(--control-off)",
         success: {
           DEFAULT: "var(--success)",
           text: "var(--success-text)",
@@ -44,6 +52,39 @@ module.exports = {
         control: "6px",
         panel: "10px",
         dialog: "14px",
+      },
+      boxShadow: {
+        "v7-sm": "var(--shadow-sm)",
+        "v7-md": "var(--shadow-md)",
+        "v7-lg": "var(--shadow-lg)",
+      },
+      fontFamily: {
+        // 与 cc-switch 保持同一套系统字体栈，不加载网络字体
+        sans: [
+          "-apple-system",
+          "BlinkMacSystemFont",
+          '"SF Pro Text"',
+          '"PingFang SC"',
+          '"Hiragino Sans GB"',
+          '"Segoe UI Variable Text"',
+          '"Segoe UI"',
+          '"Microsoft YaHei UI"',
+          '"Microsoft YaHei"',
+          "Roboto",
+          '"Helvetica Neue"',
+          "Arial",
+          "system-ui",
+          "sans-serif",
+        ],
+        mono: [
+          "ui-monospace",
+          "SFMono-Regular",
+          '"SF Mono"',
+          "Consolas",
+          '"Liberation Mono"',
+          "Menlo",
+          "monospace",
+        ],
       },
       fontSize: {
         badge: ["11px", { lineHeight: "16px", fontWeight: "500" }],

@@ -38,7 +38,7 @@ export function Sidebar({
   return (
     <nav className="flex w-[200px] shrink-0 flex-col border-r border-border bg-sidebar">
       <div className="flex h-[52px] shrink-0 items-center gap-2 border-b border-border px-4">
-        <span className="flex h-6 w-6 items-center justify-center rounded-control bg-action text-white">
+        <span className="flex h-6 w-6 items-center justify-center rounded-control bg-action text-action-fg">
           <Layers size={14} aria-hidden />
         </span>
         <span className="text-strong text-fg-1">CC Switch X</span>

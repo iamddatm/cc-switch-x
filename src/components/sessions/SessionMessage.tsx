@@ -18,52 +18,50 @@ export function SessionMessage({
     <article
       id={`session-message-${message.seq}`}
       data-highlighted={highlighted ? "true" : undefined}
-      className={`rounded border px-3 py-2 ${
-        highlighted
-          ? "border-amber-400 bg-amber-50 dark:bg-amber-950"
-          : "border-slate-200 dark:border-slate-700"
+      className={`rounded-panel border px-3 py-2 ${
+        highlighted ? "border-warning bg-warning-soft" : "border-border bg-surface"
       }`}
     >
-      <div className="mb-1 flex items-center gap-2 text-xs text-slate-500">
-        <span className="rounded bg-slate-100 px-1 dark:bg-slate-700">
+      <div className="mb-1 flex items-center gap-2 text-caption text-fg-3">
+        <span className="rounded-control bg-subtle px-1 text-fg-2">
           {roleLabel(message.role)}
         </span>
         <span>{kindLabel(message.kind)}</span>
       </div>
       {message.kind === "thinking" && (
         <details>
-          <summary className="cursor-pointer text-sm font-medium">思考</summary>
-          <div className="mt-1 whitespace-pre-wrap text-sm text-slate-600 dark:text-slate-300">
+          <summary className="cursor-pointer text-body font-medium text-fg-1">思考</summary>
+          <div className="mt-1 whitespace-pre-wrap text-body text-fg-2">
             {content}
           </div>
         </details>
       )}
       {message.kind === "tool_call" && (
         <details>
-          <summary className="cursor-pointer text-sm font-medium">
+          <summary className="cursor-pointer text-body font-medium text-fg-1">
             工具调用 · {toolName}
           </summary>
-          <pre className="mt-1 overflow-auto whitespace-pre-wrap text-xs">
+          <pre className="mt-1 overflow-auto whitespace-pre-wrap font-mono text-caption text-fg-2">
             {content}
           </pre>
         </details>
       )}
       {message.kind === "tool_result" && (
         <details>
-          <summary className="cursor-pointer text-sm font-medium">
+          <summary className="cursor-pointer text-body font-medium text-fg-1">
             工具结果 · {toolName}
           </summary>
-          <pre className="mt-1 overflow-auto whitespace-pre-wrap text-xs">
+          <pre className="mt-1 overflow-auto whitespace-pre-wrap font-mono text-caption text-fg-2">
             {content}
           </pre>
         </details>
       )}
       {message.kind === "image" && <ImageBlock content={message.content} />}
       {message.kind === "event" && (
-        <div className="whitespace-pre-wrap text-sm text-slate-500">{content}</div>
+        <div className="whitespace-pre-wrap text-body text-fg-3">{content}</div>
       )}
       {message.kind === "text" && (
-        <div className="whitespace-pre-wrap text-sm">{content}</div>
+        <div className="whitespace-pre-wrap text-body text-fg-1">{content}</div>
       )}
     </article>
   );
@@ -73,7 +71,7 @@ function ImageBlock({ content }: { content: string }) {
   const [broken, setBroken] = useState(false);
   if (!content.startsWith("data:") || broken) {
     return (
-      <p className="text-sm text-amber-700">
+      <p className="text-body text-warning-text">
         图片无法显示：
         {content.startsWith("data:") ? "内联图片已损坏" : content}
       </p>
@@ -83,7 +81,7 @@ function ImageBlock({ content }: { content: string }) {
     <img
       src={content}
       alt="会话图片"
-      className="max-h-96 max-w-full rounded"
+      className="max-h-96 max-w-full rounded-control"
       onError={() => setBroken(true)}
     />
   );

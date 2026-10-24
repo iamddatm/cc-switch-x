@@ -42,7 +42,7 @@ export function SearchField({
           type="button"
           aria-label={clearLabel}
           onClick={() => onValueChange("")}
-          className="absolute right-1.5 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-fg-3 hover:bg-subtle hover:text-fg-1"
+          className="absolute right-1.5 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-control text-fg-3 hover:bg-subtle hover:text-fg-1"
         >
           <X size={12} aria-hidden />
         </button>

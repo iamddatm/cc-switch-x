@@ -2,60 +2,78 @@
 @tailwind components;
 @tailwind utilities;
 
-/* 语义色 token：亮/暗两套。业务组件只写语义类（bg-surface、text-fg-2 等），
-   避免再出现 slate/amber/red 散落在各面板里的情况。 */
+/* 语义色 token：亮/暗两套，取值与 cc-switch 的 v7 设计 token 保持一致。
+   业务组件只写语义类（bg-surface、text-fg-2 等），避免 slate/amber/red 散落在各面板。 */
 :root {
-  --app: #f7f7f8;
-  --sidebar: #f2f2f4;
-  --subtle: #f5f5f7;
-  --selected: #ececef;
+  --app: #ffffff;
+  --sidebar: #f5f5f7;
+  --subtle: #efeff2;
+  --selected: #e4e4ea;
   --surface: #ffffff;
-  --border: #e4e4e8;
-  --border-strong: #d4d4d8;
+  --border: hsl(240 10.2% 90.4%);
+  --border-strong: #cfcfd6;
   --fg-1: #18181b;
   --fg-2: #52525b;
-  --fg-3: #8b8b93;
+  --fg-3: #65656e;
   --action: #f97316;
+  --action-fg: #ffffff;
   --action-hover: #ea620a;
   --action-text: #c2410c;
   --action-soft: #fff1e6;
+  --inverse: #18181b;
+  --inverse-fg: #ffffff;
+  --inverse-hover: #2e2e33;
+  --overlay: rgba(9, 9, 11, 0.36);
+  --control-off: #888890;
   --success: #16a34a;
-  --success-text: #15803d;
-  --success-soft: #ecfdf3;
+  --success-text: #007634;
+  --success-soft: #e8f7ee;
   --warning: #d97706;
-  --warning-text: #b45309;
-  --warning-soft: #fffbeb;
+  --warning-text: #a64a00;
+  --warning-soft: #fef3c7;
   --danger: #dc2626;
   --danger-text: #b91c1c;
-  --danger-soft: #fef2f2;
-  --ring: #f97316;
+  --danger-soft: #fee2e2;
+  --ring: hsl(24.6 95% 53.1%);
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-md: 0 4px 12px rgba(16, 24, 40, 0.08), 0 1px 3px rgba(16, 24, 40, 0.06);
+  --shadow-lg: 0 20px 40px rgba(16, 24, 40, 0.16), 0 4px 12px rgba(16, 24, 40, 0.08);
 }
 
 html.dark {
-  --app: #161618;
-  --sidebar: #1c1c1e;
+  --app: #1c1c1e;
+  --sidebar: #161618;
   --subtle: #26262a;
   --selected: #313136;
   --surface: #2e2e33;
-  --border: #3a3a40;
+  --border: hsl(240 5.3% 25.7%);
   --border-strong: #4a4a52;
-  --fg-1: #f4f4f5;
-  --fg-2: #a1a1aa;
-  --fg-3: #71717a;
+  --fg-1: #e4e4e7;
+  --fg-2: #ababb3;
+  --fg-3: #9a9aa2;
   --action: #ea580c;
-  --action-hover: #f97316;
+  --action-fg: #ffffff;
+  --action-hover: #f06d1f;
   --action-text: #fb923c;
-  --action-soft: #3a2416;
-  --success: #22c55e;
+  --action-soft: rgba(249, 115, 21, 0.12);
+  --inverse: #f4f4f5;
+  --inverse-fg: #18181b;
+  --inverse-hover: #e4e4e7;
+  --overlay: rgba(0, 0, 0, 0.55);
+  --control-off: #6f6f77;
+  --success: #4ade80;
   --success-text: #4ade80;
-  --success-soft: #14311f;
-  --warning: #f59e0b;
-  --warning-text: #fbbf24;
-  --warning-soft: #3a2c12;
-  --danger: #ef4444;
-  --danger-text: #f87171;
-  --danger-soft: #3b1717;
-  --ring: #fb923c;
+  --success-soft: #0f2b1a;
+  --warning: #fbbf24;
+  --warning-text: #fcd34d;
+  --warning-soft: #33260a;
+  --danger: #f87171;
+  --danger-text: #fca5a5;
+  --danger-soft: #3a1414;
+  --ring: hsl(24 66% 54%);
+  --shadow-sm: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 20px 40px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.4);
 }
 
 html,
@@ -64,12 +82,22 @@ body,
   height: 100%;
 }
 
+html {
+  @apply font-sans antialiased;
+  line-height: 1.5;
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
 body {
   margin: 0;
   background-color: var(--app);
   color: var(--fg-1);
-  font-family: system-ui, "Microsoft YaHei", sans-serif;
-  -webkit-font-smoothing: antialiased;
+  font-size: 14px;
+  line-height: 20px;
   text-rendering: optimizeLegibility;
 }
 

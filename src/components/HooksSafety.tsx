@@ -13,11 +13,11 @@ export function HooksSafety({
   gate: { file: string; why: string } | null;
 }) {
   return (
-    <div className="mb-3 space-y-2 text-sm">
+    <div className="mb-3 space-y-2 text-body">
       {gate && (
         <p
           role="alert"
-          className="rounded border border-red-300 bg-red-50 p-2 text-red-800 dark:border-red-700 dark:bg-red-950 dark:text-red-300"
+          className="rounded-panel border border-danger bg-danger-soft p-2 text-danger-text"
         >
           {gate.why}
         </p>
@@ -25,7 +25,7 @@ export function HooksSafety({
       {counts
         .filter((entry) => entry.count > 0)
         .map((entry) => (
-          <p key={entry.agent} className="text-slate-600 dark:text-slate-300">
+          <p key={entry.agent} className="text-fg-2">
             {entry.agent} 的 hook 文件里还有 {entry.count} 条不是本工具写的 hook，我们不会动它们。
           </p>
         ))}

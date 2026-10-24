@@ -99,7 +99,7 @@ export function Menu({
             role="menu"
             aria-label={label}
             style={{ top: position.top, left: position.left }}
-            className="fixed z-[70] w-44 rounded-panel border border-border bg-surface p-1 shadow-xl"
+            className="fixed z-[70] w-44 rounded-panel border border-border bg-surface p-1 shadow-v7-md"
           >
             {items.map((item) => (
               <button

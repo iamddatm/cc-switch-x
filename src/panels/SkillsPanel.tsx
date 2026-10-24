@@ -317,7 +317,7 @@ export function SkillsPanel() {
                   添加 Skill
                 </>
               }
-              buttonClassName="h-8 w-auto whitespace-nowrap bg-action px-3 text-body font-medium text-white hover:bg-action-hover hover:text-white"
+              buttonClassName="h-8 w-auto whitespace-nowrap bg-action px-3 text-body font-medium text-action-fg hover:bg-action-hover hover:text-action-fg"
               items={[
                 { label: "新建 Skill", onSelect: create },
                 { label: "从文件夹导入", onSelect: () => void importDirectory() },

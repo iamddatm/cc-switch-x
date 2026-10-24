@@ -38,7 +38,7 @@ function CheckPopover({ label, children }: { label: string; children: ReactNode 
         {label}
         <ChevronDown size={12} aria-hidden />
       </summary>
-      <div className="absolute end-0 z-30 mt-1 max-h-72 w-64 overflow-auto rounded-panel border border-border bg-surface p-2 shadow-xl">
+      <div className="absolute end-0 z-30 mt-1 max-h-72 w-64 overflow-auto rounded-panel border border-border bg-surface p-2 shadow-v7-md">
         {children}
       </div>
     </details>

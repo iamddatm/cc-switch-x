@@ -1,3 +1,4 @@
+import { Button } from "./ui/Button";
 import type { DriftRecord, ResolveAction } from "../types";
 
 /**
@@ -20,9 +21,9 @@ export function DriftBanner({
     <div
       role="region"
       aria-label="落盘漂移"
-      className="mb-4 space-y-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-700 dark:bg-amber-950"
+      className="mb-4 space-y-3 rounded-panel border border-warning bg-warning-soft p-3 text-body"
     >
-      <p className="font-medium text-amber-800 dark:text-amber-300">
+      <p className="font-medium text-warning-text">
         磁盘与真源不一致的有 {drifts.length} 处。先决定怎么处理，再改开关。
       </p>
       {drifts.map((drift) => (
@@ -31,23 +32,23 @@ export function DriftBanner({
             {drift.agentId} / {drift.assetType} / {drift.assetId}：
             {drift.kind === "missing" ? "落盘的文件不见了" : "落盘的内容被改过"}
           </span>
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
             disabled={busy || drift.kind === "missing"}
-            className="rounded border border-slate-300 px-2 py-1 dark:border-slate-600 disabled:opacity-50"
             onClick={() => onResolve(drift, "adoptDisk")}
           >
             采纳磁盘
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
             disabled={busy}
-            className="rounded border border-slate-300 px-2 py-1 dark:border-slate-600 disabled:opacity-50"
             onClick={() => onResolve(drift, "repushSource")}
           >
             重刷真源
-          </button>
-          <code className="w-full break-all text-xs text-slate-600 dark:text-slate-300">
+          </Button>
+          <code className="w-full break-all text-caption text-fg-2">
             {drift.targetPath}
           </code>
         </div>
