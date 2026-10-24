@@ -7,7 +7,9 @@ use crate::error::AppError;
 use crate::import::mcp::ConflictPolicy;
 use crate::net::HttpFetcher;
 use crate::services::settings as settings_service;
-use crate::services::skill_discovery::{self, SkillDiscoveryReport, SkillsShSearchResult};
+use crate::services::skill_discovery::{
+    self, SkillDiscoveryReport, SkillsShSearchResult, SkillsShTrendingResult,
+};
 use crate::services::skill_source::{
     self, InstallSelection, SkillBatchReport, SkillInstallOutcome, SkillInstallReport,
     SkillSourceInput, SkillSourcePreview, SkillUninstallReport,
@@ -234,4 +236,13 @@ pub async fn search_skills_sh(
     let proxy = state.proxy_config()?;
     run_blocking(move || skill_discovery::search_skills_sh(Some(&proxy), &query, limit, offset))
         .await
+}
+
+#[tauri::command]
+pub async fn list_skills_sh_trending(
+    state: State<'_, AppState>,
+    page: usize,
+) -> Result<SkillsShTrendingResult, AppError> {
+    let proxy = state.proxy_config()?;
+    run_blocking(move || skill_discovery::trending_skills_sh(Some(&proxy), page)).await
 }

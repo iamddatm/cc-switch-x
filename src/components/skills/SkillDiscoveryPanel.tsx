@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, Download, RefreshCw, Sparkles } from "lucide-react";
 import { api } from "../../lib/api";
 import type {
@@ -28,6 +28,17 @@ function repoKey(repo: SkillRepo): string {
 function formatInstalls(count: number): string {
   if (count >= 1000) return `${(count / 1000).toFixed(1)}k`;
   return String(count);
+}
+
+/** 翻页结果合并：第 0 页直接替换，后续页按 key 去重追加。 */
+function mergeShPage(
+  previous: SkillsShSkill[],
+  page: SkillsShSkill[],
+  replace: boolean,
+): SkillsShSkill[] {
+  if (replace) return page;
+  const seen = new Set(previous.map((item) => item.key));
+  return [...previous, ...page.filter((item) => !seen.has(item.key))];
 }
 
 /** 多选筛选的下拉层；用原生 details，点选不会像菜单那样立即收起。 */
@@ -82,6 +93,15 @@ export function SkillDiscoveryPanel({
   const [shQueryDone, setShQueryDone] = useState<string | null>(null);
   const [shInstalled, setShInstalled] = useState<Set<string>>(new Set());
 
+  // 不搜索时展示站点「Trending (24h)」榜单，等同 https://www.skills.sh/trending。
+  const [shTrending, setShTrending] = useState<SkillsShSkill[]>([]);
+  const [shTrendingPage, setShTrendingPage] = useState(0);
+  const [shTrendingHasMore, setShTrendingHasMore] = useState(false);
+  const [shTrendingLoading, setShTrendingLoading] = useState(false);
+  const [shTrendingError, setShTrendingError] = useState<string | null>(null);
+  // 用 ref 而不是 state 做「只拉一次」的闸门：StrictMode 下 effect 双调用也不会重复请求。
+  const trendingRequested = useRef(false);
+
   const loadRepos = useCallback(async () => {
     setReposLoading(true);
     setReposError(null);
@@ -111,7 +131,29 @@ export function SkillDiscoveryPanel({
     void refreshDiscovery();
   }, [loadRepos, refreshDiscovery]);
 
-  const enabledRepos = repos.filter((repo) => repo.enabled);
+  const loadTrending = useCallback(async (page: number) => {
+    setShTrendingLoading(true);
+    setShTrendingError(null);
+    try {
+      const result = await api.listSkillsShTrending(page);
+      setShTrending((previous) => mergeShPage(previous, result.skills, page === 0));
+      setShTrendingPage(page);
+      setShTrendingHasMore(result.hasMore);
+    } catch (e) {
+      setShTrendingError(String(e));
+    } finally {
+      setShTrendingLoading(false);
+    }
+  }, []);
+
+  // 切到 skills.sh 时默认落在趋势榜，不要求先输入关键词。
+  useEffect(() => {
+    if (source !== "skillssh" || trendingRequested.current) return;
+    trendingRequested.current = true;
+    void loadTrending(0);
+  }, [source, loadTrending]);
+
+  const enabledRepos = useMemo(() => repos.filter((repo) => repo.enabled), [repos]);
   const selectedRepoKeys = useMemo(
     () =>
       new Set(
@@ -131,19 +173,30 @@ export function SkillDiscoveryPanel({
           ? "未选择 Agent"
           : targetAgents.map((agent) => agent.displayName).join("、");
 
+  // 结果列表每行都要判断是否已安装；预先按「同名 + 仓库」和「同名 + 目录」建索引，
+  // 避免每行线性扫描 installedItems。
+  const installedIndex = useMemo(() => {
+    const byRepo = new Set<string>();
+    const byDirectory = new Set<string>();
+    for (const item of installedItems) {
+      const name = item.name.toLowerCase();
+      const repo = item.origin?.repo?.toLowerCase();
+      if (repo) byRepo.add(`${name}\u0000${repo}`);
+      else byDirectory.add(`${name}\u0000${item.id.toLowerCase()}`);
+    }
+    return { byRepo, byDirectory };
+  }, [installedItems]);
+
   const shIsInstalled = (skill: SkillsShSkill) => {
     if (shInstalled.has(skill.key)) return true;
     const repo = `${skill.repoOwner}/${skill.repoName}`.toLowerCase();
     const name = skill.name.toLowerCase();
     // skills.sh 的结果没有本地候选 ID，只能按「同仓库 + 同名」判断；
     // 没有来源元数据的老 Skill 才退回到目录名匹配。
-    return installedItems.some((item) => {
-      if (item.name.toLowerCase() !== name) return false;
-      const originRepo = item.origin?.repo?.toLowerCase();
-      return originRepo
-        ? originRepo === repo
-        : item.id.toLowerCase() === skill.directory.toLowerCase();
-    });
+    return (
+      installedIndex.byRepo.has(`${name}\u0000${repo}`) ||
+      installedIndex.byDirectory.has(`${name}\u0000${skill.directory.toLowerCase()}`)
+    );
   };
 
   const normalizedQuery = query.trim().toLowerCase();
@@ -155,10 +208,17 @@ export function SkillDiscoveryPanel({
       (value) => value.toLowerCase().includes(normalizedQuery),
     );
   });
-  const visibleSh = shResults.filter(
+  const shSearching = shQueryDone !== null;
+  const visibleSh = (shSearching ? shResults : shTrending).filter(
     (skill) => !onlyUninstalled || !shIsInstalled(skill),
   );
   const failures = report?.failures ?? [];
+
+  const changeShQuery = (value: string) => {
+    setQuery(value);
+    // 清空关键词就回到趋势榜，保留「搜索 → 清空 → 浏览」的自然路径。
+    if (shSearching && value.trim() === "") setShQueryDone(null);
+  };
 
   const submitSh = async (offset: number) => {
     const trimmed = query.trim();
@@ -417,29 +477,45 @@ export function SkillDiscoveryPanel({
   };
 
   const renderShRows = () => {
-    if (shLoading && shResults.length === 0) {
-      return <p className="py-12 text-center text-caption text-fg-3">正在搜索 skills.sh…</p>;
-    }
-    if (shError) {
-      return (
-        <EmptyState
-          icon={Sparkles}
-          title="skills.sh 搜索失败"
-          description={shError}
-          actions={
-            <Button onClick={() => void submitSh(shOffset)}>重试</Button>
-          }
-        />
-      );
-    }
-    if (shQueryDone === null) {
-      return (
-        <EmptyState
-          icon={Sparkles}
-          title="搜索 skills.sh"
-          description="输入至少 2 个字符，按回车或点击搜索，从公共目录查找 Skill。"
-        />
-      );
+    if (!shSearching) {
+      if (shTrendingLoading && shTrending.length === 0) {
+        return (
+          <p className="py-12 text-center text-caption text-fg-3">正在读取 skills.sh 趋势榜…</p>
+        );
+      }
+      if (shTrending.length === 0) {
+        const failed = shTrendingError !== null;
+        return (
+          <EmptyState
+            icon={Sparkles}
+            title={failed ? "趋势榜读取失败" : "趋势榜暂时为空"}
+            description={
+              failed ? (shTrendingError ?? "") : "稍后再试，或直接输入关键词搜索 skills.sh。"
+            }
+            actions={
+              <Button onClick={() => void loadTrending(0)}>
+                {failed ? "重试" : "重新加载"}
+              </Button>
+            }
+          />
+        );
+      }
+    } else {
+      if (shLoading && shResults.length === 0) {
+        return <p className="py-12 text-center text-caption text-fg-3">正在搜索 skills.sh…</p>;
+      }
+      if (shError) {
+        return (
+          <EmptyState
+            icon={Sparkles}
+            title="skills.sh 搜索失败"
+            description={shError}
+            actions={
+              <Button onClick={() => void submitSh(shOffset)}>重试</Button>
+            }
+          />
+        );
+      }
     }
     if (visibleSh.length === 0) {
       return (
@@ -457,8 +533,30 @@ export function SkillDiscoveryPanel({
         />
       );
     }
+    const pager = shSearching
+      ? {
+          hasMore: shHasMore,
+          loading: shLoading,
+          count: shResults.length,
+          loadMore: () => void submitSh(shOffset + 20),
+        }
+      : {
+          hasMore: shTrendingHasMore,
+          loading: shTrendingLoading,
+          count: shTrending.length,
+          loadMore: () => void loadTrending(shTrendingPage + 1),
+        };
     return (
       <>
+        {!shSearching && (
+          <div className="flex items-center justify-between border-b border-border px-4 py-2 text-caption text-fg-3">
+            <span>skills.sh 趋势榜 · 近 24 小时</span>
+            <span>
+              已加载 {shTrending.length}
+              {shTrendingHasMore ? "+" : ""}
+            </span>
+          </div>
+        )}
         <ul className="divide-y divide-border">
           {visibleSh.map((skill) => {
             const installed = shIsInstalled(skill);
@@ -506,14 +604,10 @@ export function SkillDiscoveryPanel({
             );
           })}
         </ul>
-        {shHasMore && (
+        {pager.hasMore && (
           <div className="border-t border-border p-3 text-center">
-            <Button
-              size="sm"
-              loading={shLoading}
-              onClick={() => void submitSh(shOffset + 20)}
-            >
-              加载更多（已加载 {shResults.length}）
+            <Button size="sm" loading={pager.loading} onClick={pager.loadMore}>
+              加载更多（已加载 {pager.count}）
             </Button>
           </div>
         )}
@@ -612,7 +706,7 @@ export function SkillDiscoveryPanel({
         <SearchField
           className="w-[240px] shrink-0"
           value={query}
-          onValueChange={setQuery}
+          onValueChange={changeShQuery}
           placeholder={
             source === "skillssh" ? "搜索 skills.sh…" : "搜索 Skill 或仓库…"
           }
@@ -648,6 +742,16 @@ export function SkillDiscoveryPanel({
         {error && (
           <Notice tone="danger" className="mb-3">
             {error}
+          </Notice>
+        )}
+        {source === "skillssh" && !shSearching && shTrendingError && shTrending.length > 0 && (
+          <Notice tone="warning" className="mb-3">
+            <p>加载更多趋势条目失败：{shTrendingError}</p>
+            <div className="mt-2">
+              <Button size="sm" onClick={() => void loadTrending(shTrendingPage + 1)}>
+                重试
+              </Button>
+            </div>
           </Notice>
         )}
         {source === "repos" && discoveryLoading && report && (

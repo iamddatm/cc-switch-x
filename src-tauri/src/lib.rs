@@ -88,6 +88,7 @@ pub fn run() {
             commands::skills::get_skill_repos,
             commands::skills::install_discovered_skill,
             commands::skills::install_skill,
+            commands::skills::list_skills_sh_trending,
             commands::skills::preview_skill_source,
             commands::skills::search_skills_sh,
             commands::skills::set_skill_repos,

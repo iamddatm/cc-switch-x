@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderInput, Plus, RefreshCw, Sparkles } from "lucide-react";
 import { AgentColumnCells } from "../components/assets/AgentColumnCells";
@@ -8,7 +8,7 @@ import { ImportDialog } from "../components/ImportDialog";
 import { SkillBatchBar } from "../components/skills/SkillBatchBar";
 import { SkillDiscoveryPanel } from "../components/skills/SkillDiscoveryPanel";
 import { SkillInstallSheet } from "../components/skills/SkillInstallSheet";
-import { SkillSourceBadge } from "../components/skills/SkillSourceBadge";
+import { originRepoLabel, SkillSourceBadge } from "../components/skills/SkillSourceBadge";
 import { SkillFormSheet } from "../components/skills/SkillFormSheet";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
@@ -22,10 +22,11 @@ import { SearchField } from "../components/ui/SearchField";
 import { Select } from "../components/ui/Select";
 import { useAgents } from "../hooks/useAgents";
 import { useAssets } from "../hooks/useAssets";
+import { useSkillUpdateCheck } from "../hooks/useSkillUpdateCheck";
 import { api } from "../lib/api";
 import { parseSkill, type SkillForm } from "../lib/canonical";
 import { formatRelativeTime } from "../lib/format";
-import { supported, type AssetSummary, type SkillCheckReport } from "../types";
+import { enabledFor, supported, type AssetSummary } from "../types";
 
 type Editing =
   | { mode: "create"; id: string; form: SkillForm }
@@ -48,10 +49,12 @@ function sourceKey(item: AssetSummary): string {
 export function SkillsPanel() {
   const { items, error, loading, refresh } = useAssets("skill");
   const { agents, enabledAgents, refresh: refreshAgents } = useAgents();
+  const skillCheck = useSkillUpdateCheck();
   const [view, setView] = useState<"installed" | "discover">("installed");
   const [discoverMounted, setDiscoverMounted] = useState(false);
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState("all");
+  const [agentFilter, setAgentFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "on" | "off">("all");
   const [sourceFilter, setSourceFilter] = useState("all");
   const [editing, setEditing] = useState<Editing | null>(null);
   const [loadingEdit, setLoadingEdit] = useState(false);
@@ -62,11 +65,19 @@ export function SkillsPanel() {
   const [importing, setImporting] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [checking, setChecking] = useState(false);
-  const [checkReport, setCheckReport] = useState<SkillCheckReport | null>(null);
   const [updateTargets, setUpdateTargets] = useState<string[] | null>(null);
   const [updating, setUpdating] = useState(false);
   const [batchBusy, setBatchBusy] = useState(false);
+
+  const {
+    report: checkReport,
+    checking,
+    error: checkError,
+    prompt: checkPrompt,
+    check: runCheck,
+    consumePrompt,
+    dropUpdates,
+  } = skillCheck;
 
   const agentsForType = enabledAgents.filter((agent) => supported(agent, "skill"));
   const refreshAll = () => {
@@ -74,7 +85,26 @@ export function SkillsPanel() {
     void refreshAgents();
   };
 
+  useEffect(() => {
+    if (agentFilter === "all") return;
+    const stillAvailable = agents.some(
+      (agent) => agent.id === agentFilter && agent.enabled && supported(agent, "skill"),
+    );
+    if (!stillAvailable) setAgentFilter("all");
+  }, [agentFilter, agents]);
+
+  // 检查可能在别的页面里结束；回来时把「发现更新」的确认弹出来（只在弹一次）。
+  useEffect(() => {
+    if (!checkPrompt) return;
+    consumePrompt();
+    setUpdateTargets(checkReport?.updates.map((update) => update.id) ?? []);
+  }, [checkPrompt, checkReport, consumePrompt]);
+
   const normalized = query.trim().toLowerCase();
+  const statusAgents =
+    agentFilter === "all"
+      ? agentsForType
+      : agentsForType.filter((agent) => agent.id === agentFilter);
   const visible = items.filter((item) => {
     if (
       normalized &&
@@ -86,15 +116,12 @@ export function SkillsPanel() {
       return false;
     }
     if (sourceFilter !== "all" && sourceKey(item) !== sourceFilter) return false;
-    if (filter === "all") return true;
-    if (filter === "off") {
-      return !agentsForType.some((agent) => agent.enabledSkills.includes(item.id));
-    }
-    const agentId = filter.slice("on:".length);
-    return (
-      agents.find((agent) => agent.id === agentId)?.enabledSkills.includes(item.id) === true
-    );
+    if (statusFilter === "all") return true;
+    const enabled = statusAgents.some((agent) => enabledFor(agent, "skill").includes(item.id));
+    return statusFilter === "on" ? enabled : !enabled;
   });
+  const updateIds = checkReport?.updates.map((update) => update.id) ?? [];
+  const updatesCount = updateIds.length;
 
   const selectedItems = items.filter((item) => selected.has(item.id));
   const selectedIds = selectedItems.map((item) => item.id);
@@ -160,19 +187,10 @@ export function SkillsPanel() {
   };
 
   const checkUpdates = async (ids?: string[]) => {
-    setChecking(true);
     setActionError(null);
     setActionMessage(null);
-    setCheckReport(null);
-    try {
-      const report = await api.checkSkillUpdates(ids);
-      setCheckReport(report);
-      refreshAll();
-    } catch (e) {
-      setActionError(String(e));
-    } finally {
-      setChecking(false);
-    }
+    await runCheck(ids);
+    refreshAll();
   };
 
   const askUpdate = (ids: string[]) => {
@@ -198,7 +216,11 @@ export function SkillsPanel() {
             .join("；"),
         );
       }
-      setCheckReport(null);
+      dropUpdates(
+        report.outcomes
+          .filter((outcome) => outcome.status !== "failed")
+          .map((outcome) => outcome.id),
+      );
       setSelected(new Set());
       refreshAll();
     } catch (e) {
@@ -232,6 +254,7 @@ export function SkillsPanel() {
         ids.forEach((id) => next.delete(id));
         return next;
       });
+      dropUpdates(ids);
       setDeleting(null);
       refreshAll();
     } catch (e) {
@@ -285,6 +308,16 @@ export function SkillsPanel() {
     ? [...checkReport.repoFailures.map((failure) => `${failure.repo}：${failure.error}`), ...checkReport.skillFailures.map((failure) => `${failure.id}：${failure.error}`)]
     : [];
 
+  const updateEntries = (updateTargets ?? []).map((id) => {
+    const info = checkReport?.updates.find((update) => update.id === id);
+    const item = items.find((entry) => entry.id === id);
+    return {
+      id,
+      name: info?.name ?? item?.name ?? id,
+      repo: originRepoLabel(item?.origin),
+    };
+  });
+
   return (
     <div className="relative flex h-full min-h-0 flex-col">
       <PageHeader
@@ -292,21 +325,22 @@ export function SkillsPanel() {
         title="Skills"
         actions={
           <>
-            <Button
-              onClick={() => void checkUpdates()}
-              loading={checking}
-              disabled={items.length === 0 || updating || pendingDelete}
-            >
-              <RefreshCw size={14} aria-hidden />
-              检查更新
-            </Button>
-            {checkReport && checkReport.updates.length > 0 && (
+            {updatesCount > 0 && !checking ? (
               <Button
                 variant="primary"
-                onClick={() => askUpdate(checkReport.updates.map((update) => update.id))}
-                disabled={updating}
+                onClick={() => askUpdate(updateIds)}
+                disabled={updating || pendingDelete}
               >
-                更新 {checkReport.updates.length} 个
+                全部更新（{updatesCount} 个）
+              </Button>
+            ) : (
+              <Button
+                onClick={() => void checkUpdates()}
+                loading={checking}
+                disabled={items.length === 0 || updating || pendingDelete}
+              >
+                <RefreshCw size={14} aria-hidden />
+                检查更新
               </Button>
             )}
             <Menu
@@ -327,6 +361,11 @@ export function SkillsPanel() {
             <Menu
               label="Skills 的更多操作"
               items={[
+                {
+                  label: "重新检查更新",
+                  onSelect: () => void checkUpdates(),
+                  disabled: checking || items.length === 0,
+                },
                 { label: "从 cc-switch 导入", onSelect: () => setImporting(true) },
                 { label: "刷新列表", onSelect: refreshAll },
               ]}
@@ -383,16 +422,26 @@ export function SkillsPanel() {
         />
         <Select
           aria-label="按 Agent 筛选"
-          value={filter}
-          onChange={(event) => setFilter(event.target.value)}
+          value={agentFilter}
+          onChange={(event) => setAgentFilter(event.target.value)}
         >
           <option value="all">全部 Agent</option>
-          <option value="off">未启用任何 Agent</option>
           {agentsForType.map((agent) => (
-            <option key={agent.id} value={`on:${agent.id}`}>
-              已启用给 {agent.displayName}
+            <option key={agent.id} value={agent.id}>
+              {agent.displayName}
             </option>
           ))}
+        </Select>
+        <Select
+          aria-label="按启用状态筛选"
+          value={statusFilter}
+          onChange={(event) =>
+            setStatusFilter(event.target.value as "all" | "on" | "off")
+          }
+        >
+          <option value="all">全部状态</option>
+          <option value="on">已启用</option>
+          <option value="off">未启用</option>
         </Select>
         <Select
           aria-label="按来源筛选"
@@ -411,9 +460,9 @@ export function SkillsPanel() {
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto px-6 pb-5">
-        {(error || actionError) && (
+        {(error || actionError || checkError) && (
           <Notice tone="danger" className="mb-3">
-            {error ?? actionError}
+            {error ?? actionError ?? checkError}
           </Notice>
         )}
         {actionMessage && (
@@ -628,13 +677,34 @@ export function SkillsPanel() {
         open={updateTargets !== null}
         title={`更新 ${updateTargets?.length ?? 0} 个 Skill？`}
         pending={updating}
-        confirmLabel="开始更新"
+        confirmLabel={`更新 ${updateTargets?.length ?? 0} 个`}
         body={
           <div className="space-y-2">
-            <p>会从 GitHub 重新下载并整目录替换；本地修改将被覆盖。</p>
-            <p>替换前会自动备份到 backups/skills，保留最近 20 份。</p>
-            {updateTargets && (
-              <p className="text-caption text-fg-3">{updateTargets.join("、")}</p>
+            <p>
+              更新会用仓库里的内容整目录替换，本地改过的地方只保留在备份里
+              （backups/skills，保留最近 20 份）。
+            </p>
+            {updateEntries.length > 0 && (
+              <ul
+                aria-label="将要更新的 Skill"
+                className="max-h-60 divide-y divide-border overflow-y-auto rounded-control border border-border"
+              >
+                {updateEntries.map((entry) => (
+                  <li
+                    key={entry.id}
+                    className="flex items-baseline gap-2 px-3 py-2 text-body"
+                  >
+                    <span className="min-w-0 truncate font-medium text-fg-1">
+                      {entry.name}
+                    </span>
+                    {entry.repo && (
+                      <span className="ms-auto shrink-0 font-mono text-caption text-fg-3">
+                        {entry.repo}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
         }

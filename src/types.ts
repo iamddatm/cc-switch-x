@@ -118,6 +118,12 @@ export interface SkillsShSearchResult {
   query: string;
 }
 
+/** skills.sh 趋势榜：站点固定每页 200 条，page 从 0 开始。 */
+export interface SkillsShTrendingResult {
+  skills: SkillsShSkill[];
+  hasMore: boolean;
+}
+
 /** 后端 AssetState 的 snake_case 序列化结果 */
 export type AssetState = "off" | "written" | "effective" | "drifted";
 

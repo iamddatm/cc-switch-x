@@ -3,7 +3,9 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { open } from "@tauri-apps/plugin-dialog";
 import { SkillsPanel } from "../panels/SkillsPanel";
 import { api } from "../lib/api";
+import { resetSkillUpdateCheck } from "../hooks/useSkillUpdateCheck";
 import { agentStatus } from "../test/agents";
+import type { SkillCheckReport } from "../types";
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -24,6 +26,7 @@ vi.mock("../lib/api", () => ({
     discoverSkills: vi.fn(),
     installDiscoveredSkill: vi.fn(),
     searchSkillsSh: vi.fn(),
+    listSkillsShTrending: vi.fn(),
   },
 }));
 
@@ -35,6 +38,7 @@ const claude = agentStatus();
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetSkillUpdateCheck();
   vi.mocked(api.listAssets).mockResolvedValue([
     { assetType: "skill", id: "demo", name: "demo", updatedAt: 1, hash: "h" },
   ]);
@@ -115,6 +119,21 @@ beforeEach(() => {
     totalCount: 1,
     query: "pdf",
   });
+  vi.mocked(api.listSkillsShTrending).mockResolvedValue({
+    skills: [
+      {
+        key: "vercel-labs/agent-skills:trending-demo",
+        name: "trending-demo",
+        directory: "trending-demo",
+        repoOwner: "vercel-labs",
+        repoName: "agent-skills",
+        repoBranch: "main",
+        installs: 20512,
+        readmeUrl: "https://github.com/vercel-labs/agent-skills",
+      },
+    ],
+    hasMore: false,
+  });
 });
 
 test("shows the link kind the backend actually used", async () => {
@@ -182,8 +201,43 @@ test("the unassigned filter ignores deployments of disabled agents", async () =>
   ]);
   render(<SkillsPanel />);
   await screen.findByText(/还没有启用任何 Agent/);
-  fireEvent.change(screen.getByLabelText("按 Agent 筛选"), { target: { value: "off" } });
+  fireEvent.change(screen.getByLabelText("按启用状态筛选"), { target: { value: "off" } });
   expect(screen.getByRole("button", { name: "编辑 demo" })).toBeInTheDocument();
+});
+
+test("splits the agent and status filters", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([
+    { assetType: "skill", id: "demo", name: "demo", updatedAt: 1, hash: "h" },
+    { assetType: "skill", id: "other", name: "other", updatedAt: 1, hash: "h" },
+  ]);
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agentStatus({ enabledSkills: ["demo"] }),
+    agentStatus({ id: "qoder", displayName: "Qoder CN", enabledSkills: ["other"] }),
+  ]);
+  render(<SkillsPanel />);
+  await screen.findByRole("button", { name: "编辑 demo" });
+  expect(screen.getByRole("button", { name: "编辑 other" })).toBeInTheDocument();
+
+  // 选中具体 Agent + 已启用：只剩该 Agent 启用的项。
+  fireEvent.change(screen.getByLabelText("按 Agent 筛选"), { target: { value: "qoder" } });
+  fireEvent.change(screen.getByLabelText("按启用状态筛选"), { target: { value: "on" } });
+  expect(screen.queryByRole("button", { name: "编辑 demo" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "编辑 other" })).toBeInTheDocument();
+
+  // 该 Agent 的未启用项。
+  fireEvent.change(screen.getByLabelText("按启用状态筛选"), { target: { value: "off" } });
+  expect(screen.getByRole("button", { name: "编辑 demo" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "编辑 other" })).not.toBeInTheDocument();
+
+  // 全部 Agent 的未启用项（当前两个都被某个 Agent 启用，应该都隐藏）。
+  fireEvent.change(screen.getByLabelText("按 Agent 筛选"), { target: { value: "all" } });
+  expect(screen.queryByRole("button", { name: "编辑 demo" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "编辑 other" })).not.toBeInTheDocument();
+
+  // 默认就是「全部 Agent + 全部状态」，回到初始时两项都在。
+  fireEvent.change(screen.getByLabelText("按启用状态筛选"), { target: { value: "all" } });
+  expect(screen.getByRole("button", { name: "编辑 demo" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "编辑 other" })).toBeInTheDocument();
 });
 
 test("a rejected deployment shows the reason instead of a fake success", async () => {
@@ -244,13 +298,42 @@ test("checks all skills and opens the update confirmation", async () => {
   });
   render(<SkillsPanel />);
   fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
-  expect(await screen.findByText(/发现 1 个可更新/)).toBeInTheDocument();
   expect(api.checkSkillUpdates).toHaveBeenCalledWith(undefined);
 
-  fireEvent.click(screen.getByRole("button", { name: "更新 1 个" }));
+  // 对齐 cc-switch：查到更新就直接弹「全部更新」确认，不用再找按钮。
   const dialog = await screen.findByRole("alertdialog");
-  fireEvent.click(within(dialog).getByRole("button", { name: "开始更新" }));
+  expect(within(dialog).getByText("acme/demo")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "全部更新（1 个）" })).toBeInTheDocument();
+  fireEvent.click(within(dialog).getByRole("button", { name: "更新 1 个" }));
   await waitFor(() => expect(api.updateSkills).toHaveBeenCalledWith(["demo"]));
+});
+
+test("keeps the update check running when the panel unmounts", async () => {
+  let resolveCheck: (report: SkillCheckReport) => void = () => {};
+  vi.mocked(api.checkSkillUpdates).mockReturnValue(
+    new Promise<SkillCheckReport>((resolve) => {
+      resolveCheck = resolve;
+    }),
+  );
+  const first = render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
+  first.unmount();
+
+  // 切回来（重新挂载）时检查还在进行，结果不丢。
+  render(<SkillsPanel />);
+  expect(await screen.findByText(/正在读取上游仓库/)).toBeInTheDocument();
+
+  resolveCheck({
+    checkedAt: Date.now(),
+    updates: [
+      { id: "demo", name: "demo", currentHash: "h", remoteHash: "h2", missingLocal: false },
+    ],
+    upToDate: [],
+    skipped: [],
+    repoFailures: [],
+    skillFailures: [],
+  });
+  expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
 });
 
 test("deleting a skill goes through uninstallSkills and mentions the backup", async () => {
@@ -338,6 +421,28 @@ test("searches skills.sh and installs by skill id", async () => {
       "skip",
     ),
   );
+});
+
+test("shows the skills.sh trending list by default", async () => {
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("tab", { name: /发现/ }));
+  await screen.findByText("pdf");
+
+  fireEvent.click(screen.getByRole("button", { name: "skills.sh" }));
+  expect(await screen.findByText(/skills\.sh 趋势榜 · 近 24 小时/)).toBeInTheDocument();
+  expect(await screen.findByText("trending-demo")).toBeInTheDocument();
+  expect(api.listSkillsShTrending).toHaveBeenCalledWith(0);
+
+  // 清空搜索关键词回到趋势榜。
+  fireEvent.change(screen.getByLabelText("搜索可发现的 Skill"), {
+    target: { value: "pdf" },
+  });
+  fireEvent.keyDown(screen.getByLabelText("搜索可发现的 Skill"), { key: "Enter" });
+  expect(await screen.findByText("skills.sh · pdf")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("搜索可发现的 Skill"), {
+    target: { value: "" },
+  });
+  expect(await screen.findByText("trending-demo")).toBeInTheDocument();
 });
 
 test("selecting rows enables batch actions scoped to the selection", async () => {

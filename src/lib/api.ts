@@ -30,6 +30,7 @@ import type {
   SkillUninstallReport,
   SkillUpdateReport,
   SkillsShSearchResult,
+  SkillsShTrendingResult,
   SessionDetail,
   SessionMatch,
   SessionProviderStatus,
@@ -92,6 +93,8 @@ export const api = {
     invoke<SkillInstallOutcome>("install_discovered_skill", { input, policy }),
   searchSkillsSh: (query: string, limit: number, offset: number) =>
     invoke<SkillsShSearchResult>("search_skills_sh", { query, limit, offset }),
+  listSkillsShTrending: (page: number) =>
+    invoke<SkillsShTrendingResult>("list_skills_sh_trending", { page }),
   checkAppUpdate: () => invoke<UpdateInfo | null>("check_app_update"),
   installAppUpdate: () => invoke<boolean>("install_app_update"),
 

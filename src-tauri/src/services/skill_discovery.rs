@@ -182,6 +182,80 @@ struct SkillsShApiSkill {
     installs: u64,
 }
 
+/// skills.sh 趋势榜：站点按固定 200 条一页提供，`page` 从 0 开始。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsShTrendingResult {
+    pub skills: Vec<SkillsShSkill>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillsShTrendingResponse {
+    #[serde(default)]
+    skills: Vec<SkillsShApiSkill>,
+    #[serde(default)]
+    has_more: bool,
+}
+
+fn skills_sh_client(proxy: Option<&ProxyConfig>) -> Result<reqwest::blocking::Client, AppError> {
+    let mut builder = reqwest::blocking::Client::builder()
+        .user_agent(concat!("cc-switch-x/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(15));
+    if let Some(proxy) = proxy {
+        builder = proxy.apply_blocking(builder)?;
+    }
+    builder
+        .build()
+        .map_err(|error| AppError::Network(format!("创建 skills.sh 客户端失败：{error}")))
+}
+
+fn get_skills_sh_json<T: serde::de::DeserializeOwned>(
+    request: reqwest::blocking::RequestBuilder,
+    action: &str,
+) -> Result<T, AppError> {
+    let response = request
+        .send()
+        .map_err(|error| AppError::Network(format!("skills.sh {action}失败：{error}")))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AppError::Network(format!("skills.sh 返回 HTTP {status}")));
+    }
+    response
+        .json()
+        .map_err(|error| AppError::Network(format!("skills.sh 响应无法解析：{error}")))
+}
+
+fn map_skills_sh_skill(item: SkillsShApiSkill) -> Option<SkillsShSkill> {
+    // 只接受能落到 GitHub 归档上的坐标，同时挡掉非 GitHub 来源。
+    let parsed = parse_github_input(&item.source, Some("main".into())).ok()?;
+    let name = if item.name.is_empty() {
+        item.skill_id.clone()
+    } else {
+        item.name.clone()
+    };
+    if name.is_empty() {
+        return None;
+    }
+    let key = if item.id.is_empty() {
+        format!("{}:{}", parsed.slug(), item.skill_id)
+    } else {
+        item.id
+    };
+    Some(SkillsShSkill {
+        key,
+        name,
+        directory: item.skill_id,
+        readme_url: format!("https://github.com/{}", parsed.slug()),
+        repo_owner: parsed.owner,
+        repo_name: parsed.name,
+        repo_branch: "main".into(),
+        installs: item.installs,
+    })
+}
+
 pub fn search_skills_sh(
     proxy: Option<&ProxyConfig>,
     query: &str,
@@ -200,64 +274,21 @@ pub fn search_skills_sh(
         return Err(AppError::InvalidInput("搜索结果翻页过深".into()));
     }
 
-    let mut builder = reqwest::blocking::Client::builder()
-        .user_agent(concat!("cc-switch-x/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(8))
-        .timeout(Duration::from_secs(15));
-    if let Some(proxy) = proxy {
-        builder = proxy.apply_blocking(builder)?;
-    }
-    let client = builder
-        .build()
-        .map_err(|error| AppError::Network(format!("创建搜索客户端失败：{error}")))?;
-
-    let response = client
-        .get("https://skills.sh/api/search")
-        .query(&[
+    let client = skills_sh_client(proxy)?;
+    let body: SkillsShResponse = get_skills_sh_json(
+        client.get("https://skills.sh/api/search").query(&[
             ("q", query),
             ("limit", &limit.to_string()),
             ("offset", &offset.to_string()),
-        ])
-        .send()
-        .map_err(|error| AppError::Network(format!("skills.sh 搜索失败：{error}")))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(AppError::Network(format!("skills.sh 返回 HTTP {status}")));
-    }
-    let body: SkillsShResponse = response
-        .json()
-        .map_err(|error| AppError::Network(format!("skills.sh 响应无法解析：{error}")))?;
+        ]),
+        "搜索",
+    )?;
 
-    let mut skills = Vec::new();
-    for item in body.skills {
-        // 只接受能落到 GitHub 归档上的坐标，同时挡掉非 GitHub 来源。
-        let Ok(parsed) = parse_github_input(&item.source, Some("main".into())) else {
-            continue;
-        };
-        let name = if item.name.is_empty() {
-            item.skill_id.clone()
-        } else {
-            item.name.clone()
-        };
-        if name.is_empty() {
-            continue;
-        }
-        let key = if item.id.is_empty() {
-            format!("{}:{}", parsed.slug(), item.skill_id)
-        } else {
-            item.id
-        };
-        skills.push(SkillsShSkill {
-            key,
-            name,
-            directory: item.skill_id,
-            readme_url: format!("https://github.com/{}", parsed.slug()),
-            repo_owner: parsed.owner,
-            repo_name: parsed.name,
-            repo_branch: "main".into(),
-            installs: item.installs,
-        });
-    }
+    let skills: Vec<SkillsShSkill> = body
+        .skills
+        .into_iter()
+        .filter_map(map_skills_sh_skill)
+        .collect();
     let total_count = body.count.max(skills.len());
     Ok(SkillsShSearchResult {
         skills,
@@ -267,6 +298,33 @@ pub fn search_skills_sh(
         } else {
             body.query
         },
+    })
+}
+
+/// 发现页切到 skills.sh 时的默认内容：站点「Trending (24h)」榜单。
+pub fn trending_skills_sh(
+    proxy: Option<&ProxyConfig>,
+    page: usize,
+) -> Result<SkillsShTrendingResult, AppError> {
+    // 站点总量约一万条、每页 200 条；再往后翻已经没有意义。
+    if page > 50 {
+        return Err(AppError::InvalidInput("趋势榜翻页过深".into()));
+    }
+
+    let client = skills_sh_client(proxy)?;
+    let body: SkillsShTrendingResponse = get_skills_sh_json(
+        client.get(format!("https://skills.sh/api/skills/trending/{page}")),
+        "趋势榜读取",
+    )?;
+
+    let skills: Vec<SkillsShSkill> = body
+        .skills
+        .into_iter()
+        .filter_map(map_skills_sh_skill)
+        .collect();
+    Ok(SkillsShTrendingResult {
+        has_more: body.has_more,
+        skills,
     })
 }
 
@@ -314,6 +372,23 @@ mod tests {
 
         let writing = found.iter().find(|item| item.name == "writing").unwrap();
         assert!(!writing.installed);
+    }
+
+    #[test]
+    fn maps_trending_items_to_github_coordinates() {
+        // 趋势榜条目没有 `id` 字段，key 要用仓库 + skillId 兜底。
+        let item: SkillsShApiSkill = serde_json::from_str(
+            r#"{"source":"acme/skills","skillId":"pdf","name":"pdf","installs":42}"#,
+        )
+        .unwrap();
+        let mapped = map_skills_sh_skill(item).unwrap();
+        assert_eq!(mapped.key, "acme/skills:pdf");
+        assert_eq!(mapped.name, "pdf");
+        assert_eq!(mapped.directory, "pdf");
+        assert_eq!(mapped.repo_owner, "acme");
+        assert_eq!(mapped.repo_name, "skills");
+        assert_eq!(mapped.installs, 42);
+        assert_eq!(mapped.readme_url, "https://github.com/acme/skills");
     }
 
     #[test]
