@@ -322,23 +322,21 @@ impl Sandbox {
 /// 真实配置根必须一个字节都没变：本测试只往临时沙箱写。
 #[test]
 fn real_agent_config_roots_are_untouched() {
-    let watched: Vec<PathBuf> = [
+    let home = dirs::home_dir().unwrap();
+    // 记录「不存在」这一状态：CI 的全新 home 没有任何真实配置时，
+    // deploy 若凭空写出这些文件同样要判失败。
+    let before: Vec<(PathBuf, Option<Vec<u8>>)> = [
         "~/.claude.json",
         "~/.qoder-cn/settings.json",
         "~/.codex/config.toml",
     ]
     .iter()
-    .map(|declared| {
-        let home = dirs::home_dir().unwrap();
-        home.join(declared.strip_prefix("~/").unwrap())
+    .map(|declared| home.join(declared.strip_prefix("~/").unwrap()))
+    .map(|path| {
+        let bytes = std::fs::read(&path).ok();
+        (path, bytes)
     })
-    .filter(|path| path.is_file())
     .collect();
-    assert!(!watched.is_empty(), "至少要盯住一个真实配置文件");
-    let before: Vec<(PathBuf, Vec<u8>)> = watched
-        .iter()
-        .map(|path| (path.clone(), std::fs::read(path).unwrap()))
-        .collect();
 
     let mut sandbox = setup();
     let qoder = agent("qoder-cn");
@@ -354,7 +352,7 @@ fn real_agent_config_roots_are_untouched() {
     .unwrap();
 
     for (path, bytes) in before {
-        assert_eq!(std::fs::read(&path).unwrap(), bytes, "{path:?} 被改动了");
+        assert_eq!(std::fs::read(&path).ok(), bytes, "{path:?} 被改动或新建了");
     }
 }
 
