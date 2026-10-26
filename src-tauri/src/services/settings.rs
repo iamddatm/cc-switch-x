@@ -1,7 +1,7 @@
 use crate::domain::agent::builtin_agents;
 use crate::domain::secret::SecretRef;
 use crate::error::AppError;
-use crate::net::{parse_github_input, ProxyConfig};
+use crate::net::{parse_github_input, webdav, ProxyConfig};
 use crate::settings::{self, AppSettings, BackupSettings, SkillRepo, Theme};
 use crate::store::secrets::Secrets;
 use serde::Serialize;
@@ -10,6 +10,8 @@ use std::collections::HashSet;
 /// 代理密码与 MCP 等资产用同一套本地密钥文件分开存放。
 pub const PROXY_SECRET_SCOPE: &str = "proxy";
 pub const PROXY_SECRET_KEY: &str = "password";
+pub const CLOUD_SECRET_SCOPE: &str = "cloud.webdav";
+pub const CLOUD_SECRET_KEY: &str = "password";
 pub const MAX_SKILL_REPOS: usize = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -112,6 +114,84 @@ pub fn set_proxy_at(
         if let Some(value) = next_password {
             secrets.insert(&proxy_secret_ref(), &value);
         }
+    }
+
+    secrets.save(secrets_path)?;
+    settings::save_to(config_path, &current)?;
+    Ok((current, secrets))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudSettingsView {
+    pub auto_upload: bool,
+    pub base_url: String,
+    pub username: String,
+    pub remote_dir: String,
+    pub has_password: bool,
+}
+
+pub fn cloud_secret_ref() -> SecretRef {
+    SecretRef {
+        scope: CLOUD_SECRET_SCOPE.into(),
+        key: CLOUD_SECRET_KEY.into(),
+    }
+}
+
+pub fn cloud_view(settings: &AppSettings, secrets: &Secrets) -> CloudSettingsView {
+    CloudSettingsView {
+        auto_upload: settings.cloud.auto_upload,
+        base_url: settings.cloud.base_url.clone(),
+        username: settings.cloud.username.clone(),
+        remote_dir: settings.cloud.remote_dir.clone(),
+        has_password: secrets
+            .get(&cloud_secret_ref())
+            .is_some_and(|value| !value.is_empty()),
+    }
+}
+
+/// 密码语义：None = 保留旧密码，Some("") = 清除，Some(v) = 覆盖。
+pub fn set_cloud_settings_at(
+    config_path: &std::path::Path,
+    secrets_path: &std::path::Path,
+    base_url: String,
+    username: String,
+    password: Option<String>,
+    remote_dir: String,
+    auto_upload: bool,
+) -> Result<(AppSettings, Secrets), AppError> {
+    let mut current = settings::load_from(config_path)?;
+    let mut secrets = Secrets::load(secrets_path)?;
+    let base_url = webdav::normalize_base_url(&base_url)?;
+    let username = username.trim().to_string();
+    let remote_dir = webdav::validate_remote_dir(&remote_dir)?;
+
+    if base_url.is_empty() {
+        current.cloud.base_url.clear();
+        current.cloud.username.clear();
+        current.cloud.remote_dir = remote_dir;
+        current.cloud.auto_upload = false;
+        secrets.remove(&cloud_secret_ref());
+    } else {
+        if username.is_empty() {
+            return Err(AppError::InvalidInput("请填写 WebDAV 用户名".into()));
+        }
+        let next_password = match password {
+            Some(value) if value.is_empty() => {
+                secrets.remove(&cloud_secret_ref());
+                None
+            }
+            Some(value) => Some(value),
+            None => secrets.get(&cloud_secret_ref()).map(str::to_string),
+        };
+        let Some(next_password) = next_password else {
+            return Err(AppError::InvalidInput("请填写 WebDAV 密码".into()));
+        };
+        current.cloud.base_url = base_url;
+        current.cloud.username = username;
+        current.cloud.remote_dir = remote_dir;
+        current.cloud.auto_upload = auto_upload;
+        secrets.insert(&cloud_secret_ref(), &next_password);
     }
 
     secrets.save(secrets_path)?;
@@ -264,6 +344,7 @@ pub fn set_store_root_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::webdav::{normalize_base_url, remote_url, validate_remote_dir};
     use tempfile::tempdir;
 
     #[test]
@@ -478,5 +559,103 @@ mod tests {
             },
         ])
         .is_err());
+    }
+
+    #[test]
+    fn cloud_password_semantics() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let secrets_path = dir.path().join("secrets.local.json");
+
+        let (saved, secrets) = set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            "https://dav.example.com/dav".into(),
+            "me".into(),
+            Some("app-password".into()),
+            "ccswitchx".into(),
+            true,
+        )
+        .unwrap();
+        assert!(saved.cloud.auto_upload);
+        assert_eq!(secrets.get(&cloud_secret_ref()), Some("app-password"));
+        assert!(!std::fs::read_to_string(&config)
+            .unwrap()
+            .contains("app-password"));
+        assert!(cloud_view(&saved, &secrets).has_password);
+
+        let (kept, kept_secrets) = set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            "https://dav.example.com/dav".into(),
+            "me".into(),
+            None,
+            "ccswitchx".into(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(kept_secrets.get(&cloud_secret_ref()), Some("app-password"));
+        assert!(!kept.cloud.auto_upload);
+
+        let cleared = set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            String::new(),
+            String::new(),
+            None,
+            "ccswitchx".into(),
+            true,
+        )
+        .unwrap();
+        assert!(cleared.1.get(&cloud_secret_ref()).is_none());
+        assert!(!cleared.0.cloud.auto_upload);
+
+        assert!(set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            "https://dav.example.com/dav".into(),
+            "me".into(),
+            Some(String::new()),
+            "ccswitchx".into(),
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn cloud_url_and_remote_dir_validation() {
+        assert_eq!(
+            normalize_base_url(" https://dav.example.com/dav/ ").unwrap(),
+            "https://dav.example.com/dav"
+        );
+        assert_eq!(
+            normalize_base_url("http://127.0.0.1:8099/dav").unwrap(),
+            "http://127.0.0.1:8099/dav"
+        );
+        for bad in [
+            "ftp://example.com/dav",
+            "https://user:pass@example.com/dav",
+            "https://example.com/dav?x=1",
+        ] {
+            assert!(normalize_base_url(bad).is_err(), "{bad}");
+        }
+        assert_eq!(validate_remote_dir("").unwrap(), "ccswitchx");
+        assert_eq!(
+            validate_remote_dir("backups/ccswitchx").unwrap(),
+            "backups/ccswitchx"
+        );
+        for bad in ["../x", "/abs", "a\\b", "a//b", "a/../b", "a b"] {
+            assert!(validate_remote_dir(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn remote_url_joins_base_path() {
+        let url =
+            remote_url("https://dav.example.com/dav", "ccswitchx", "ccswitchx-backup.zip").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://dav.example.com/dav/ccswitchx/ccswitchx-backup.zip"
+        );
     }
 }

@@ -23,6 +23,9 @@ pub struct AppSettings {
     /// 备份策略与 Git 备份；旧设置文件缺少该字段时整套取默认值。
     #[serde(default)]
     pub backup: BackupSettings,
+    /// WebDAV 云备份；密码单独放在 secrets.local.json。
+    #[serde(default)]
+    pub cloud: CloudBackupSettings,
 }
 
 /// 备份策略：间隔 0 表示关闭自动快照；保留份数只作用于 `backups/snapshots`。
@@ -74,6 +77,35 @@ impl Default for GitBackupSettings {
             branch: default_branch(),
         }
     }
+}
+
+/// WebDAV 云备份：远端只保留一份最新状态包；密码单独放在 secrets.local.json。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudBackupSettings {
+    #[serde(default)]
+    pub auto_upload: bool,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default = "default_cloud_remote_dir")]
+    pub remote_dir: String,
+}
+
+impl Default for CloudBackupSettings {
+    fn default() -> Self {
+        Self {
+            auto_upload: false,
+            base_url: String::new(),
+            username: String::new(),
+            remote_dir: default_cloud_remote_dir(),
+        }
+    }
+}
+
+fn default_cloud_remote_dir() -> String {
+    "ccswitchx".to_string()
 }
 
 fn default_backup_interval() -> u32 {
@@ -232,6 +264,7 @@ impl Default for AppSettings {
             proxy: ProxySettings::default(),
             skill_repos: None,
             backup: BackupSettings::default(),
+            cloud: CloudBackupSettings::default(),
         }
     }
 }
@@ -321,6 +354,12 @@ mod tests {
                     remote: Some("git@github.com:me/assets.git".into()),
                     branch: "backup".into(),
                 },
+            },
+            cloud: CloudBackupSettings {
+                auto_upload: true,
+                base_url: "https://dav.example.com/dav".into(),
+                username: "me".into(),
+                remote_dir: "backups/ccswitchx".into(),
             },
         };
         save_to(&path, &settings).unwrap();
@@ -434,5 +473,40 @@ mod tests {
         ] {
             assert!(validate_git_remote(bad).is_err(), "{bad} 应当被拒绝");
         }
+    }
+
+    #[test]
+    fn old_settings_files_get_default_cloud_settings() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let old = serde_json::json!({
+            "storeRoot": dir.path().join("data"),
+            "theme": "light",
+            "enabledAgents": null
+        });
+        std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+
+        let loaded = load_from(&path).unwrap();
+        assert!(!loaded.cloud.auto_upload);
+        assert_eq!(loaded.cloud.base_url, "");
+        assert_eq!(loaded.cloud.username, "");
+        assert_eq!(loaded.cloud.remote_dir, "ccswitchx");
+    }
+
+    #[test]
+    fn cloud_settings_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let settings = AppSettings {
+            cloud: CloudBackupSettings {
+                auto_upload: true,
+                base_url: "https://dav.example.com/dav".into(),
+                username: "me".into(),
+                remote_dir: "backups/ccswitchx".into(),
+            },
+            ..AppSettings::default()
+        };
+        save_to(&path, &settings).unwrap();
+        assert_eq!(load_from(&path).unwrap(), settings);
     }
 }

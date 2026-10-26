@@ -4,6 +4,7 @@
 //! 测试通过 `RepoFetcher` trait 注入本地 fixture，不依赖真实网络。
 
 pub mod archive;
+pub mod webdav;
 
 use crate::error::AppError;
 use std::io::{Read, Write};
