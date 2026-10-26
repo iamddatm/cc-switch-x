@@ -434,6 +434,52 @@ mod tests {
         }
     }
 
+    /// 用真实能力表造一份 agent 现状，只改启用位；能力闸的判定必须按代码里的实测档位走。
+    fn agent_with_capabilities(id: &str, enabled: bool) -> AgentStatus {
+        let descriptor = crate::domain::agent::builtin_agents()
+            .into_iter()
+            .find(|agent| agent.id == id)
+            .unwrap();
+        AgentStatus {
+            display_name: descriptor.display_name.clone(),
+            capabilities: descriptor.capabilities(),
+            ..agent_status(id, enabled)
+        }
+    }
+
+    #[test]
+    fn selectable_dirs_require_verified_project_dir_and_verified_agents() {
+        let agents = vec![
+            agent_with_capabilities("claude", true),
+            agent_with_capabilities("qoder-cn", true),
+            agent_with_capabilities("codex", true),
+        ];
+        let selectable = selectable_dir_keys(&agents);
+        assert!(
+            selectable.contains(&"claude".to_string()),
+            "`.claude/skills` 已在真机项目里实测：探针放进去 Claude 就报出 skill 名，移走就报 NONE"
+        );
+        assert!(
+            selectable.contains(&"qoder".to_string()),
+            "`.qoder/skills` 已在真机项目里实测：qoderclicn skills list 直接报出项目内的 SKILL.md 路径"
+        );
+        assert!(
+            !selectable.contains(&"agents".to_string()),
+            "`.agents/skills` 尚未取证（codex 无 skills 概念、gemini 未安装、pi 无凭据），不能开放勾选"
+        );
+    }
+
+    #[test]
+    fn shared_dir_is_blocked_when_any_enabled_agent_lacks_verified_skills() {
+        // 同一物理目录映射到 qoder（Skill 未实测）与 qoder-cn（已实测）：
+        // 只要启用的 agent 里有一个没实测过，这个目录就不能作为同步目标。
+        let agents = vec![
+            agent_with_capabilities("qoder", true),
+            agent_with_capabilities("qoder-cn", true),
+        ];
+        assert!(!selectable_dir_keys(&agents).contains(&"qoder".to_string()));
+    }
+
     #[test]
     fn add_project_writes_baseline_and_deduplicates_paths() {
         let dir = tempfile::tempdir().unwrap();

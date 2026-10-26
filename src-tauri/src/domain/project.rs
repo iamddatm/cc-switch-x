@@ -59,23 +59,33 @@ pub struct ProjectSkillDirSpec {
     pub verified: bool,
 }
 
+/// 项目级落点的 `verified` 只能由真机证据升档（与 `domain/agent.rs` 同一套档位规则）：
+/// - **A 真机读取**：在这个仓库自己的服务器上把探针 skill 放进项目目录，agent 确实报告了它。
+/// - 未升档的目录在矩阵里显示「待实测」，`selectable_dir_keys` 拒绝把它作为同步目标。
 pub const PROJECT_SKILL_DIRS: [ProjectSkillDirSpec; 3] = [
     ProjectSkillDirSpec {
         key: ProjectSkillDirKey::Claude,
         relative_path: ".claude/skills",
         agent_ids: &["claude"],
-        verified: false,
+        // 2026-10-26 真机项目实测：放入 `.claude/skills/zz-ccswitchx-probe` 后
+        // `claude -p` 报出该 skill 名；移走目录后同一问句回答 NONE（正/负对照）。
+        verified: true,
     },
     ProjectSkillDirSpec {
         key: ProjectSkillDirKey::Qoder,
         relative_path: ".qoder/skills",
         agent_ids: &["qoder", "qoder-cn"],
-        verified: false,
+        // 2026-10-26 真机项目实测：`qoderclicn skills list` 在项目目录下报出
+        // <project>\.qoder\skills\zz-ccswitchx-probe\SKILL.md（路径即证据）。
+        // 注意：`qoder`（国际版）的用户级 Skill 能力仍未实测，启用它时该目录会被能力闸再次挡下。
+        verified: true,
     },
     ProjectSkillDirSpec {
         key: ProjectSkillDirKey::Agents,
         relative_path: ".agents/skills",
         agent_ids: &["codex", "gemini", "pi"],
+        // 本机无法取证：codex CLI 无 skills 概念、gemini 未安装、pi 因缺少凭据报 Connection error。
+        // 需要在这三者任一能跑通的项目里读到 `.agents/skills` 后再升档。
         verified: false,
     },
 ];
