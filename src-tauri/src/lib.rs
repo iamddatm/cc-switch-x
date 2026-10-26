@@ -1,4 +1,5 @@
 pub mod adapters;
+pub mod auto_launch;
 pub mod commands;
 pub mod domain;
 pub mod error;
@@ -122,8 +123,10 @@ pub fn run() {
             commands::subagents::scan_subagents,
             commands::subagents::set_subagent_enabled,
             commands::settings::get_settings,
+            commands::settings::get_autostart,
             commands::settings::get_proxy_settings,
             commands::settings::scan_local_proxies,
+            commands::settings::set_autostart,
             commands::settings::set_close_to_tray,
             commands::settings::set_enabled_agents,
             commands::settings::set_proxy_settings,

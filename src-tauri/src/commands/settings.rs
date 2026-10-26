@@ -75,6 +75,28 @@ pub fn set_close_to_tray(
 }
 
 #[tauri::command]
+pub async fn get_autostart() -> Result<bool, AppError> {
+    tauri::async_runtime::spawn_blocking(crate::auto_launch::is_enabled)
+        .await
+        .map_err(|error| AppError::Autostart(format!("自启任务执行失败：{error}")))?
+}
+
+/// 系统登录项是唯一真源，写入后回读一次，避免 UI 显示与实际注册状态不一致。
+#[tauri::command]
+pub async fn set_autostart(enabled: bool) -> Result<bool, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if enabled {
+            crate::auto_launch::enable()?;
+        } else {
+            crate::auto_launch::disable()?;
+        }
+        crate::auto_launch::is_enabled()
+    })
+    .await
+    .map_err(|error| AppError::Autostart(format!("自启任务执行失败：{error}")))?
+}
+
+#[tauri::command]
 pub fn get_proxy_settings(state: State<'_, AppState>) -> Result<ProxySettingsView, AppError> {
     let settings = state
         .settings

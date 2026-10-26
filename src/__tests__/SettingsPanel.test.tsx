@@ -10,6 +10,8 @@ vi.mock("../lib/api", () => ({
     setTheme: vi.fn(),
     setStoreRoot: vi.fn(),
     setCloseToTray: vi.fn(),
+    getAutostart: vi.fn(),
+    setAutostart: vi.fn(),
   },
 }));
 
@@ -34,6 +36,8 @@ beforeEach(() => {
       backup: { intervalHours: 24, retainCount: 10, git: { enabled: false, autoCommit: true, autoPull: true, remote: null, branch: "main" } },
   });
   vi.mocked(api.setStoreRoot).mockResolvedValue(true);
+  vi.mocked(api.getAutostart).mockResolvedValue(false);
+  vi.mocked(api.setAutostart).mockResolvedValue(true);
 });
 
 test("changes theme and persists it", async () => {
@@ -62,4 +66,19 @@ test("changes store root and warns about restart", async () => {
   fireEvent.click(screen.getByRole("button", { name: "保存存储位置" }));
   await waitFor(() => expect(api.setStoreRoot).toHaveBeenCalledWith("D:/data/ccswitchx"));
   expect(await screen.findByText("存储位置已保存，重启应用后生效。")).toBeInTheDocument();
+});
+
+test("toggles autostart and reflects the system state", async () => {
+  render(
+    <SettingsPanel
+      theme="system"
+      onThemeChange={() => {}}
+      update={makeUpdateController()}
+    />,
+  );
+  const checkbox = await screen.findByLabelText("开机时自动启动");
+  await waitFor(() => expect(checkbox).not.toBeDisabled());
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(api.setAutostart).toHaveBeenCalledWith(true));
+  await waitFor(() => expect(checkbox).toBeChecked());
 });

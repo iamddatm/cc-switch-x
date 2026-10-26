@@ -24,6 +24,8 @@ export function SettingsPanel({
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [storeRoot, setStoreRoot] = useState("");
   const [closeToTray, setCloseToTray] = useState(true);
+  const [autoStart, setAutoStart] = useState<boolean | null>(null);
+  const [autoStartBusy, setAutoStartBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
@@ -39,6 +41,21 @@ export function SettingsPanel({
       .catch((e) => setError(String(e)));
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getAutostart()
+      .then((value) => {
+        if (!cancelled) setAutoStart(value);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const toggleCloseToTray = async (enabled: boolean) => {
     setCloseToTray(enabled);
     setError(null);
@@ -49,6 +66,20 @@ export function SettingsPanel({
     } catch (e) {
       setCloseToTray(!enabled);
       setError(String(e));
+    }
+  };
+
+  const toggleAutoStart = async (enabled: boolean) => {
+    setAutoStart(enabled);
+    setAutoStartBusy(true);
+    setError(null);
+    try {
+      setAutoStart(await api.setAutostart(enabled));
+    } catch (e) {
+      setAutoStart(!enabled);
+      setError(String(e));
+    } finally {
+      setAutoStartBusy(false);
     }
   };
 
@@ -105,6 +136,20 @@ export function SettingsPanel({
             />
             <p className="text-caption text-fg-3">
               关闭后应用继续在托盘运行；右键托盘图标选择「退出 CC Switch X」才会结束进程。
+            </p>
+          </section>
+
+          <section className="space-y-2">
+            <h3 className="text-strong text-fg-1">启动</h3>
+            <Checkbox
+              id="auto-start"
+              label="开机时自动启动"
+              checked={autoStart ?? false}
+              disabled={autoStartBusy || autoStart === null}
+              onChange={(event) => void toggleAutoStart(event.target.checked)}
+            />
+            <p className="text-caption text-fg-3">
+              登录系统后自动打开 CC Switch X；由系统登录项管理，不需要管理员权限。
             </p>
           </section>
 

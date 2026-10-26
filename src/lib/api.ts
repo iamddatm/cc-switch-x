@@ -84,6 +84,8 @@ export const api = {
   setStoreRoot: (storeRoot: string) => invoke<boolean>("set_store_root", { storeRoot }),
   setCloseToTray: (enabled: boolean) =>
     invoke<AppSettings>("set_close_to_tray", { enabled }),
+  getAutostart: () => invoke<boolean>("get_autostart"),
+  setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart", { enabled }),
   setEnabledAgents: (agentIds: string[]) =>
     invoke<AppSettings>("set_enabled_agents", { agentIds }),
   getProxySettings: () => invoke<ProxySettingsView>("get_proxy_settings"),
