@@ -2,9 +2,10 @@ use crate::commands::backup::open_directory;
 use crate::error::AppError;
 use crate::services::agents::{detect_all, AgentStatus};
 use crate::services::project_registry::{self, ProjectSkillsView, ProjectView};
+use crate::services::project_sync::{self, Resolution, SyncReport};
 use crate::state::AppState;
 use std::path::Path;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 async fn run_blocking<T, F>(task: F) -> Result<T, AppError>
 where
@@ -134,4 +135,41 @@ pub fn reveal_project_folder(
         .find(|entry| entry.id == project_id)
         .ok_or_else(|| AppError::NotFound(format!("项目不存在：{project_id}")))?;
     open_directory(&entry.path)
+}
+
+#[tauri::command]
+pub async fn sync_project_skills(
+    app: AppHandle,
+    project_id: String,
+    resolutions: Vec<Resolution>,
+) -> Result<SyncReport, AppError> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let _project_guard = state
+            .project_ops
+            .lock()
+            .map_err(|_| AppError::Project("项目锁失败".into()))?;
+        let _write = state.enter_write()?;
+        let enabled = enabled_agent_ids(&enabled_agents(state.inner())?);
+        let registry = crate::store::projects::load(&state.store)?;
+        let entry = registry
+            .projects
+            .iter()
+            .find(|entry| entry.id == project_id)
+            .ok_or_else(|| AppError::NotFound(format!("项目不存在：{project_id}")))?;
+        if !entry.path.is_dir() {
+            return Err(AppError::NotFound(format!(
+                "项目路径不存在：{}",
+                entry.path.display()
+            )));
+        }
+        project_sync::sync_project(
+            &state.store,
+            &project_id,
+            &entry.path,
+            &enabled,
+            &resolutions,
+        )
+    })
+    .await
 }

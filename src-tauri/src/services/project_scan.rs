@@ -107,7 +107,7 @@ fn collect_files(
 }
 
 /// 普通目录的 `read_link` 会失败；Windows junction 能读到目标，必须一并拒绝。
-fn is_link(path: &Path) -> bool {
+pub(crate) fn is_link(path: &Path) -> bool {
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return false;
     };

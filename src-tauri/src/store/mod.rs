@@ -258,7 +258,7 @@ impl Store {
 }
 
 /// ID 直接参与文件名拼接，因此只允许 slug 字符，且排除 . / ..
-fn is_safe_id(id: &str) -> bool {
+pub(crate) fn is_safe_id(id: &str) -> bool {
     !id.is_empty()
         && id != "."
         && id != ".."

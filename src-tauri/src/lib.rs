@@ -126,6 +126,7 @@ pub fn run() {
             commands::projects::remove_project,
             commands::projects::reveal_project_folder,
             commands::projects::set_project_auto_sync,
+            commands::projects::sync_project_skills,
             commands::projects::touch_project,
             commands::subagents::scan_subagents,
             commands::subagents::set_subagent_enabled,
