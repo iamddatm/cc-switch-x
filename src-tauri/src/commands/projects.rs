@@ -474,6 +474,51 @@ pub async fn install_project_skill(
     .await
 }
 
+/// 从发现市场直接装进项目真源（前端只给仓库与定位线索，不经过预览暂存）。
+/// 入参与全局的 `install_discovered_skill` 保持一致，两个作用域才共用同一个市场面板。
+#[tauri::command]
+pub async fn install_discovered_project_skill(
+    app: AppHandle,
+    project_id: String,
+    input: crate::commands::skills::DiscoveredSkillInstallInput,
+    policy: ConflictPolicy,
+    targets: Vec<String>,
+) -> Result<ProjectInstallReport, AppError> {
+    let state = app.state::<AppState>();
+    let project_ops = state.project_ops.clone();
+    let store = state.store.clone();
+    let proxy = state.proxy_config()?;
+    let _job = state.begin_skill_job()?;
+    drop(state);
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let _project_guard = project_ops
+            .lock()
+            .map_err(|_| AppError::Project("项目锁失败".into()))?;
+        let _write = state.enter_write()?;
+        let agents = enabled_agents(state.inner())?;
+        let enabled = enabled_agent_ids(&agents);
+        let root = registered_project_root(state.inner(), &project_id)?;
+        let fetcher = HttpFetcher::new(Some(&proxy))?;
+        project_install::install_discovered_project_skill(
+            &store,
+            &project_id,
+            &root,
+            &fetcher,
+            &input.repo,
+            input.branch,
+            input.relative_path.as_deref(),
+            input.directory.as_deref(),
+            input.name.as_deref(),
+            policy,
+            &targets,
+            &project_registry::selectable_dir_keys(&agents),
+            &enabled,
+        )
+    })
+    .await
+}
+
 /// 从本地文件夹导入一个 skill 目录到项目真源。
 #[tauri::command]
 pub async fn import_project_skill_dir(

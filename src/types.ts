@@ -598,6 +598,17 @@ export interface ProjectSkillView {
   canonical: boolean;
   /** 账本记着有真源、磁盘上却没有：只能由显式「删除全部副本」处置。 */
   canonicalMissing: boolean;
+  /** 上次检查更新的结果；只存本机 `local/project-skill-checks/`，从没检查过时为 null。 */
+  check?: ProjectSkillCheck | null;
+}
+
+/** 后端 `store::project_checks::ProjectSkillCheck`：项目 skill 的本机检查状态。 */
+export interface ProjectSkillCheck {
+  updateAvailable: boolean;
+  latestHash?: string | null;
+  lastCheckedAt?: number | null;
+  lastCheckError?: string | null;
+  updatable: boolean;
 }
 
 export interface ProjectSkillsView {
@@ -679,7 +690,8 @@ export interface ProjectConflictResolution {
 export interface ProjectSyncOutcome {
   skillId: string;
   dir: string;
-  action: "copy" | "delete" | "keepBoth" | string;
+  /** render：真源→目标；adopt：目录→真源；delete：删副本；keepBoth：保住被外部改过的副本。 */
+  action: "render" | "delete" | "adopt" | "keepBoth" | string;
   status: "ok" | "failed" | string;
   backupPath?: string | null;
   error?: string | null;
@@ -688,6 +700,16 @@ export interface ProjectSyncOutcome {
 export interface ProjectSyncReport {
   outcomes: ProjectSyncOutcome[];
   conflicts: ProjectConflict[];
+  warnings: string[];
+}
+
+/**
+ * 装进项目真源的结果：`installed` 是真源落地情况，`render` 是同一次调用里
+ * 同步引擎顺带铺开的产物（没勾选目标时就是空的）。
+ */
+export interface ProjectInstallReport {
+  installed: SkillInstallOutcome[];
+  render: ProjectSyncReport;
   warnings: string[];
 }
 

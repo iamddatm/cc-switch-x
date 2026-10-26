@@ -31,6 +31,7 @@ import type {
   ProxyTestResult,
   PullOutcome,
   ProjectConflictResolution,
+  ProjectInstallReport,
   ProjectSkillView,
   ProjectSkillsView,
   ProjectSyncReport,
@@ -255,6 +256,50 @@ export const api = {
   /** 只替换真源的 SKILL.md；渲染留给下一次同步。 */
   writeProjectSkillBody: (projectId: string, skillId: string, content: string) =>
     invoke<ProjectSyncReport>("write_project_skill_body", { projectId, skillId, content }),
+  /** 装进项目真源：预览仍走全局的 previewSkillSource（只读中央库暂存，与目的端无关）。 */
+  installProjectSkill: (
+    projectId: string,
+    input: SkillSourceInput,
+    stagingId: string | null,
+    selections: InstallSelection[],
+    policy: ConflictPolicy,
+    targets: string[],
+  ) =>
+    invoke<ProjectInstallReport>("install_project_skill", {
+      projectId,
+      input,
+      stagingId,
+      selections,
+      policy,
+      targets,
+    }),
+  installDiscoveredProjectSkill: (
+    projectId: string,
+    input: DiscoveredSkillInstallInput,
+    policy: ConflictPolicy,
+    targets: string[],
+  ) =>
+    invoke<ProjectInstallReport>("install_discovered_project_skill", {
+      projectId,
+      input,
+      policy,
+      targets,
+    }),
+  importProjectSkillDir: (projectId: string, source: string, targets: string[]) =>
+    invoke<ProjectInstallReport>("import_project_skill_dir", { projectId, source, targets }),
+  createProjectSkill: (projectId: string, skillId: string, content: string, targets: string[]) =>
+    invoke<ProjectInstallReport>("create_project_skill", {
+      projectId,
+      skillId,
+      content,
+      targets,
+    }),
+  /** 检查结果只写本机缓存，不改随仓库提交的台账。 */
+  checkProjectSkillUpdates: (projectId: string, ids?: string[]) =>
+    invoke<SkillCheckReport>("check_project_skill_updates", { projectId, ids }),
+  /** 只换项目真源；渲染产物留给下一次同步。 */
+  updateProjectSkills: (projectId: string, ids: string[]) =>
+    invoke<SkillUpdateReport>("update_project_skills", { projectId, ids }),
 };
 
 export interface ApplyReport {

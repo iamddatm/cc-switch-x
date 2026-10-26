@@ -140,6 +140,7 @@ pub fn run() {
             commands::projects::check_project_skill_updates,
             commands::projects::create_project_skill,
             commands::projects::import_project_skill_dir,
+            commands::projects::install_discovered_project_skill,
             commands::projects::install_project_skill,
             commands::projects::list_project_skills,
             commands::projects::list_projects,

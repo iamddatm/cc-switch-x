@@ -172,6 +172,74 @@ pub fn install_project_skill(
     })
 }
 
+/// 从发现市场直接装进项目真源：重新拉仓库、定位候选、落真源，再写台账并渲染。
+/// 与 `install_project_skill` 的差别只是没有前端预览句柄，定位候选的规矩完全一样。
+pub fn install_discovered_project_skill<F: crate::net::RepoFetcher>(
+    store: &Store,
+    project_id: &str,
+    project_root: &Path,
+    fetcher: &F,
+    repo: &str,
+    branch: Option<String>,
+    relative_path: Option<&str>,
+    directory: Option<&str>,
+    name: Option<&str>,
+    policy: ConflictPolicy,
+    targets: &[String],
+    allowed_dirs: &[String],
+    enabled_agent_ids: &[String],
+) -> Result<ProjectInstallReport, AppError> {
+    assert_targets_allowed(targets, allowed_dirs)?;
+    let timestamp = chrono::Utc::now().timestamp_millis();
+    let outcome = skill_source::install_discovered(
+        SkillSink::Project {
+            store,
+            project_root,
+            project_id,
+            timestamp,
+        },
+        fetcher,
+        repo,
+        branch.clone(),
+        relative_path,
+        directory,
+        name,
+        policy,
+    )?;
+    // 只有真落盘了才动台账；跳过或失败的安装不该留下任何项目记录。
+    let mut ledger = project_scan::load_ledger(project_root)?;
+    if outcome.status == "installed" || outcome.status == "overwritten" {
+        let input = SkillSourceInput::Github {
+            repo: repo.to_string(),
+            branch,
+        };
+        let canonical = canonical_skill_dir(project_root, &outcome.id)?;
+        upsert(
+            &mut ledger,
+            project_root,
+            &outcome.id,
+            targets,
+            provenance(&input, &outcome.name, &canonical),
+            "render",
+        )?;
+        ledger.updated_at = chrono::Utc::now().to_rfc3339();
+        project_scan::save_ledger(project_root, &ledger)?;
+    }
+    let render = render_now(
+        store,
+        project_id,
+        project_root,
+        enabled_agent_ids,
+        allowed_dirs,
+        &[],
+    )?;
+    Ok(ProjectInstallReport {
+        installed: vec![outcome],
+        render,
+        warnings: Vec::new(),
+    })
+}
+
 /// 从本地文件夹导入一个 skill 目录到项目真源（已存在同名则拒绝，不覆盖）。
 pub fn import_project_skill_dir(
     store: &Store,
@@ -552,6 +620,65 @@ mod tests {
             &fx.enabled,
         );
         assert!(imported.is_err(), "导入同样不覆盖已有真源");
+    }
+
+    /// 发现市场用的安装：前端只给仓库与定位线索，落点仍是项目真源。
+    struct FakeFetcher {
+        fixture: PathBuf,
+    }
+
+    impl crate::net::RepoFetcher for FakeFetcher {
+        fn fetch(&self, _repo: &crate::net::RepoRef) -> Result<crate::net::FetchedRepo, AppError> {
+            let dir = tempfile::tempdir()?;
+            copy_dir(&self.fixture, dir.path())?;
+            Ok(crate::net::FetchedRepo {
+                dir,
+                branch: "main".into(),
+            })
+        }
+    }
+
+    #[test]
+    fn discovered_install_lands_in_the_canonical_with_github_provenance() {
+        let fx = fixture();
+        let repo = fx._temp.path().join("remote");
+        let skill = repo.join("skills/demo");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: Demo\n---\n上游\n").unwrap();
+
+        let report = install_discovered_project_skill(
+            &fx.store,
+            "app-1",
+            &fx.root,
+            &FakeFetcher { fixture: repo },
+            "acme/demo",
+            None,
+            Some("skills/demo"),
+            None,
+            None,
+            ConflictPolicy::Skip,
+            &["claude".to_string()],
+            &fx.allowed,
+            &fx.enabled,
+        )
+        .unwrap();
+
+        assert_eq!(report.installed[0].status, "installed");
+        assert!(canonical_skill_dir(&fx.root, "acme-demo-skills-demo")
+            .unwrap()
+            .join("SKILL.md")
+            .is_file());
+        let ledger = project_scan::load_ledger(&fx.root).unwrap();
+        let entry = ledger.skills.values().next().unwrap();
+        let source = entry.source.as_ref().unwrap();
+        assert_eq!(source.kind, "github");
+        assert_eq!(source.repo.as_deref(), Some("acme/demo"));
+        assert_eq!(source.subpath.as_deref(), Some("skills/demo"));
+        assert!(report
+            .render
+            .outcomes
+            .iter()
+            .any(|item| item.status == "ok" && item.action == "render"));
     }
 
     #[test]

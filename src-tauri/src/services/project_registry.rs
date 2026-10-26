@@ -60,6 +60,9 @@ pub struct ProjectSkillView {
     pub canonical: bool,
     /// 账本记着有真源、磁盘上却没有：只能由显式 purge 处置。
     pub canonical_missing: bool,
+    /// 上次检查更新的结果。项目真源不写 `.meta.json`，「可更新」与检查失败原因
+    /// 只能来自本机 `local/project-skill-checks/<pid>.json`。
+    pub check: Option<crate::store::project_checks::ProjectSkillCheck>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -349,6 +352,7 @@ pub fn list_project_skills(
     let ledger = project_scan::load_ledger(&entry.path)?;
     // 能力闸允许的渲染目标：格子的「不可用」状态与写入侧校验共用同一份判定。
     let allowed = selectable_dir_keys(agents);
+    let checks = crate::store::project_checks::ProjectCheckCache::load(store, project_id);
 
     // 列 = 本次启用的目录 + 账本里已勾选但当前停用的目录（后者标 unavailable，让用户能取消）。
     let mut column_keys = keys.clone();
@@ -429,6 +433,7 @@ pub fn list_project_skills(
         }
 
         let (name, description) = describe_skill(&entry.path, &id, &scan, &keys);
+        let check = checks.get(&id).cloned();
         skills.push(ProjectSkillView {
             id,
             name,
@@ -439,6 +444,7 @@ pub fn list_project_skills(
             last_op: ledger_entry.and_then(|entry| entry.last_op.clone()),
             canonical: canonical_state.is_some(),
             canonical_missing: ledger_says_canonical && canonical_state.is_none(),
+            check,
         });
     }
 
@@ -464,6 +470,9 @@ pub fn list_project_skills(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::project::{
+        ProjectLedger, ProjectSkillEntry, PROJECT_LEDGER_VERSION,
+    };
     use crate::services::agents::AgentStatus;
     use crate::store::Store;
     use std::path::{Path, PathBuf};
@@ -697,5 +706,74 @@ mod tests {
             list_project_skills(&store, &view.id, &[agent_status("claude", true)]).unwrap();
         assert!(!skills.project.exists);
         assert!(skills.skills.is_empty());
+    }
+
+    /// 项目真源没有 `.meta.json`，「可更新」徽标与检查失败原因只能来自本机缓存，
+    /// 所以缓存必须跟着行进视图，否则界面永远显示不出有更新可装。
+    #[test]
+    fn rows_carry_the_local_check_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let home = dir.path().join("home");
+        let project = home.join("work/app");
+        std::fs::create_dir_all(&project).unwrap();
+        seed_skill(&project.join(".ccswitchx/skills"), "demo");
+        let view = add_project(&store, &home, &project, &["claude".into()]).unwrap();
+
+        // 台账条目由安装/迁移/收进真源写入；这里直接造出「已跟踪且有 GitHub 来源」的现状。
+        let mut ledger = ProjectLedger {
+            version: PROJECT_LEDGER_VERSION,
+            updated_at: String::new(),
+            skills: Default::default(),
+        };
+        ledger.skills.insert(
+            "demo".into(),
+            ProjectSkillEntry {
+                targets: vec!["claude".into()],
+                source: Some(ProjectSkillSource {
+                    kind: "github".into(),
+                    repo: Some("acme/demo".into()),
+                    branch: Some("main".into()),
+                    subpath: Some("skills/demo".into()),
+                    tree_hash: None,
+                }),
+                ..Default::default()
+            },
+        );
+        project_scan::save_ledger(&project, &ledger).unwrap();
+
+        let mut cache = crate::store::project_checks::ProjectCheckCache::default();
+        cache.record(
+            "demo",
+            crate::store::project_checks::ProjectSkillCheck {
+                update_available: true,
+                latest_hash: Some("remote-hash".into()),
+                last_checked_at: Some(5),
+                last_check_error: None,
+                updatable: true,
+            },
+        );
+        cache.save(&store, &view.id).unwrap();
+
+        let skills = list_project_skills(&store, &view.id, &[agent_status("claude", true)]).unwrap();
+        let check = skills.skills[0]
+            .check
+            .as_ref()
+            .expect("检查状态必须带到行上");
+        assert!(check.update_available);
+        assert_eq!(check.latest_hash.as_deref(), Some("remote-hash"));
+        assert_eq!(skills.skills[0].source.as_ref().unwrap().repo.as_deref(), Some("acme/demo"));
+
+        // 没检查过的行不带检查状态，界面据此显示「未检查」而不是「已最新」。
+        seed_skill(&project.join(".ccswitchx/skills"), "never-checked");
+        let refreshed =
+            list_project_skills(&store, &view.id, &[agent_status("claude", true)]).unwrap();
+        assert!(refreshed
+            .skills
+            .iter()
+            .find(|skill| skill.id == "never-checked")
+            .expect("新真源目录要出现在行里")
+            .check
+            .is_none());
     }
 }
