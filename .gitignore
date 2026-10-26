@@ -1,6 +1,8 @@
 node_modules/
 # Qoder 本地 worktree 与会话元数据
 .qoder/
+# superpowers 会话 scratch：brainstorm 预览页与 SDD ledger（设计与计划文档已进 docs/superpowers，不需要入库）
+.superpowers/
 dist/
 src-tauri/target/
 *.tsbuildinfo
