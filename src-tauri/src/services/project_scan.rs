@@ -51,7 +51,8 @@ pub fn tree_state(dir: &Path) -> Result<ProjectDirState, AppError> {
     }
 
     let mut files = BTreeMap::new();
-    collect_files(dir, dir, &mut files)?;
+    let mut mtime = 0_i64;
+    collect_files(dir, dir, &mut files, &mut mtime)?;
 
     let mut manifest = String::new();
     for (path, hash) in &files {
@@ -65,6 +66,7 @@ pub fn tree_state(dir: &Path) -> Result<ProjectDirState, AppError> {
         present: true,
         tree_hash: Some(tree_hash),
         files,
+        mtime,
     })
 }
 
@@ -72,6 +74,7 @@ fn collect_files(
     root: &Path,
     dir: &Path,
     files: &mut BTreeMap<String, String>,
+    mtime: &mut i64,
 ) -> Result<(), AppError> {
     let mut entries = std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(|entry| entry.file_name());
@@ -85,8 +88,13 @@ fn collect_files(
         }
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            collect_files(root, &path, files)?;
+            collect_files(root, &path, files, mtime)?;
         } else if file_type.is_file() {
+            if let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) {
+                if let Ok(elapsed) = modified.duration_since(std::time::UNIX_EPOCH) {
+                    *mtime = (*mtime).max(elapsed.as_millis() as i64);
+                }
+            }
             let relative = path
                 .strip_prefix(root)
                 .unwrap_or(&path)

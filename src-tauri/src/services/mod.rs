@@ -7,6 +7,7 @@ pub mod git_sync;
 pub mod import;
 pub mod project_registry;
 pub mod project_scan;
+pub mod project_sync;
 pub mod scan;
 pub mod sessions;
 pub mod settings;

@@ -95,6 +95,9 @@ pub struct ProjectDirState {
     pub tree_hash: Option<String>,
     #[serde(default)]
     pub files: BTreeMap<String, String>,
+    /// 目录内文件的最大 mtime（毫秒）。只在冲突时用于推荐“最新一侧”，不写进账本。
+    #[serde(skip, default)]
+    pub mtime: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
