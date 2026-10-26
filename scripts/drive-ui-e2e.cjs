@@ -115,6 +115,100 @@ async function main() {
     await shot("08-hooks-disabled");
   }
 
+  // ── 项目级 Skills（只有 seed 带 -Project 时才跑）───────────
+  const PROJECT = process.env.PROJECT_PATH;
+  if (PROJECT) {
+    const claudeFile = path.join(PROJECT, ".claude/skills/probe/SKILL.md");
+    const canonicalFile = path.join(PROJECT, ".ccswitchx/skills/probe/SKILL.md");
+    const qoderFile = path.join(PROJECT, ".qoder/skills/probe/SKILL.md");
+    const claudeBefore = read(claudeFile);
+
+    // 「添加项目…」开的是原生文件夹对话框，CDP 操作不了 —— 直接调同一条 IPC，
+    // 注册表、台账、能力闸全部由后端自己算，不走任何测试后门。
+    log.projectAdded = await target.evaluate(
+      async (p) => await window.__TAURI_INTERNALS__.invoke("add_project", { path: p }),
+      PROJECT,
+    );
+    await target.reload({ waitUntil: "networkidle" });
+    await target.waitForTimeout(1000);
+
+    // 切到项目范围：侧栏顶部的范围选择器 → 选中 demo-project → Skills 面板变成项目面板
+    await target.getByRole("button", { name: /^配置范围/ }).click();
+    // 行本身是 aria-pressed 的可选按钮；同名的「⋯」菜单按钮没有这个属性，别点错。
+    await target.locator('button[aria-pressed]', { hasText: "demo-project" }).click();
+    await sidebar("Skills");
+    await target.waitForTimeout(1200);
+    // 先关掉自动同步：开着的话勾完目标立刻铺盘，「勾选只记账、同步才写盘」这条两步纪律就验不到。
+    const autoSync = target.getByRole("checkbox", { name: "自动同步" });
+    if (await autoSync.isChecked()) {
+      await autoSync.click();
+      await target.waitForTimeout(800);
+    }
+    await shot("09-project-list");
+    log.projectRowVisible = await target.getByRole("button", { name: "查看 probe" }).count();
+    // 未实测的 .agents/skills 只能显示「待实测」，不给开关
+    log.agentsCellUnverified = await target.getByText("待实测").count();
+    log.agentsCheckboxAbsent = await target.getByRole("checkbox", { name: /Agents|Codex/i }).count();
+
+    // 1. 收进真源：只新建 .ccswitchx/skills/probe，Claude 的目录一个字节都不动
+    await target.getByRole("button", { name: "probe 更多操作" }).click();
+    await target.getByRole("menuitem", { name: /把 Claude Code 的副本收进真源/ }).click();
+    await target.waitForTimeout(1500);
+    log.canonicalCreated = fs.existsSync(canonicalFile);
+    log.claudeUntouchedByAdopt = read(claudeFile) === claudeBefore;
+    log.qoderNotWrittenYet = !fs.existsSync(qoderFile);
+    await shot("10-project-adopted");
+
+    // 2. 勾选两个渲染目录：只改台账不写盘；按「立即同步」才铺开
+    await target.getByRole("checkbox", { name: /同步到 Claude/ }).click();
+    await target.waitForTimeout(600);
+    await target.getByRole("checkbox", { name: /同步到 Qoder/ }).click();
+    await target.waitForTimeout(800);
+    log.qoderStillAbsentAfterCheck = !fs.existsSync(qoderFile);
+    log.claudeStillOriginalAfterCheck = read(claudeFile) === claudeBefore;
+    await target.getByRole("button", { name: "立即同步" }).click();
+    await target.waitForTimeout(2000);
+    log.qoderRendered = fs.existsSync(qoderFile);
+    log.renderMatchesCanonical =
+      fs.existsSync(qoderFile) && read(qoderFile) === read(canonicalFile);
+    log.agentsDirStillAbsent = !fs.existsSync(path.join(PROJECT, ".agents"));
+    await shot("11-project-rendered");
+
+    // 3. 筛选与搜索在项目里真的可用
+    await target.getByLabel("搜索 Skill").fill("对不上的关键词");
+    await target.waitForTimeout(500);
+    log.projectSearchEmpty = await target.getByText("没有匹配的 Skill").count();
+    await target.getByLabel("搜索 Skill").fill("");
+    await target.waitForTimeout(500);
+    log.projectSearchRestored = await target.getByRole("button", { name: "查看 probe" }).count();
+    await shot("12-project-filtered");
+
+    // 4. 编辑正文：只改真源，两个渲染产物都保持落后，等下一次同步
+    await target.getByRole("button", { name: "probe 更多操作" }).click();
+    await target.getByRole("menuitem", { name: "编辑" }).click();
+    await target.getByLabel(/正文/).fill("# 项目里改过的正文\n");
+    await target.getByRole("button", { name: "保存" }).click();
+    await target.waitForTimeout(2000);
+    log.canonicalHasEdit = read(canonicalFile).includes("项目里改过的正文");
+    log.copiesStaleUntilSync =
+      !read(claudeFile).includes("项目里改过的正文") &&
+      !read(qoderFile).includes("项目里改过的正文");
+    await shot("13-project-edited");
+
+    await target.getByRole("button", { name: "立即同步" }).click();
+    await target.waitForTimeout(2000);
+    log.claudeAfterSync = read(claudeFile).includes("项目里改过的正文");
+    log.qoderAfterSync = read(qoderFile).includes("项目里改过的正文");
+    await shot("14-project-synced");
+
+    // 5. 项目里没有 cc-switch 导入这条来源
+    await target.getByRole("button", { name: "添加 Skill" }).click();
+    await target.waitForTimeout(400);
+    log.projectAddItems = await target.getByRole("menuitem").allTextContents();
+    await shot("15-project-add-menu");
+    await target.keyboard.press("Escape");
+  }
+
   console.log(JSON.stringify(log, null, 2));
   await browser.close();
 }
@@ -123,3 +217,4 @@ main().catch((error) => {
   console.error("DRIVER FAILED:", error);
   process.exit(1);
 });
+
