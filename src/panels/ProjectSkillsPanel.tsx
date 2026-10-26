@@ -252,7 +252,8 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
 
   const dirOf = (key: string) => dirs.find((dir) => dir.key === key);
 
-  const copies = result?.outcomes.filter((item) => item.action === "copy").length ?? 0;
+  const renders = result?.outcomes.filter((item) => item.action === "render").length ?? 0;
+  const adopts = result?.outcomes.filter((item) => item.action === "adopt").length ?? 0;
   const deletes = result?.outcomes.filter((item) => item.action === "delete").length ?? 0;
   const keeps = result?.outcomes.filter((item) => item.action === "keepBoth").length ?? 0;
   const failed = result?.outcomes.filter((item) => item.status !== "ok") ?? [];
@@ -355,21 +356,23 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
             </div>
           </Notice>
         )}
-        {result && (copies > 0 || deletes > 0 || keeps > 0 || result.warnings.length > 0) && (
-          <Notice tone={failed.length > 0 ? "warning" : "success"} className="mb-3">
-            <div className="flex flex-wrap gap-x-3 gap-y-1">
-              <span>复制 {copies}</span>
-              <span>删除 {deletes}</span>
-              <span>保留副本 {keeps}</span>
-              {failed.length > 0 && <span>失败 {failed.length}</span>}
-              {result.warnings.map((warning) => (
-                <span key={warning} className="w-full text-fg-3">
-                  {warning}
-                </span>
-              ))}
-            </div>
-          </Notice>
-        )}
+        {result &&
+          (renders > 0 || adopts > 0 || deletes > 0 || keeps > 0 || result.warnings.length > 0) && (
+            <Notice tone={failed.length > 0 ? "warning" : "success"} className="mb-3">
+              <div className="flex flex-wrap gap-x-3 gap-y-1">
+                <span>渲染 {renders}</span>
+                {adopts > 0 && <span>收进真源 {adopts}</span>}
+                <span>删除 {deletes}</span>
+                <span>保留副本 {keeps}</span>
+                {failed.length > 0 && <span>失败 {failed.length}</span>}
+                {result.warnings.map((warning) => (
+                  <span key={warning} className="w-full text-fg-3">
+                    {warning}
+                  </span>
+                ))}
+              </div>
+            </Notice>
+          )}
 
         {skills.length === 0 ? (
           loading ? (
