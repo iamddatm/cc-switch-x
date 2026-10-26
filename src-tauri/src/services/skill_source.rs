@@ -584,16 +584,15 @@ impl<'a> SkillSink<'a> {
         }
     }
 
-    /// 提交用的暂存目录：必须与 `entry_dir` 同卷。
-    pub fn install_staging(&self, index: usize) -> Result<PathBuf, AppError> {
+    /// 提交用的暂存目录：必须与 `entry_dir` 同卷（`replace_dir` 靠 rename）。
+    /// `label` 只用于目录名，方便排查是哪一次写入留下的。
+    pub fn staging(&self, label: &str) -> Result<PathBuf, AppError> {
         match self {
-            SkillSink::Store { store, .. } => {
-                new_staging_dir(store, &format!("install-{index}"))
-            }
+            SkillSink::Store { store, .. } => new_staging_dir(store, label),
             SkillSink::Project { project_root, .. } => {
                 let root = crate::domain::project::canonical_root(project_root);
                 let path = root.join(format!(
-                    ".staging-install-{index}-{}-{}",
+                    ".staging-{label}-{}-{}",
                     self.timestamp_of(project_root),
                     std::process::id()
                 ));
@@ -653,9 +652,9 @@ impl<'a> SkillSink<'a> {
         matches!(self, SkillSink::Store { .. })
     }
 
-    /// 安装成功后要做的事：中央库要刷新各 agent 的部署副本，
+    /// 写入成功后要做的事：中央库要刷新各 agent 的部署副本，
     /// 项目真源则把渲染留给同步引擎（唯一入口永远是 sync_project）。
-    pub fn after_install(&self, id: &str) -> Vec<String> {
+    pub fn after_write(&self, id: &str) -> Vec<String> {
         match self {
             SkillSink::Store { store, home } => refresh_deployed(store, home, id),
             SkillSink::Project { .. } => Vec::new(),
@@ -775,7 +774,7 @@ fn install_one(
         None
     };
 
-    let staging_root = match sink.install_staging(index) {
+    let staging_root = match sink.staging(&format!("install-{index}")) {
         Ok(path) => path,
         Err(error) => {
             return outcome(
@@ -802,7 +801,7 @@ fn install_one(
 
     match result {
         Ok(()) => {
-            let warnings = sink.after_install(&final_id);
+            let warnings = sink.after_write(&final_id);
             let _ = fs::remove_dir_all(&staging_root);
             outcome(
                 if overwriting {

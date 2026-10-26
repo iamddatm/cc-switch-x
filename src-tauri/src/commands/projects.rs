@@ -2,6 +2,7 @@ use crate::commands::backup::open_directory;
 use crate::domain::project::ProjectSkillDirKey;
 use crate::error::AppError;
 use crate::import::mcp::ConflictPolicy;
+use crate::net::HttpFetcher;
 use crate::services::agents::{detect_all, AgentStatus};
 use crate::services::project_install::{self, ProjectInstallReport};
 use crate::services::project_migrate::{self, MigrationDecision, ProjectMigrationReport};
@@ -11,7 +12,9 @@ use crate::services::project_registry::{
 use crate::services::project_scan;
 use crate::services::project_sync::{self, Resolution, SyncReport};
 use crate::services::skill_source::{InstallSelection, SkillSourceInput};
+use crate::services::skill_update::{self, SkillCheckReport, SkillUpdateReport};
 use crate::state::AppState;
+use crate::store::project_checks::ProjectCheckCache;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, State};
 
@@ -313,6 +316,86 @@ pub async fn write_project_skill_body(
         let _write = state.enter_write()?;
         let root = registered_project_root(state.inner(), &project_id)?;
         project_sync::write_body(&state.store, &project_id, &root, &skill_id, &content)
+    })
+    .await
+}
+
+/// 检查项目真源的上游更新。检查结果只写本机 `local/` 缓存：
+/// 一次只读的「检查」不该在随仓库提交的台账里留下 diff，也不给真源目录写 `.meta.json`。
+#[tauri::command]
+pub async fn check_project_skill_updates(
+    app: AppHandle,
+    project_id: String,
+    ids: Option<Vec<String>>,
+) -> Result<SkillCheckReport, AppError> {
+    let state = app.state::<AppState>();
+    let project_ops = state.project_ops.clone();
+    let store = state.store.clone();
+    let proxy = state.proxy_config()?;
+    let _job = state.begin_skill_job()?;
+    drop(state);
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let _project_guard = project_ops
+            .lock()
+            .map_err(|_| AppError::Project("项目锁失败".into()))?;
+        let _write = state.enter_write()?;
+        let root = registered_project_root(state.inner(), &project_id)?;
+        let mut ledger = project_scan::load_ledger(&root)?;
+        let mut cache = ProjectCheckCache::load(&store, &project_id);
+        let fetcher = HttpFetcher::new(Some(&proxy))?;
+        skill_update::check(
+            skill_update::UpdateSink::Project {
+                store: &store,
+                project_id: &project_id,
+                project_root: &root,
+                timestamp: chrono::Utc::now().timestamp_millis(),
+                ledger: &mut ledger,
+                cache: &mut cache,
+            },
+            &fetcher,
+            ids.as_deref(),
+        )
+    })
+    .await
+}
+
+/// 更新项目真源：只换 `.ccswitchx/skills/<id>/`，渲染产物留给下一次同步。
+#[tauri::command]
+pub async fn update_project_skills(
+    app: AppHandle,
+    project_id: String,
+    ids: Vec<String>,
+) -> Result<SkillUpdateReport, AppError> {
+    let state = app.state::<AppState>();
+    let project_ops = state.project_ops.clone();
+    let store = state.store.clone();
+    let proxy = state.proxy_config()?;
+    let _job = state.begin_skill_job()?;
+    drop(state);
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let _project_guard = project_ops
+            .lock()
+            .map_err(|_| AppError::Project("项目锁失败".into()))?;
+        let _write = state.enter_write()?;
+        let root = registered_project_root(state.inner(), &project_id)?;
+        let mut ledger = project_scan::load_ledger(&root)?;
+        let mut cache = ProjectCheckCache::load(&store, &project_id);
+        let fetcher = HttpFetcher::new(Some(&proxy))?;
+        // 一批共用一个时间戳：备份才会全部落在 `backups/projects/<pid>/<ts>/canonical/` 下。
+        skill_update::update(
+            skill_update::UpdateSink::Project {
+                store: &store,
+                project_id: &project_id,
+                project_root: &root,
+                timestamp: chrono::Utc::now().timestamp_millis(),
+                ledger: &mut ledger,
+                cache: &mut cache,
+            },
+            &fetcher,
+            &ids,
+        )
     })
     .await
 }

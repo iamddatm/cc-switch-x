@@ -2,16 +2,23 @@
 //!
 //! 同一个仓库在一次批量里只下载一次；本地哈希现场计算，不信任缓存，
 //! 因此用户手改过 `SKILL.md` 也会被识别为“与上游不同”。
+//!
+//! 目的端有两种（`UpdateSink`），差别只在**来源与检查状态存在哪**：
+//! - 中央库：`.meta.json` 就写在 skill 目录里，更新完当场刷新各 agent 的部署副本。
+//! - 项目真源：来源取台账 `skills.json` 的 `source`，检查状态只写本机缓存
+//!   （`.meta.json` 不能进仓库：它污染提交内容，还会让每次检查都改变目录指纹、
+//!   把全部渲染目标刷成「待更新」），铺开交给同步引擎，更新本身不写渲染产物。
 
+use crate::domain::project::{canonical_skill_dir, ProjectLedger};
 use crate::domain::skill::parse_metadata;
 use crate::domain::skill_meta::{read_meta, write_meta, SkillMeta};
 use crate::domain::AssetType;
 use crate::error::AppError;
 use crate::net::archive::{self, ScannedSkill};
 use crate::net::{parse_github_input, RepoFetcher, RepoRef};
-use crate::services::skill_source::{
-    new_staging_dir, refresh_deployed, replace_dir, SkillItemFailure,
-};
+use crate::services::project_scan;
+use crate::services::skill_source::{replace_dir, SkillItemFailure, SkillSink};
+use crate::store::project_checks::{ProjectCheckCache, ProjectSkillCheck};
 use crate::store::{copy_dir, Store};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -81,7 +88,7 @@ struct Target {
     id: String,
     name: String,
     dir: PathBuf,
-    meta: SkillMeta,
+    provenance: Provenance,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -89,6 +96,281 @@ struct GroupKey {
     owner: String,
     name: String,
     branch: Option<String>,
+}
+
+/// 一个 skill 的上游来源。两个分支各自只有一处真源，这里只做统一读取：
+/// 中央库读 skill 目录里的 `.meta.json`，项目真源读台账的 `source`。
+#[derive(Debug, Clone)]
+pub enum Provenance {
+    /// 原样持有 `.meta.json`：写回时要保留 `installed_at` 与未知键，不能被投影磨平。
+    Meta(SkillMeta),
+    Project {
+        repo: RepoRef,
+        /// 上游仓库里的相对目录（台账 `source.subpath`）。
+        subpath: Option<String>,
+    },
+}
+
+impl Provenance {
+    fn owner(&self) -> Option<&str> {
+        match self {
+            Provenance::Meta(meta) => non_empty(meta.repo_owner.as_deref()),
+            Provenance::Project { repo, .. } => Some(repo.owner.as_str()),
+        }
+    }
+
+    fn name(&self) -> Option<&str> {
+        match self {
+            Provenance::Meta(meta) => non_empty(meta.repo_name.as_deref()),
+            Provenance::Project { repo, .. } => Some(repo.name.as_str()),
+        }
+    }
+
+    fn branch(&self) -> Option<&str> {
+        match self {
+            Provenance::Meta(meta) => non_empty(meta.repo_branch.as_deref()),
+            Provenance::Project { repo, .. } => non_empty(repo.branch.as_deref()),
+        }
+    }
+
+    /// 上次定位到的上游目录；项目分支就是台账里的 `subpath`。
+    fn repo_path(&self) -> Option<&str> {
+        match self {
+            Provenance::Meta(meta) => meta.repo_path.as_deref(),
+            Provenance::Project { subpath, .. } => subpath.as_deref(),
+        }
+    }
+
+    /// cc-switch 导入留下的来源目录名；项目真源没有这个概念。
+    fn source_directory(&self) -> Option<&str> {
+        match self {
+            Provenance::Meta(meta) => meta.source_directory.as_deref(),
+            Provenance::Project { .. } => None,
+        }
+    }
+
+    fn readme_url(&self) -> Option<&str> {
+        match self {
+            Provenance::Meta(meta) => meta.readme_url.as_deref(),
+            Provenance::Project { .. } => None,
+        }
+    }
+
+    /// 把这次检查的结果折成新的 `.meta.json`；项目分支没有 meta 文件，返回 None。
+    fn checked_meta(
+        &self,
+        branch: Option<&str>,
+        repo_path: Option<&str>,
+        latest_hash: Option<&str>,
+        // None 表示这次没拿到远端结果，保留上一次的可更新状态。
+        update_available: Option<bool>,
+        error: Option<&str>,
+    ) -> Option<SkillMeta> {
+        let Provenance::Meta(meta) = self else {
+            return None;
+        };
+        let mut meta = meta.clone();
+        if let Some(branch) = branch.filter(|value| !value.trim().is_empty()) {
+            meta.repo_branch = Some(branch.to_string());
+        }
+        if let Some(path) = repo_path {
+            meta.repo_path = Some(path.to_string());
+        }
+        meta.last_checked_at = Some(now_ms());
+        if latest_hash.is_some() {
+            meta.latest_hash = latest_hash.map(str::to_string);
+        }
+        if let Some(available) = update_available {
+            meta.update_available = Some(available);
+        }
+        meta.last_check_error = error.map(str::to_string);
+        Some(meta)
+    }
+
+    /// 更新成功后的 `.meta.json`：来源与内容指纹一起刷，安装时间与未知键保持不动。
+    fn updated_meta(&self, branch: &str, repo_path: &str, remote_hash: &str) -> Option<SkillMeta> {
+        let Provenance::Meta(meta) = self else {
+            return None;
+        };
+        let now = now_ms();
+        let mut meta = meta.clone();
+        meta.repo_branch = Some(branch.to_string());
+        meta.repo_path = Some(repo_path.to_string());
+        meta.content_hash = Some(remote_hash.to_string());
+        meta.updated_at = Some(now);
+        meta.last_checked_at = Some(now);
+        meta.latest_hash = Some(remote_hash.to_string());
+        meta.update_available = Some(false);
+        meta.last_check_error = None;
+        if meta.readme_url.is_none() && meta.is_updatable() {
+            let owner = meta.repo_owner.as_deref().unwrap_or_default();
+            let name = meta.repo_name.as_deref().unwrap_or_default();
+            let suffix = if repo_path == "." {
+                String::new()
+            } else {
+                format!("{repo_path}/")
+            };
+            meta.readme_url = Some(format!(
+                "https://github.com/{owner}/{name}/blob/{branch}/{suffix}SKILL.md"
+            ));
+        }
+        Some(meta)
+    }
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|text| !text.is_empty())
+}
+
+/// 更新目的端：中央库（用户级真源）或某个项目的真源。
+///
+/// 下载、定位上游目录、算哈希、备份、换目录全部共用；差别只在来源与检查状态的存法
+/// （`Provenance` + `record_check`）、更新后谁铺开（`SkillSink::after_write`），
+/// 以及暂存/备份的落点（复用 `SkillSink` 的「与目的同卷」规则）。
+pub enum UpdateSink<'a> {
+    Store {
+        store: &'a Store,
+        home: &'a Path,
+    },
+    Project {
+        store: &'a Store,
+        project_id: &'a str,
+        project_root: &'a Path,
+        /// 同一批更新共用一个时间戳，备份才会落在同一个目录里。
+        timestamp: i64,
+        /// 来源真源：读 `source` 定位上游，更新后刷 `source`。
+        ledger: &'a mut ProjectLedger,
+        /// 易变的检查状态：只落本机 `local/`，不进仓库。
+        cache: &'a mut ProjectCheckCache,
+    },
+}
+
+impl<'a> UpdateSink<'a> {
+    /// 目录、备份、暂存、铺开规则都来自 `SkillSink`，这里不再抄一遍。
+    fn dest(&self) -> SkillSink<'_> {
+        match self {
+            UpdateSink::Store { store, home } => SkillSink::Store { store, home },
+            UpdateSink::Project {
+                store,
+                project_root,
+                project_id,
+                timestamp,
+                ..
+            } => SkillSink::Project {
+                store,
+                project_root,
+                project_id,
+                timestamp: *timestamp,
+            },
+        }
+    }
+
+    fn load(&self, ids: Option<&[String]>) -> Result<LoadReport, AppError> {
+        match self {
+            UpdateSink::Store { store, .. } => load_store_targets(store, ids),
+            UpdateSink::Project {
+                project_root,
+                ledger,
+                ..
+            } => load_project_targets(ledger, project_root, ids),
+        }
+    }
+
+    /// 记下这次检查：中央库写 `.meta.json`，项目只改内存里的本机缓存。
+    fn record_check(
+        &mut self,
+        target: &Target,
+        branch: Option<&str>,
+        repo_path: Option<&str>,
+        latest_hash: Option<&str>,
+        update_available: Option<bool>,
+        error: Option<&str>,
+    ) -> Result<(), AppError> {
+        match self {
+            UpdateSink::Store { .. } => {
+                if let Some(meta) =
+                    target
+                        .provenance
+                        .checked_meta(branch, repo_path, latest_hash, update_available, error)
+                {
+                    write_meta(&target.dir, &meta)?;
+                }
+                Ok(())
+            }
+            // 这次探测到的分支与上游路径**不**回填台账：一次只读的「检查更新」
+            // 不该在用户的仓库里留下 diff。真更新时才由 after_update 回写。
+            UpdateSink::Project { cache, .. } => {
+                Self::merge_check(cache, &target.id, latest_hash, update_available, error);
+                Ok(())
+            }
+        }
+    }
+
+    /// 合并本机缓存里的检查状态：`latest_hash`/`update_available` 为 None 表示这次没拿到
+    /// 远端结果，保留上一次的判断；错误则总是覆盖（与 `.meta.json` 的规则一致）。
+    fn merge_check(
+        cache: &mut ProjectCheckCache,
+        id: &str,
+        latest_hash: Option<&str>,
+        update_available: Option<bool>,
+        error: Option<&str>,
+    ) {
+        let mut record: ProjectSkillCheck = cache.get(id).cloned().unwrap_or_default();
+        record.updatable = true;
+        record.last_checked_at = Some(now_ms());
+        if latest_hash.is_some() {
+            record.latest_hash = latest_hash.map(str::to_string);
+        }
+        if let Some(available) = update_available {
+            record.update_available = available;
+        }
+        record.last_check_error = error.map(str::to_string);
+        cache.record(id, record);
+    }
+
+    /// 更新成功后的状态回写。中央库的来源与指纹已经写进 `.meta.json`（在换目录之前），
+    /// 这里无事可做；项目的来源在台账、检查状态在本机缓存，两处都得刷。
+    fn after_update(&mut self, target: &Target, branch: &str, repo_path: &str, remote_hash: &str) {
+        let UpdateSink::Project { ledger, cache, .. } = self else {
+            return;
+        };
+        if let Some(source) = ledger
+            .skills
+            .get_mut(&target.id)
+            .and_then(|entry| entry.source.as_mut())
+        {
+            source.branch = Some(branch.to_string());
+            source.subpath = Some(repo_path.to_string());
+            source.tree_hash = Some(remote_hash.to_string());
+        }
+        // 真源基线 entry.canonical 保持不动：那正是「目标格子等待更新」的判据，
+        // 刷了就等于替同步引擎宣布已经铺开完毕。
+        ledger.updated_at = chrono::Utc::now().to_rfc3339();
+        Self::merge_check(cache, &target.id, Some(remote_hash), Some(false), None);
+    }
+
+    fn flush_checks(&mut self) -> Result<(), AppError> {
+        match self {
+            UpdateSink::Store { .. } => Ok(()),
+            UpdateSink::Project {
+                store,
+                project_id,
+                cache,
+                ..
+            } => cache.save(store, project_id),
+        }
+    }
+
+    fn flush_ledger(&mut self) -> Result<(), AppError> {
+        match self {
+            UpdateSink::Store { .. } => Ok(()),
+            UpdateSink::Project {
+                project_root,
+                ledger,
+                ..
+            } => project_scan::save_ledger(project_root, ledger),
+        }
+    }
 }
 
 fn now_ms() -> i64 {
@@ -104,7 +386,7 @@ fn display_name(dir: &Path, id: &str) -> String {
 
 type LoadReport = (Vec<Target>, Vec<SkillSkipped>, Vec<SkillItemFailure>);
 
-fn load_targets(store: &Store, ids: Option<&[String]>) -> Result<LoadReport, AppError> {
+fn load_store_targets(store: &Store, ids: Option<&[String]>) -> Result<LoadReport, AppError> {
     let all = store.list_ids(AssetType::Skill)?;
     let requested: Option<BTreeSet<&str>> =
         ids.map(|values| values.iter().map(String::as_str).collect());
@@ -162,7 +444,94 @@ fn load_targets(store: &Store, ids: Option<&[String]>) -> Result<LoadReport, App
             id,
             name,
             dir,
-            meta,
+            provenance: Provenance::Meta(meta),
+        });
+    }
+    targets.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok((targets, skipped, failures))
+}
+
+/// 项目分支的候选：来源在台账 `source` 里，目录必须是磁盘上真实存在的真源。
+/// 台账记着有、磁盘上却没有（未迁移或没「收进真源」）只能跳过 —— 凭空建目录再写，
+/// 等于替用户决定这个项目该有什么。
+fn load_project_targets(
+    ledger: &ProjectLedger,
+    project_root: &Path,
+    ids: Option<&[String]>,
+) -> Result<LoadReport, AppError> {
+    let requested: Option<BTreeSet<&str>> =
+        ids.map(|values| values.iter().map(String::as_str).collect());
+    let mut targets = Vec::new();
+    let mut skipped = Vec::new();
+    let mut failures = Vec::new();
+
+    if let Some(requested) = &requested {
+        for id in requested.iter() {
+            if !ledger.skills.contains_key(*id) {
+                failures.push(SkillItemFailure {
+                    id: (*id).to_string(),
+                    error: "项目台账里没有这个 Skill".into(),
+                });
+            }
+        }
+    }
+
+    for id in ledger.skills.keys() {
+        if requested
+            .as_ref()
+            .is_some_and(|requested| !requested.contains(id.as_str()))
+        {
+            continue;
+        }
+        let dir = match canonical_skill_dir(project_root, id) {
+            Ok(path) => path,
+            Err(error) => {
+                failures.push(SkillItemFailure {
+                    id: id.clone(),
+                    error: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let entry = &ledger.skills[id];
+        let Some(source) = entry
+            .source
+            .as_ref()
+            .filter(|source| source.kind == "github")
+        else {
+            skipped.push(SkillSkipped {
+                id: id.clone(),
+                reason: "来源不是 GitHub，没有可更新的上游".into(),
+            });
+            continue;
+        };
+        if !dir.join("SKILL.md").is_file() {
+            skipped.push(SkillSkipped {
+                id: id.clone(),
+                reason: "项目真源还不存在（未迁移或没收进真源）".into(),
+            });
+            continue;
+        }
+        let raw_repo = source.repo.clone().unwrap_or_default();
+        let repo = match parse_github_input(&raw_repo, source.branch.clone()) {
+            Ok(repo) => repo,
+            Err(error) => {
+                failures.push(SkillItemFailure {
+                    id: id.clone(),
+                    error: format!("来源仓库非法：{error}"),
+                });
+                continue;
+            }
+        };
+        let name = display_name(&dir, id);
+        targets.push(Target {
+            id: id.clone(),
+            name,
+            dir,
+            provenance: Provenance::Project {
+                repo,
+                subpath: source.subpath.clone(),
+            },
         });
     }
     targets.sort_by(|left, right| left.id.cmp(&right.id));
@@ -172,27 +541,13 @@ fn load_targets(store: &Store, ids: Option<&[String]>) -> Result<LoadReport, App
 fn group_targets(targets: Vec<Target>) -> BTreeMap<GroupKey, Vec<Target>> {
     let mut groups = BTreeMap::new();
     for target in targets {
-        let Some(owner) = target
-            .meta
-            .repo_owner
-            .clone()
-            .filter(|v| !v.trim().is_empty())
-        else {
+        let Some(owner) = target.provenance.owner().map(str::to_string) else {
             continue;
         };
-        let Some(name) = target
-            .meta
-            .repo_name
-            .clone()
-            .filter(|v| !v.trim().is_empty())
-        else {
+        let Some(name) = target.provenance.name().map(str::to_string) else {
             continue;
         };
-        let branch = target
-            .meta
-            .repo_branch
-            .clone()
-            .filter(|value| !value.trim().is_empty());
+        let branch = target.provenance.branch().map(str::to_string);
         groups
             .entry(GroupKey {
                 owner,
@@ -237,11 +592,11 @@ fn normalize_path(value: &str) -> String {
 /// 远端定位顺序：显式 repoPath → readme 路径 → 目录名 basename → frontmatter 名称 → 唯一候选。
 fn match_remote<'a>(
     scanned: &'a [ScannedSkill],
-    meta: &SkillMeta,
+    provenance: &Provenance,
     local_dir: &Path,
     display_name: &str,
 ) -> Result<&'a ScannedSkill, String> {
-    if let Some(path) = meta.repo_path.as_deref().map(normalize_path) {
+    if let Some(path) = provenance.repo_path().map(normalize_path) {
         if let Some(found) = scanned
             .iter()
             .find(|candidate| candidate.relative_path == path)
@@ -249,7 +604,7 @@ fn match_remote<'a>(
             return Ok(found);
         }
     }
-    if let Some(url) = meta.readme_url.as_deref() {
+    if let Some(url) = provenance.readme_url() {
         let matches = scanned
             .iter()
             .filter(|candidate| readme_matches(url, &candidate.relative_path))
@@ -258,7 +613,7 @@ fn match_remote<'a>(
             return Ok(matches[0]);
         }
     }
-    if let Some(directory) = meta.source_directory.as_deref().map(normalize_path) {
+    if let Some(directory) = provenance.source_directory().map(normalize_path) {
         if let Some(found) = scanned
             .iter()
             .find(|candidate| candidate.relative_path == directory)
@@ -317,40 +672,12 @@ fn readme_matches(url: &str, relative_path: &str) -> bool {
     }
 }
 
-fn persist_check(
-    target: &Target,
-    branch: Option<&str>,
-    repo_path: Option<&str>,
-    latest_hash: Option<&str>,
-    // None 表示这次没拿到远端结果，保留上一次的可更新状态。
-    update_available: Option<bool>,
-    error: Option<&str>,
-) -> Result<(), AppError> {
-    let mut meta = target.meta.clone();
-    if let Some(branch) = branch.filter(|value| !value.trim().is_empty()) {
-        meta.repo_branch = Some(branch.to_string());
-    }
-    if let Some(path) = repo_path {
-        meta.repo_path = Some(path.to_string());
-    }
-    meta.last_checked_at = Some(now_ms());
-    if latest_hash.is_some() {
-        meta.latest_hash = latest_hash.map(str::to_string);
-    }
-    if let Some(available) = update_available {
-        meta.update_available = Some(available);
-    }
-    meta.last_check_error = error.map(str::to_string);
-    write_meta(&target.dir, &meta)?;
-    Ok(())
-}
-
 pub fn check<F: RepoFetcher>(
-    store: &Store,
+    mut sink: UpdateSink<'_>,
     fetcher: &F,
     ids: Option<&[String]>,
 ) -> Result<SkillCheckReport, AppError> {
-    let (targets, skipped, mut skill_failures) = load_targets(store, ids)?;
+    let (targets, skipped, mut skill_failures) = sink.load(ids)?;
     let mut report = SkillCheckReport {
         checked_at: now_ms(),
         updates: Vec::new(),
@@ -373,7 +700,7 @@ pub fn check<F: RepoFetcher>(
                 });
                 for target in &group {
                     if let Err(error) =
-                        persist_check(target, None, None, None, None, Some(&message))
+                        sink.record_check(target, None, None, None, None, Some(&message))
                     {
                         report.skill_failures.push(SkillItemFailure {
                             id: target.id.clone(),
@@ -394,7 +721,7 @@ pub fn check<F: RepoFetcher>(
                     error: message.clone(),
                 });
                 for target in &group {
-                    if let Err(error) = persist_check(
+                    if let Err(error) = sink.record_check(
                         target,
                         Some(&fetched.branch),
                         None,
@@ -413,14 +740,15 @@ pub fn check<F: RepoFetcher>(
         };
 
         for target in group {
-            let matched = match match_remote(&scanned, &target.meta, &target.dir, &target.name) {
+            let matched = match match_remote(&scanned, &target.provenance, &target.dir, &target.name)
+            {
                 Ok(found) => found,
                 Err(error) => {
                     skill_failures.push(SkillItemFailure {
                         id: target.id.clone(),
                         error: error.clone(),
                     });
-                    if let Err(write_error) = persist_check(
+                    if let Err(write_error) = sink.record_check(
                         &target,
                         Some(&fetched.branch),
                         None,
@@ -446,7 +774,7 @@ pub fn check<F: RepoFetcher>(
                         id: target.id.clone(),
                         error: error.to_string(),
                     });
-                    if let Err(write_error) = persist_check(
+                    if let Err(write_error) = sink.record_check(
                         &target,
                         Some(&fetched.branch),
                         Some(&matched.relative_path),
@@ -465,7 +793,7 @@ pub fn check<F: RepoFetcher>(
             let local_hash = archive::compute_dir_hash(&target.dir).ok();
             let missing_local = local_hash.is_none();
             let available = local_hash.as_deref() != Some(remote_hash.as_str());
-            if let Err(error) = persist_check(
+            if let Err(error) = sink.record_check(
                 &target,
                 Some(&fetched.branch),
                 Some(&matched.relative_path),
@@ -493,16 +821,17 @@ pub fn check<F: RepoFetcher>(
     }
 
     report.skill_failures = skill_failures;
+    // 中央库分支已经逐条写进 .meta.json；项目分支的检查状态全在内存里，这里落盘。
+    sink.flush_checks()?;
     Ok(report)
 }
 
 pub fn update<F: RepoFetcher>(
-    store: &Store,
-    home: &Path,
+    mut sink: UpdateSink<'_>,
     fetcher: &F,
     ids: &[String],
 ) -> Result<SkillUpdateReport, AppError> {
-    let (targets, skipped, mut failures) = load_targets(store, Some(ids))?;
+    let (targets, skipped, mut failures) = sink.load(Some(ids))?;
     let mut outcomes = Vec::new();
     for item in skipped {
         outcomes.push(SkillUpdateOutcome {
@@ -532,7 +861,8 @@ pub fn update<F: RepoFetcher>(
             Err(error) => {
                 let message = error.to_string();
                 for target in group {
-                    let suffix = persist_check(&target, None, None, None, None, Some(&message))
+                    let suffix = sink
+                        .record_check(&target, None, None, None, None, Some(&message))
                         .err()
                         .map(|error| format!("；写入检查状态失败：{error}"))
                         .unwrap_or_default();
@@ -546,17 +876,18 @@ pub fn update<F: RepoFetcher>(
             Err(error) => {
                 let message = error.to_string();
                 for target in group {
-                    let suffix = persist_check(
-                        &target,
-                        Some(&fetched.branch),
-                        None,
-                        None,
-                        None,
-                        Some(&message),
-                    )
-                    .err()
-                    .map(|error| format!("；写入检查状态失败：{error}"))
-                    .unwrap_or_default();
+                    let suffix = sink
+                        .record_check(
+                            &target,
+                            Some(&fetched.branch),
+                            None,
+                            None,
+                            None,
+                            Some(&message),
+                        )
+                        .err()
+                        .map(|error| format!("；写入检查状态失败：{error}"))
+                        .unwrap_or_default();
                     outcomes.push(failed(&target, format!("{message}{suffix}"), None));
                 }
                 continue;
@@ -564,8 +895,7 @@ pub fn update<F: RepoFetcher>(
         };
         for target in group {
             outcomes.push(update_one(
-                store,
-                home,
+                &mut sink,
                 &target,
                 fetched.dir.path(),
                 &fetched.branch,
@@ -573,6 +903,15 @@ pub fn update<F: RepoFetcher>(
             ));
         }
     }
+
+    // 台账只在真有更新时重写：空跑不该给用户的 git diff 添一行 updatedAt。
+    let changed = outcomes.iter().any(|outcome| outcome.status == "updated");
+    if changed {
+        sink.flush_ledger()
+            .map_err(|error| AppError::Project(format!("真源已更新，但写回台账失败：{error}")))?;
+    }
+    sink.flush_checks()
+        .map_err(|error| AppError::Project(format!("真源已更新，但写入检查缓存失败：{error}")))?;
     Ok(SkillUpdateReport { outcomes })
 }
 
@@ -588,17 +927,17 @@ fn failed(target: &Target, error: String, backup: Option<PathBuf>) -> SkillUpdat
 }
 
 fn update_one(
-    store: &Store,
-    home: &Path,
+    sink: &mut UpdateSink<'_>,
     target: &Target,
     repo_root: &Path,
     branch: &str,
     scanned: &[ScannedSkill],
 ) -> SkillUpdateOutcome {
-    let matched = match match_remote(scanned, &target.meta, &target.dir, &target.name) {
+    let matched = match match_remote(scanned, &target.provenance, &target.dir, &target.name) {
         Ok(found) => found,
         Err(error) => {
-            let suffix = persist_check(target, Some(branch), None, None, None, Some(&error))
+            let suffix = sink
+                .record_check(target, Some(branch), None, None, None, Some(&error))
                 .err()
                 .map(|error| format!("；写入检查状态失败：{error}"))
                 .unwrap_or_default();
@@ -610,23 +949,24 @@ fn update_one(
         Ok(hash) => hash,
         Err(error) => {
             let message = error.to_string();
-            let suffix = persist_check(
-                target,
-                Some(branch),
-                Some(&matched.relative_path),
-                None,
-                None,
-                Some(&message),
-            )
-            .err()
-            .map(|error| format!("；写入检查状态失败：{error}"))
-            .unwrap_or_default();
+            let suffix = sink
+                .record_check(
+                    target,
+                    Some(branch),
+                    Some(&matched.relative_path),
+                    None,
+                    None,
+                    Some(&message),
+                )
+                .err()
+                .map(|error| format!("；写入检查状态失败：{error}"))
+                .unwrap_or_default();
             return failed(target, format!("{message}{suffix}"), None);
         }
     };
     let local_hash = archive::compute_dir_hash(&target.dir).ok();
     if local_hash.as_deref() == Some(remote_hash.as_str()) {
-        let warnings = match persist_check(
+        let warnings = match sink.record_check(
             target,
             Some(branch),
             Some(&matched.relative_path),
@@ -647,44 +987,31 @@ fn update_one(
         };
     }
 
-    let staging = match new_staging_dir(store, &format!("update-{}", target.id)) {
+    let staging = match sink.dest().staging(&format!("update-{}", target.id)) {
         Ok(path) => path,
         Err(error) => return failed(target, error.to_string(), None),
     };
     let prepared = staging.join("prepared");
     let mut backup: Option<PathBuf> = None;
+    // 写入流水线：复制上游 → 落来源（只有中央库有 meta）→ 先备份 → 原子换目录 → 回写来源。
+    // 顺序不能调：备份必须在换目录之前成功，失败时 replace_dir 自己把旧目录放回去。
     let result = (|| -> Result<(), AppError> {
         copy_dir(&source, &prepared)?;
-        let mut meta = target.meta.clone();
-        meta.repo_branch = Some(branch.to_string());
-        meta.repo_path = Some(matched.relative_path.clone());
-        meta.content_hash = Some(remote_hash.clone());
-        meta.updated_at = Some(now_ms());
-        meta.last_checked_at = Some(now_ms());
-        meta.latest_hash = Some(remote_hash.clone());
-        meta.update_available = Some(false);
-        meta.last_check_error = None;
-        if meta.readme_url.is_none() && meta.is_updatable() {
-            let owner = meta.repo_owner.as_deref().unwrap_or_default();
-            let name = meta.repo_name.as_deref().unwrap_or_default();
-            let suffix = if matched.relative_path == "." {
-                String::new()
-            } else {
-                format!("{}/", matched.relative_path)
-            };
-            meta.readme_url = Some(format!(
-                "https://github.com/{owner}/{name}/blob/{branch}/{suffix}SKILL.md"
-            ));
+        if let Some(meta) = target
+            .provenance
+            .updated_meta(branch, &matched.relative_path, &remote_hash)
+        {
+            write_meta(&prepared, &meta)?;
         }
-        write_meta(&prepared, &meta)?;
-        backup = store.backup_skill(&target.id)?;
+        backup = sink.dest().backup(&target.id)?;
         replace_dir(&target.dir, &prepared, &staging)?;
+        sink.after_update(target, branch, &matched.relative_path, &remote_hash);
         Ok(())
     })();
 
     match result {
         Ok(()) => {
-            let warnings = refresh_deployed(store, home, &target.id);
+            let warnings = sink.dest().after_write(&target.id);
             let _ = fs::remove_dir_all(&staging);
             SkillUpdateOutcome {
                 id: target.id.clone(),
@@ -705,8 +1032,15 @@ fn update_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::project::{
+        canonical_skill_dir, ProjectLedger, ProjectSkillEntry, ProjectSkillSource,
+        PROJECT_LEDGER_VERSION,
+    };
     use crate::domain::skill_meta::{SkillMeta, SkillSourceKind};
     use crate::import::update_matrix;
+    use crate::services::project_scan;
+    use crate::services::project_sync;
+    use crate::store::project_checks::ProjectCheckCache;
     use crate::store::Store;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
@@ -781,10 +1115,11 @@ mod tests {
     fn check_reports_updates_and_trusts_fetched_branch() {
         let dir = tempdir().unwrap();
         let store = Store::init(dir.path().join("store")).unwrap();
+        let home = dir.path().join("home");
         seed_skill(&store, "v1");
         let fetcher = FakeFetcher::new(remote_fixture(&dir.path().join("remote"), "v2"));
 
-        let report = check(&store, &fetcher, None).unwrap();
+        let report = check(store_sink(&store, &home), &fetcher, None).unwrap();
         assert_eq!(report.updates.len(), 1);
         assert_eq!(report.updates[0].id, "demo");
         assert!(report.repo_failures.is_empty());
@@ -803,7 +1138,7 @@ mod tests {
         seed_skill(&store, "v1");
         let fetcher = FakeFetcher::new(remote_fixture(&dir.path().join("remote"), "v2"));
 
-        let report = update(&store, &home, &fetcher, &["demo".to_string()]).unwrap();
+        let report = update(store_sink(&store, &home), &fetcher, &["demo".to_string()]).unwrap();
         assert_eq!(report.outcomes[0].status, "updated");
         assert!(report.outcomes[0].backup_path.is_some());
         let installed = store.asset_dir(AssetType::Skill).join("demo");
@@ -819,7 +1154,7 @@ mod tests {
             .unwrap()
             .contains("v1"));
 
-        let second = update(&store, &home, &fetcher, &["demo".to_string()]).unwrap();
+        let second = update(store_sink(&store, &home), &fetcher, &["demo".to_string()]).unwrap();
         assert_eq!(second.outcomes[0].status, "upToDate");
     }
 
@@ -827,6 +1162,7 @@ mod tests {
     fn check_groups_by_repo_and_fetches_once() {
         let dir = tempdir().unwrap();
         let store = Store::init(dir.path().join("store")).unwrap();
+        let home = dir.path().join("home");
         seed_skill(&store, "v1");
         let second = store.asset_dir(AssetType::Skill).join("demo-two");
         fs::create_dir_all(second.join("nested")).unwrap();
@@ -851,7 +1187,7 @@ mod tests {
         fs::write(nested.join("SKILL.md"), "---\nname: Demo Two\n---\nv2\n").unwrap();
         let fetcher = FakeFetcher::new(fixture);
 
-        let report = check(&store, &fetcher, None).unwrap();
+        let report = check(store_sink(&store, &home), &fetcher, None).unwrap();
         assert_eq!(report.updates.len(), 2);
         assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
     }
@@ -871,9 +1207,330 @@ mod tests {
         .unwrap();
 
         let fetcher = FakeFetcher::new(remote_fixture(&dir.path().join("remote"), "v2"));
-        let report = update(&store, &home, &fetcher, &["demo".to_string()]).unwrap();
+        let report = update(store_sink(&store, &home), &fetcher, &["demo".to_string()]).unwrap();
         assert_eq!(report.outcomes[0].status, "updated");
         assert!(fs::read_to_string(target.join("SKILL.md"))
+            .unwrap()
+            .contains("v2"));
+    }
+
+    fn store_sink<'a>(store: &'a Store, home: &'a Path) -> UpdateSink<'a> {
+        UpdateSink::Store { store, home }
+    }
+
+    /// 项目场景：`.ccswitchx/skills/demo` 是项目真源，台账里记着 GitHub 来源。
+    fn seed_project(root: &Path, version: &str, source: ProjectSkillSource) {
+        let canonical = canonical_skill_dir(root, "demo").unwrap();
+        fs::create_dir_all(canonical.join("references")).unwrap();
+        fs::write(
+            canonical.join("SKILL.md"),
+            format!("---\nname: Demo\n---\n{version}\n"),
+        )
+        .unwrap();
+        fs::write(canonical.join("references/a.md"), format!("{version}\n"))
+            .unwrap();
+        let mut ledger = ProjectLedger {
+            version: PROJECT_LEDGER_VERSION,
+            ..Default::default()
+        };
+        ledger.skills.insert(
+            "demo".to_string(),
+            ProjectSkillEntry {
+                source: Some(source),
+                canonical: project_scan::tree_state(&canonical).unwrap(),
+                ..Default::default()
+            },
+        );
+        project_scan::save_ledger(root, &ledger).unwrap();
+    }
+
+    fn github_source() -> ProjectSkillSource {
+        ProjectSkillSource {
+            kind: "github".to_string(),
+            repo: Some("acme/demo".to_string()),
+            branch: Some("main".to_string()),
+            subpath: Some("skills/demo".to_string()),
+            tree_hash: None,
+        }
+    }
+
+    fn project_sink<'a>(
+        store: &'a Store,
+        root: &'a Path,
+        ledger: &'a mut ProjectLedger,
+        cache: &'a mut ProjectCheckCache,
+    ) -> UpdateSink<'a> {
+        UpdateSink::Project {
+            store,
+            project_id: "app-1",
+            project_root: root,
+            timestamp: 7_000,
+            ledger,
+            cache,
+        }
+    }
+
+    /// 检查更新是只读动作：仓库里的台账与真源一个字节都不能变，结果只落本机缓存。
+    #[test]
+    fn project_check_writes_only_the_local_cache() {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let root = dir.path().join("home/work/app");
+        seed_project(&root, "v1", github_source());
+        let ledger_file = project_scan::ledger_path(&root);
+        let ledger_before = fs::read(&ledger_file).unwrap();
+        let fetcher = FakeFetcher::new(remote_fixture(&dir.path().join("remote"), "v2"));
+        let mut ledger = project_scan::load_ledger(&root).unwrap();
+        let mut cache = ProjectCheckCache::default();
+
+        let report = check(
+            project_sink(&store, &root, &mut ledger, &mut cache),
+            &fetcher,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(report.updates.len(), 1);
+        assert_eq!(report.updates[0].id, "demo");
+        assert!(report.repo_failures.is_empty());
+        assert_eq!(
+            fs::read(&ledger_file).unwrap(),
+            ledger_before,
+            "检查更新不能碰随仓库提交的台账"
+        );
+        let canonical = canonical_skill_dir(&root, "demo").unwrap();
+        assert!(fs::read_to_string(canonical.join("SKILL.md"))
+            .unwrap()
+            .contains("v1"));
+        assert!(
+            !canonical.join(".meta.json").exists(),
+            "项目真源不写 .meta.json：它进仓库，且会让每次检查都改变目录指纹"
+        );
+
+        let mut cached = ProjectCheckCache::load(&store, "app-1");
+        let recorded = cached.skills.remove("demo").expect("检查结果必须落在本机缓存里");
+        assert!(recorded.update_available);
+        assert!(recorded.updatable);
+        assert!(recorded.latest_hash.is_some());
+        assert!(recorded.last_check_error.is_none());
+    }
+
+    /// 更新只写真源：渲染产物不动，等用户下一次同步；台账里的来源指纹跟着刷新。
+    #[test]
+    fn project_update_replaces_the_canonical_and_refreshes_the_source() {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let root = dir.path().join("home/work/app");
+        seed_project(&root, "v1", github_source());
+        let before = project_scan::load_ledger(&root)
+            .unwrap()
+            .skills["demo"]
+            .canonical
+            .clone();
+        let rendered = root.join(".claude/skills/demo");
+        fs::create_dir_all(&rendered).unwrap();
+        fs::write(rendered.join("SKILL.md"), "旧的渲染产物").unwrap();
+        let fetcher = FakeFetcher::new(remote_fixture(&dir.path().join("remote"), "v2"));
+        let canonical = canonical_skill_dir(&root, "demo").unwrap();
+
+        let mut ledger = project_scan::load_ledger(&root).unwrap();
+        let mut cache = ProjectCheckCache::default();
+        let report = update(
+            project_sink(&store, &root, &mut ledger, &mut cache),
+            &fetcher,
+            &["demo".to_string()],
+        )
+        .unwrap();
+        assert_eq!(report.outcomes[0].status, "updated", "{:?}", report.outcomes);
+        assert!(report.outcomes[0].warnings.is_empty());
+
+        assert!(fs::read_to_string(canonical.join("SKILL.md"))
+            .unwrap()
+            .contains("v2"));
+        assert!(fs::read_to_string(canonical.join("references/a.md"))
+            .unwrap()
+            .contains("v2"));
+        assert!(!canonical.join(".meta.json").exists());
+        assert_eq!(
+            fs::read_to_string(rendered.join("SKILL.md")).unwrap(),
+            "旧的渲染产物",
+            "更新不越权渲染，铺开是同步引擎的事"
+        );
+        let leftovers: Vec<String> = canonical
+            .parent()
+            .unwrap()
+            .read_dir()
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with(".staging-"))
+            .collect();
+        assert!(leftovers.is_empty(), "更新完要清掉同卷暂存：{leftovers:?}");
+
+        let backup = PathBuf::from(report.outcomes[0].backup_path.as_ref().unwrap());
+        assert!(backup.starts_with(store.root().join("backups").join("projects").join("app-1")));
+        assert!(fs::read_to_string(backup.join("SKILL.md"))
+            .unwrap()
+            .contains("v1"));
+
+        let saved = project_scan::load_ledger(&root).unwrap();
+        let entry = &saved.skills["demo"];
+        let source = entry.source.as_ref().unwrap();
+        assert_eq!(source.branch.as_deref(), Some("main"));
+        assert_eq!(source.subpath.as_deref(), Some("skills/demo"));
+        assert_eq!(
+            source.tree_hash.as_deref(),
+            archive::compute_dir_hash(&canonical).ok().as_deref(),
+            "来源哈希取更新那一刻上游目录的 compute_dir_hash"
+        );
+        assert_eq!(
+            entry.canonical.tree_hash, before.tree_hash,
+            "真源基线不刷：目标格子才会被判成待更新"
+        );
+        assert!(!ProjectCheckCache::load(&store, "app-1")
+            .get("demo")
+            .unwrap()
+            .update_available);
+
+        let mut ledger = project_scan::load_ledger(&root).unwrap();
+        let mut cache = ProjectCheckCache::default();
+        let second = update(
+            project_sink(&store, &root, &mut ledger, &mut cache),
+            &fetcher,
+            &["demo".to_string()],
+        )
+        .unwrap();
+        assert_eq!(second.outcomes[0].status, "upToDate");
+    }
+
+    #[test]
+    fn project_check_skips_a_skill_without_a_github_upstream() {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let root = dir.path().join("home/work/app");
+        seed_project(
+            &root,
+            "v1",
+            ProjectSkillSource {
+                kind: "local".to_string(),
+                repo: None,
+                branch: None,
+                subpath: None,
+                tree_hash: None,
+            },
+        );
+        let ledger_file = project_scan::ledger_path(&root);
+        let ledger_before = fs::read(&ledger_file).unwrap();
+        let mut ledger = project_scan::load_ledger(&root).unwrap();
+        let mut cache = ProjectCheckCache::default();
+
+        let report = check(
+            project_sink(&store, &root, &mut ledger, &mut cache),
+            &FakeFetcher::new(remote_fixture(&dir.path().join("remote"), "v2")),
+            None,
+        )
+        .unwrap();
+
+        assert!(report.updates.is_empty());
+        assert_eq!(report.skipped.len(), 1);
+        assert!(report.skipped[0].reason.contains("GitHub"), "{:?}", report.skipped);
+        assert_eq!(fs::read(&ledger_file).unwrap(), ledger_before);
+        assert!(ProjectCheckCache::load(&store, "app-1")
+            .get("demo")
+            .is_none());
+    }
+
+    /// 账本记着来源、磁盘上还没有真源（未迁移或未收进真源）：只能跳过，不能凭空写。
+    #[test]
+    fn project_update_reports_a_canonical_that_is_not_on_disk() {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let root = dir.path().join("home/work/app");
+        seed_project(&root, "v1", github_source());
+        fs::remove_dir_all(canonical_skill_dir(&root, "demo").unwrap()).unwrap();
+        let mut ledger = project_scan::load_ledger(&root).unwrap();
+        let mut cache = ProjectCheckCache::default();
+
+        let report = update(
+            project_sink(&store, &root, &mut ledger, &mut cache),
+            &FakeFetcher::new(remote_fixture(&dir.path().join("remote"), "v2")),
+            &["demo".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(report.outcomes[0].status, "failed");
+        assert!(
+            !canonical_skill_dir(&root, "demo").unwrap().exists(),
+            "跳过意味着一个字都不写"
+        );
+    }
+
+    #[test]
+    fn project_update_reports_an_unknown_skill_id() {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let root = dir.path().join("home/work/app");
+        seed_project(&root, "v1", github_source());
+        let mut ledger = project_scan::load_ledger(&root).unwrap();
+        let mut cache = ProjectCheckCache::default();
+
+        let report = update(
+            project_sink(&store, &root, &mut ledger, &mut cache),
+            &FakeFetcher::new(remote_fixture(&dir.path().join("remote"), "v2")),
+            &["ghost".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.outcomes[0].id, "ghost");
+        assert_eq!(report.outcomes[0].status, "failed");
+        assert!(report.outcomes[0].error.is_some(), "{:?}", report.outcomes);
+    }
+
+    /// 更新与铺开是两个动作：更新只换真源，把「目标落后了」留给下一次同步判断。
+    #[test]
+    fn project_update_leaves_the_targets_for_the_next_sync() {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let root = dir.path().join("home/work/app");
+        seed_project(&root, "v1", github_source());
+        let allowed = vec!["claude".to_string()];
+        let enabled = vec!["claude".to_string()];
+        let rendered = root.join(".claude/skills/demo");
+
+        project_sync::set_targets(&root, "demo", &allowed, &allowed).unwrap();
+        project_sync::sync_project(&store, "app-1", &root, &enabled, &allowed, &[]).unwrap();
+        assert!(fs::read_to_string(rendered.join("SKILL.md"))
+            .unwrap()
+            .contains("v1"));
+
+        let mut ledger = project_scan::load_ledger(&root).unwrap();
+        let mut cache = ProjectCheckCache::default();
+        update(
+            project_sink(&store, &root, &mut ledger, &mut cache),
+            &FakeFetcher::new(remote_fixture(&dir.path().join("remote"), "v2")),
+            &["demo".to_string()],
+        )
+        .unwrap();
+        assert!(
+            fs::read_to_string(rendered.join("SKILL.md"))
+                .unwrap()
+                .contains("v1"),
+            "更新不越权渲染"
+        );
+
+        let report = project_sync::sync_project(&store, "app-1", &root, &enabled, &allowed, &[]);
+        let report = report.unwrap();
+        assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+        assert!(
+            report
+                .outcomes
+                .iter()
+                .any(|item| item.status == "ok" && item.action == "render"),
+            "{:?}",
+            report.outcomes
+        );
+        assert!(fs::read_to_string(rendered.join("SKILL.md"))
             .unwrap()
             .contains("v2"));
     }

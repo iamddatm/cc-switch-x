@@ -94,6 +94,7 @@ pub async fn check_skill_updates(
 ) -> Result<SkillCheckReport, AppError> {
     let _guard = state.begin_skill_job()?;
     let store = state.store.clone();
+    let home = state.home.clone();
     let proxy = state.proxy_config()?;
     let maintenance = state.maintenance.clone();
     let report = run_blocking(move || {
@@ -102,7 +103,14 @@ pub async fn check_skill_updates(
         let _write = maintenance
             .read()
             .map_err(|_| AppError::InvalidInput("maintenance 锁失败".into()))?;
-        skill_update::check(&store, &fetcher, ids.as_deref())
+        skill_update::check(
+            skill_update::UpdateSink::Store {
+                store: &store,
+                home: &home,
+            },
+            &fetcher,
+            ids.as_deref(),
+        )
     })
     .await?;
     state.notify_git("skill: check updates");
@@ -124,7 +132,14 @@ pub async fn update_skills(
         let _write = maintenance
             .read()
             .map_err(|_| AppError::InvalidInput("maintenance 锁失败".into()))?;
-        skill_update::update(&store, &home, &fetcher, &ids)
+        skill_update::update(
+            skill_update::UpdateSink::Store {
+                store: &store,
+                home: &home,
+            },
+            &fetcher,
+            &ids,
+        )
     })
     .await?;
     rebuild_index(&state)?;

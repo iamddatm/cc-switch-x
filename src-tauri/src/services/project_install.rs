@@ -469,7 +469,7 @@ mod tests {
             project_id: "app-1",
             timestamp: 1234,
         };
-        let staging = sink.install_staging(0).unwrap();
+        let staging = sink.staging("install-0").unwrap();
         assert!(
             staging.starts_with(crate::domain::project::canonical_root(&fx.root)),
             "暂存必须与目的同卷，否则项目在另一块盘时 rename 会失败：{staging:?}"
