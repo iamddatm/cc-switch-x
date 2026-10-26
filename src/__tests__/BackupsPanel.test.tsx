@@ -2,7 +2,12 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { beforeEach, expect, test, vi } from "vitest";
 import { BackupsPanel } from "../panels/BackupsPanel";
 import { api } from "../lib/api";
-import type { BackupSettings, GitStatus } from "../types";
+import type {
+  BackupSettings,
+  CloudSettingsView,
+  CloudStatus,
+  GitStatus,
+} from "../types";
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -77,6 +82,29 @@ const commit = {
   timestamp: Date.now() - 120_000,
 };
 
+const cloudView: CloudSettingsView = {
+  autoUpload: true,
+  baseUrl: "https://dav.example.com/dav",
+  username: "me",
+  remoteDir: "ccswitchx",
+  hasPassword: true,
+};
+
+const cloudStatus: CloudStatus = {
+  configured: true,
+  hasPassword: true,
+  autoUpload: true,
+  remote: {
+    exists: true,
+    sizeBytes: 2048,
+    modifiedAt: Date.now() - 300_000,
+    etag: '"abc"',
+  },
+  remoteError: null,
+  lastUploadAt: Date.now() - 300_000,
+  lastError: null,
+};
+
 function mockBase(git: GitStatus = healthyGit) {
   vi.mocked(api.listBackupSnapshots).mockResolvedValue([snapshot]);
   vi.mocked(api.getBackupUsage).mockResolvedValue({
@@ -89,21 +117,18 @@ function mockBase(git: GitStatus = healthyGit) {
     totalBytes: 3584,
   });
   vi.mocked(api.getBackupSettings).mockResolvedValue(settings);
-  vi.mocked(api.getCloudSettings).mockResolvedValue({
-    autoUpload: false,
-    baseUrl: "",
-    username: "",
-    remoteDir: "ccswitchx",
-    hasPassword: false,
-  });
-  vi.mocked(api.getCloudStatus).mockResolvedValue({
-    configured: false,
-    hasPassword: false,
-    autoUpload: false,
-    remote: null,
-    remoteError: null,
-    lastUploadAt: null,
-    lastError: null,
+  vi.mocked(api.getCloudSettings).mockResolvedValue(cloudView);
+  vi.mocked(api.getCloudStatus).mockResolvedValue(cloudStatus);
+  vi.mocked(api.setCloudSettings).mockResolvedValue(cloudView);
+  vi.mocked(api.testCloudConnection).mockResolvedValue(42);
+  vi.mocked(api.cloudUploadNow).mockResolvedValue(cloudStatus);
+  vi.mocked(api.cloudRestoreLatest).mockResolvedValue({
+    safetyBackup: "backup_safety",
+    restoredFiles: 6,
+    removedFiles: 1,
+    downloadedSnapshot: "cloud_restore_20261026_120000",
+    remoteSizeBytes: 2048,
+    remoteModifiedAt: Date.now() - 300_000,
   });
   vi.mocked(api.getGitStatus).mockResolvedValue(git);
   vi.mocked(api.gitListCommits).mockResolvedValue([commit]);
@@ -244,4 +269,73 @@ test("conflict resolution must be confirmed before force push", async () => {
   await waitFor(() =>
     expect(api.gitResolveConflict).toHaveBeenCalledWith("keepLocal"),
   );
+});
+
+test("renders cloud backup section and remote status", async () => {
+  render(<BackupsPanel />);
+  expect(await screen.findByText("云备份（WebDAV）")).toBeInTheDocument();
+  expect(screen.getByText(/ccswitchx\/ccswitchx-backup\.zip/)).toBeInTheDocument();
+  expect(screen.getByText("云端有备份")).toBeInTheDocument();
+});
+
+test("saves cloud settings without overwriting the saved password", async () => {
+  render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  fireEvent.change(screen.getByLabelText("WebDAV 地址"), {
+    target: { value: "https://dav.example.com/dav" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "保存云备份" }));
+  await waitFor(() =>
+    expect(api.setCloudSettings).toHaveBeenCalledWith({
+      baseUrl: "https://dav.example.com/dav",
+      username: "me",
+      password: null,
+      remoteDir: "ccswitchx",
+      autoUpload: true,
+    }),
+  );
+});
+
+test("tests the cloud connection", async () => {
+  render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+  await waitFor(() => expect(api.testCloudConnection).toHaveBeenCalled());
+  expect(await screen.findByText(/连接成功（42 ms）/)).toBeInTheDocument();
+});
+
+test("uploads and restores only after confirmation", async () => {
+  render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  fireEvent.click(screen.getByRole("button", { name: "立即上传" }));
+  await waitFor(() => expect(api.cloudUploadNow).toHaveBeenCalled());
+
+  fireEvent.click(screen.getByRole("button", { name: "从云端恢复" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "从云端恢复？" });
+  expect(api.cloudRestoreLatest).not.toHaveBeenCalled();
+  fireEvent.click(within(dialog).getByRole("button", { name: "恢复" }));
+  await waitFor(() => expect(api.cloudRestoreLatest).toHaveBeenCalled());
+});
+
+test("disables cloud actions without config", async () => {
+  vi.mocked(api.getCloudSettings).mockResolvedValue({
+    autoUpload: false,
+    baseUrl: "",
+    username: "",
+    remoteDir: "ccswitchx",
+    hasPassword: false,
+  });
+  vi.mocked(api.getCloudStatus).mockResolvedValue({
+    configured: false,
+    hasPassword: false,
+    autoUpload: false,
+    remote: null,
+    remoteError: null,
+    lastUploadAt: null,
+    lastError: null,
+  });
+  render(<BackupsPanel />);
+  expect(await screen.findByText("未配置")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "立即上传" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "从云端恢复" })).toBeDisabled();
 });

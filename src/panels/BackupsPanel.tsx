@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ArchiveRestore,
+  Cloud,
+  Eye,
+  EyeOff,
   GitBranch,
   HardDrive,
   RefreshCw,
@@ -12,6 +15,7 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { Dialog } from "../components/ui/Dialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Field } from "../components/ui/Field";
+import { IconButton } from "../components/ui/IconButton";
 import { Input } from "../components/ui/Input";
 import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -21,6 +25,7 @@ import { api } from "../lib/api";
 import { formatBytes, formatRelativeTime } from "../lib/format";
 import type {
   BackupSettings,
+  CloudStatus,
   GitCommit,
   GitStatus,
   SnapshotKind,
@@ -79,6 +84,16 @@ function gitStateLabel(git: GitStatus): string {
   }
 }
 
+function cloudState(status: CloudStatus | null): {
+  label: string;
+  tone: "neutral" | "success" | "warning" | "danger";
+} {
+  if (!status?.configured) return { label: "未配置", tone: "neutral" };
+  if (status.remoteError) return { label: "连接失败", tone: "danger" };
+  if (status.remote?.exists) return { label: "云端有备份", tone: "success" };
+  return { label: "已配置", tone: "neutral" };
+}
+
 export function BackupsPanel() {
   const {
     snapshots,
@@ -86,10 +101,13 @@ export function BackupsPanel() {
     settings,
     git,
     commits,
+    cloud,
+    cloudStatus,
     loading,
     busy,
     error,
     refresh,
+    refreshCloudStatus,
     run,
   } = useBackups();
   const [notice, setNotice] = useState<string | null>(null);
@@ -104,7 +122,16 @@ export function BackupsPanel() {
   );
   const [remoteInput, setRemoteInput] = useState("");
   const [branchInput, setBranchInput] = useState("main");
+  const [cloudBaseUrl, setCloudBaseUrl] = useState("");
+  const [cloudUsername, setCloudUsername] = useState("");
+  const [cloudPassword, setCloudPassword] = useState("");
+  const [cloudPasswordDirty, setCloudPasswordDirty] = useState(false);
+  const [showCloudPassword, setShowCloudPassword] = useState(false);
+  const [cloudRemoteDir, setCloudRemoteDir] = useState("ccswitchx");
+  const [cloudAutoUpload, setCloudAutoUpload] = useState(false);
+  const [cloudRestoreOpen, setCloudRestoreOpen] = useState(false);
   const inputsReady = useRef(false);
+  const cloudInputsReady = useRef(false);
 
   useEffect(() => {
     if (inputsReady.current || !settings) return;
@@ -112,6 +139,15 @@ export function BackupsPanel() {
     setBranchInput(settings.git.branch);
     inputsReady.current = true;
   }, [settings]);
+
+  useEffect(() => {
+    if (cloudInputsReady.current || !cloud) return;
+    setCloudBaseUrl(cloud.baseUrl);
+    setCloudUsername(cloud.username);
+    setCloudRemoteDir(cloud.remoteDir);
+    setCloudAutoUpload(cloud.autoUpload);
+    cloudInputsReady.current = true;
+  }, [cloud]);
 
   const act = async (key: string, action: () => Promise<unknown>, success?: string) => {
     setNotice(null);
@@ -272,8 +308,86 @@ export function BackupsPanel() {
     }
   };
 
+  const cloudPasswordValue = () => (cloudPasswordDirty ? cloudPassword : null);
+
+  const saveCloud = async () => {
+    setNotice(null);
+    try {
+      const saved = await run("cloud-save", () =>
+        api.setCloudSettings({
+          baseUrl: cloudBaseUrl.trim(),
+          username: cloudUsername.trim(),
+          password: cloudPasswordValue(),
+          remoteDir: cloudRemoteDir.trim(),
+          autoUpload: cloudAutoUpload,
+        }),
+      );
+      setCloudBaseUrl(saved.baseUrl);
+      setCloudUsername(saved.username);
+      setCloudRemoteDir(saved.remoteDir);
+      setCloudAutoUpload(saved.autoUpload);
+      setCloudPassword("");
+      setCloudPasswordDirty(false);
+      setShowCloudPassword(false);
+      setNotice("云备份设置已保存");
+    } catch {
+      // 错误已展示
+    }
+  };
+
+  const testCloud = async () => {
+    setNotice(null);
+    try {
+      const latency = await run("cloud-test", () =>
+        api.testCloudConnection({
+          baseUrl: cloudBaseUrl.trim(),
+          username: cloudUsername.trim(),
+          password: cloudPasswordValue(),
+          remoteDir: cloudRemoteDir.trim(),
+        }),
+      );
+      setNotice(`连接成功（${latency} ms）`);
+    } catch {
+      // 错误已展示
+    }
+  };
+
+  const uploadCloud = async () => {
+    setNotice(null);
+    try {
+      const status = await run("cloud-upload", () => api.cloudUploadNow());
+      const size = status.remote?.sizeBytes;
+      setNotice(
+        size != null
+          ? `已上传云端备份（${formatBytes(size)}）`
+          : "已上传云端备份",
+      );
+    } catch {
+      // 错误已展示
+    }
+  };
+
+  const confirmCloudRestore = async () => {
+    setNotice(null);
+    try {
+      const report = await run("cloud-restore", () => api.cloudRestoreLatest());
+      setCloudRestoreOpen(false);
+      setNotice(
+        `已从云端恢复 ${report.restoredFiles} 个文件，删除 ${report.removedFiles} 个；安全快照：${report.safetyBackup}`,
+      );
+    } catch {
+      // 错误已展示
+    }
+  };
+
   const interval = settings?.intervalHours ?? 24;
   const retain = settings?.retainCount ?? 10;
+  const cloudBadge = cloudState(cloudStatus);
+  const cloudRemotePath = cloudBaseUrl.trim()
+    ? `${cloudBaseUrl.trim().replace(/\/+$/, "")}/${cloudRemoteDir
+        .trim()
+        .replace(/^\/+/, "")}/ccswitchx-backup.zip`
+    : "—";
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -703,6 +817,185 @@ export function BackupsPanel() {
               </>
             )}
           </section>
+
+          <section className="rounded-panel border border-border bg-surface">
+            <div className="flex items-center gap-2 border-b border-border px-4 py-3">
+              <Cloud size={15} className="text-fg-3" aria-hidden />
+              <h3 className="text-strong text-fg-1">云备份（WebDAV）</h3>
+              <Badge tone={cloudBadge.tone}>{cloudBadge.label}</Badge>
+              <span className="ml-auto flex gap-1.5">
+                <IconButton
+                  label="刷新云状态"
+                  disabled={loading}
+                  onClick={() => void refreshCloudStatus()}
+                >
+                  <RefreshCw size={13} aria-hidden />
+                </IconButton>
+              </span>
+            </div>
+
+            {!cloud ? (
+              <p className="px-4 py-3 text-caption text-fg-3">正在读取云备份设置…</p>
+            ) : (
+              <>
+                <div className="space-y-3 border-b border-border px-4 py-3">
+                  {cloudBaseUrl.startsWith("http://") && (
+                    <Notice tone="warning">
+                      HTTP 会明文传输凭据，仅建议在内网使用。
+                    </Notice>
+                  )}
+                  <div className="flex flex-wrap items-end gap-2">
+                    <Field
+                      label="WebDAV 地址"
+                      htmlFor="cloud-base-url"
+                      className="min-w-[280px] flex-1"
+                    >
+                      <Input
+                        id="cloud-base-url"
+                        className="font-mono"
+                        placeholder="https://dav.example.com/dav"
+                        value={cloudBaseUrl}
+                        onChange={(event) => setCloudBaseUrl(event.target.value)}
+                      />
+                    </Field>
+                    <Field label="用户名" htmlFor="cloud-username" className="w-40">
+                      <Input
+                        id="cloud-username"
+                        value={cloudUsername}
+                        onChange={(event) => setCloudUsername(event.target.value)}
+                      />
+                    </Field>
+                  </div>
+                  <div className="flex flex-wrap items-end gap-2">
+                    <Field label="密码" htmlFor="cloud-password" className="w-56">
+                      <div className="flex items-center gap-1">
+                        <Input
+                          id="cloud-password"
+                          type={showCloudPassword ? "text" : "password"}
+                          placeholder={
+                            cloud.hasPassword && !cloudPasswordDirty
+                              ? "已保存，留空保持不变"
+                              : ""
+                          }
+                          value={cloudPassword}
+                          onChange={(event) => {
+                            setCloudPassword(event.target.value);
+                            setCloudPasswordDirty(true);
+                          }}
+                        />
+                        <IconButton
+                          label={showCloudPassword ? "隐藏密码" : "显示密码"}
+                          onClick={() => setShowCloudPassword((value) => !value)}
+                        >
+                          {showCloudPassword ? (
+                            <EyeOff size={14} aria-hidden />
+                          ) : (
+                            <Eye size={14} aria-hidden />
+                          )}
+                        </IconButton>
+                      </div>
+                    </Field>
+                    <Field label="远端目录" htmlFor="cloud-remote-dir" className="w-40">
+                      <Input
+                        id="cloud-remote-dir"
+                        className="font-mono"
+                        value={cloudRemoteDir}
+                        onChange={(event) => setCloudRemoteDir(event.target.value)}
+                      />
+                    </Field>
+                  </div>
+                  <Checkbox
+                    id="cloud-auto-upload"
+                    label="自动快照后自动上传"
+                    checked={cloudAutoUpload}
+                    onChange={(event) => setCloudAutoUpload(event.target.checked)}
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      onClick={() => void testCloud()}
+                      loading={busy === "cloud-test"}
+                      disabled={!cloudBaseUrl.trim() || (!!busy && busy !== "cloud-test")}
+                    >
+                      测试连接
+                    </Button>
+                    <Button
+                      onClick={() => void saveCloud()}
+                      loading={busy === "cloud-save"}
+                      disabled={!!busy && busy !== "cloud-save"}
+                    >
+                      保存云备份
+                    </Button>
+                    <Button
+                      onClick={() => void uploadCloud()}
+                      loading={busy === "cloud-upload"}
+                      disabled={!cloudStatus?.configured || (!!busy && busy !== "cloud-upload")}
+                    >
+                      立即上传
+                    </Button>
+                    <Button
+                      variant="danger"
+                      disabled={!cloudStatus?.configured || !!busy}
+                      onClick={() => setCloudRestoreOpen(true)}
+                    >
+                      从云端恢复
+                    </Button>
+                  </div>
+                  <p className="text-caption text-fg-3">
+                    上传会把当前真源打包并覆盖云端唯一一份备份；恢复前会自动创建本地安全快照。
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 px-4 py-3 sm:grid-cols-3">
+                  <div className="min-w-0">
+                    <p className="text-caption text-fg-3">远端对象</p>
+                    <p
+                      className="truncate font-mono text-caption text-fg-1"
+                      title={cloudRemotePath}
+                    >
+                      {cloudRemotePath}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-caption text-fg-3">远端大小</p>
+                    <p className="text-body text-fg-1">
+                      {cloudStatus?.remote?.sizeBytes != null
+                        ? formatBytes(cloudStatus.remote.sizeBytes)
+                        : "—"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-caption text-fg-3">远端修改时间</p>
+                    <p className="text-body text-fg-1">
+                      {cloudStatus?.remote?.modifiedAt
+                        ? formatRelativeTime(cloudStatus.remote.modifiedAt)
+                        : "—"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-caption text-fg-3">上次上传</p>
+                    <p className="text-body text-fg-1">
+                      {cloudStatus?.lastUploadAt
+                        ? formatRelativeTime(cloudStatus.lastUploadAt)
+                        : "—"}
+                    </p>
+                  </div>
+                </div>
+
+                {cloudStatus?.remoteError && (
+                  <div className="px-4 pb-3">
+                    <Notice tone="danger">{cloudStatus.remoteError}</Notice>
+                  </div>
+                )}
+                {cloudStatus?.lastError && (
+                  <div className="px-4 pb-3">
+                    <Notice tone="warning">
+                      上次上传失败：{cloudStatus.lastError}
+                    </Notice>
+                  </div>
+                )}
+              </>
+            )}
+          </section>
         </div>
       </div>
 
@@ -736,6 +1029,22 @@ export function BackupsPanel() {
           />
         </Field>
       </Dialog>
+
+      <ConfirmDialog
+        open={cloudRestoreOpen}
+        title="从云端恢复？"
+        body={
+          <>
+            将下载云端最新包并覆盖 <code>assets/</code> 与 <code>agents/</code>，
+            删除包中不存在的资产。恢复前会自动创建安全快照；本机{" "}
+            <code>local/</code>、密钥与索引不会被动。
+          </>
+        }
+        confirmLabel="恢复"
+        pending={busy === "cloud-restore"}
+        onConfirm={() => void confirmCloudRestore()}
+        onCancel={() => setCloudRestoreOpen(false)}
+      />
 
       <ConfirmDialog
         open={!!deleteTarget}
