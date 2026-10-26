@@ -10,7 +10,19 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "CC Switch X", "width": 1200, "height": 800 }],
+    "windows": [
+      {
+        "label": "main",
+        "title": "CC Switch X",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640,
+        "center": true,
+        "decorations": false,
+        "shadow": true
+      }
+    ],
     "security": { "csp": null }
   },
   "bundle": {

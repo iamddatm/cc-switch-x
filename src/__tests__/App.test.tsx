@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 import App from "../App";
 
@@ -37,6 +37,25 @@ test("renders all sidebar entries and switches panes", () => {
   ]) {
     expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
   }
+
+  const nav = screen.getByRole("navigation", { name: "主导航" });
+  expect(within(nav).getByText("资产")).toBeInTheDocument();
+  expect(within(nav).getByText("工具")).toBeInTheDocument();
+  expect(within(nav).getByText("管理")).toBeInTheDocument();
+  expect(within(nav).getAllByRole("button").map((item) => item.textContent)).toEqual([
+    "MCP",
+    "Skills",
+    "提示词",
+    "Rules",
+    "Subagents",
+    "Hooks",
+    "会话",
+    "Agents",
+    "网络",
+    "备份",
+    "Settings",
+  ]);
+
   fireEvent.click(screen.getByRole("button", { name: "Rules" }));
   expect(screen.getByRole("heading", { name: "Rules" })).toBeInTheDocument();
 });

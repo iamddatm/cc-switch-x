@@ -4,6 +4,7 @@ import { api } from "../../lib/api";
 import { useTheme } from "../../hooks/useTheme";
 import { useUpdate } from "../../hooks/useUpdate";
 import { Sidebar } from "./Sidebar";
+import { TitleBar } from "./TitleBar";
 import { AgentsPanel } from "../../panels/AgentsPanel";
 import { BackupsPanel } from "../../panels/BackupsPanel";
 import { HooksPanel } from "../../panels/HooksPanel";
@@ -45,9 +46,12 @@ export function AppShell() {
   }[pane];
 
   return (
-    <div className="flex h-full bg-app">
-      <Sidebar pane={pane} onSelect={setPane} hasUpdate={update.hasUpdate} />
-      <main className="flex min-h-0 min-w-0 flex-1 flex-col">{content}</main>
+    <div className="flex h-full flex-col bg-app">
+      <TitleBar />
+      <div className="flex min-h-0 flex-1">
+        <Sidebar pane={pane} onSelect={setPane} hasUpdate={update.hasUpdate} />
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col">{content}</main>
+      </div>
     </div>
   );
 }

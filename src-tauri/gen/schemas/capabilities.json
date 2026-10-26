@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capability","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-save","dialog:allow-open"]}}
+{"default":{"identifier":"default","description":"Default capability","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-minimize","core:window:allow-toggle-maximize","core:window:allow-start-dragging","core:window:allow-close","dialog:allow-save","dialog:allow-open"]}}
