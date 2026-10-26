@@ -1,8 +1,14 @@
-import { useEffect, useState } from "react";
-import type { Pane, Theme } from "../../types";
+import { useCallback, useEffect, useState } from "react";
+import { FolderPlus, Sparkles } from "lucide-react";
+import type { Pane, ProjectScope, ProjectView, Theme } from "../../types";
 import { api } from "../../lib/api";
+import { useProjects } from "../../hooks/useProjects";
 import { useTheme } from "../../hooks/useTheme";
 import { useUpdate } from "../../hooks/useUpdate";
+import { Badge } from "../ui/Badge";
+import { Button } from "../ui/Button";
+import { EmptyState } from "../ui/EmptyState";
+import { PageHeader } from "../ui/PageHeader";
 import { Sidebar } from "./Sidebar";
 import { TitleBar } from "./TitleBar";
 import { AgentsPanel } from "../../panels/AgentsPanel";
@@ -17,9 +23,59 @@ import { SettingsPanel } from "../../panels/SettingsPanel";
 import { SkillsPanel } from "../../panels/SkillsPanel";
 import { SubagentsPanel } from "../../panels/SubagentsPanel";
 
+const SCOPE_STORAGE_KEY = "ccswitchx.scope";
+
+/** 项目范围只有 Skills 是项目级资产；停在这些 pane 上时自动跳到 Skills。 */
+const GLOBAL_ONLY_PANES = new Set<Pane>(["mcp", "prompt", "rule", "subagent", "hook"]);
+
+function ProjectEmptyState({ onAdd }: { onAdd: () => void }) {
+  return (
+    <div className="flex h-full flex-col">
+      <PageHeader icon={Sparkles} title="Skills" description="项目级 Skills" />
+      <div className="flex min-h-0 flex-1 items-center justify-center">
+        <EmptyState
+          icon={FolderPlus}
+          title="还没有项目"
+          description="添加一个项目后，就能查看并同步它里面各 agent 的 .claude / .qoder / .agents skills。"
+          actions={<Button onClick={onAdd}>添加项目…</Button>}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ProjectSkillsPlaceholder({ project }: { project: ProjectView }) {
+  return (
+    <div className="flex h-full flex-col">
+      <PageHeader
+        icon={Sparkles}
+        title="Skills"
+        description={project.path}
+        actions={<Badge tone="brand">项目</Badge>}
+      />
+      <div className="flex min-h-0 flex-1 items-center justify-center">
+        <div className="text-caption text-fg-2">项目 Skills 面板（Task 7 接入）</div>
+      </div>
+    </div>
+  );
+}
+
 export function AppShell() {
   const [pane, setPane] = useState<Pane>("mcp");
   const [theme, setTheme] = useState<Theme>("system");
+  const [scope, setScopeState] = useState<ProjectScope>(() =>
+    localStorage.getItem(SCOPE_STORAGE_KEY) === "project" ? "project" : "global",
+  );
+  const projects = useProjects();
+
+  const setScope = useCallback((next: ProjectScope) => {
+    setScopeState(next);
+    localStorage.setItem(SCOPE_STORAGE_KEY, next);
+  }, []);
+
+  useEffect(() => {
+    if (scope === "project" && GLOBAL_ONLY_PANES.has(pane)) setPane("skill");
+  }, [pane, scope]);
 
   // 主题只在壳层应用一次：Settings 改完回传这里，避免两个 useTheme 互相覆盖。
   useEffect(() => {
@@ -31,9 +87,23 @@ export function AppShell() {
   useTheme(theme);
   const update = useUpdate();
 
+  const relocate = async (id: string) => {
+    const added = await projects.add();
+    if (added && added.id !== id) await projects.remove(id);
+  };
+
   const content = {
     mcp: <McpPanel />,
-    skill: <SkillsPanel />,
+    skill:
+      scope === "project" ? (
+        projects.active ? (
+          <ProjectSkillsPlaceholder project={projects.active} />
+        ) : (
+          <ProjectEmptyState onAdd={() => void projects.add()} />
+        )
+      ) : (
+        <SkillsPanel />
+      ),
     prompt: <PromptsPanel />,
     rule: <RulesPanel />,
     subagent: <SubagentsPanel />,
@@ -49,7 +119,19 @@ export function AppShell() {
     <div className="flex h-full flex-col bg-app">
       <TitleBar />
       <div className="flex min-h-0 flex-1">
-        <Sidebar pane={pane} onSelect={setPane} hasUpdate={update.hasUpdate} />
+        <Sidebar
+          pane={pane}
+          onSelect={setPane}
+          hasUpdate={update.hasUpdate}
+          scope={scope}
+          projects={projects.projects}
+          activeProjectId={projects.activeId}
+          onScopeChange={setScope}
+          onSelectProject={(id) => void projects.select(id)}
+          onAddProject={() => void projects.add()}
+          onRemoveProject={(id) => void projects.remove(id)}
+          onRelocateProject={(id) => void relocate(id)}
+        />
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">{content}</main>
       </div>
     </div>

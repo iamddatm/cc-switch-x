@@ -25,6 +25,8 @@ import type {
   ProxySettingsView,
   ProxyTestResult,
   PullOutcome,
+  ProjectSkillsView,
+  ProjectView,
   RestoreBackupReport,
   ScanReport,
   SkillBatchReport,
@@ -201,6 +203,17 @@ export const api = {
     invoke<ResumeInfo>("session_resume", { agentId, sessionId }),
   exportSessionMarkdown: (agentId: string, sessionId: string, dest: string) =>
     invoke<string>("export_session_markdown", { agentId, sessionId, dest }),
+
+  listProjects: () => invoke<ProjectView[]>("list_projects"),
+  addProject: (path: string) => invoke<ProjectView>("add_project", { path }),
+  removeProject: (id: string) => invoke<void>("remove_project", { id }),
+  touchProject: (id: string) => invoke<ProjectView>("touch_project", { id }),
+  setProjectAutoSync: (id: string, enabled: boolean) =>
+    invoke<ProjectView>("set_project_auto_sync", { id, enabled }),
+  listProjectSkills: (projectId: string) =>
+    invoke<ProjectSkillsView>("list_project_skills", { projectId }),
+  revealProjectFolder: (projectId: string) =>
+    invoke<void>("reveal_project_folder", { projectId }),
 };
 
 export interface ApplyReport {

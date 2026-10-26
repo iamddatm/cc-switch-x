@@ -482,6 +482,72 @@ export interface SkillBatchReport {
   failed: SkillItemFailure[];
 }
 
+// ── 项目级 Skills ─────────────────────────────────────────────────
+
+export type ProjectScope = "global" | "project";
+
+export interface ProjectView {
+  id: string;
+  path: string;
+  name: string;
+  addedAt: string;
+  lastOpenedAt: string;
+  autoSync: boolean;
+  exists: boolean;
+}
+
+export type ProjectSkillDirKey = "claude" | "qoder" | "agents";
+
+export interface ProjectDirMeta {
+  key: ProjectSkillDirKey;
+  label: string;
+  relativePath: string;
+  agents: string[];
+  verified: boolean;
+}
+
+export type ProjectDirState =
+  | "present"
+  | "absent"
+  | "different"
+  | "untracked"
+  | "unavailable";
+
+export interface ProjectDirView extends ProjectDirMeta {
+  state: ProjectDirState;
+}
+
+export interface ProjectSkillSource {
+  kind: string;
+  repo?: string | null;
+  branch?: string | null;
+  subpath?: string | null;
+  treeHash?: string | null;
+}
+
+export interface ProjectSkillOp {
+  dir: string;
+  action: string;
+  at: string;
+}
+
+export interface ProjectSkillView {
+  id: string;
+  name: string;
+  description: string | null;
+  targets: string[];
+  dirs: Record<string, ProjectDirView>;
+  source: ProjectSkillSource | null;
+  lastOp: ProjectSkillOp | null;
+}
+
+export interface ProjectSkillsView {
+  project: ProjectView;
+  dirs: ProjectDirMeta[];
+  skills: ProjectSkillView[];
+  conflictCount: number;
+}
+
 export type ActivateOutcome =
   | { kind: "activated"; path: string }
   | { kind: "alreadyActive"; path: string }
