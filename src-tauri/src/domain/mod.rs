@@ -5,6 +5,7 @@ pub mod frontmatter;
 pub mod hook;
 pub mod mcp;
 pub mod prompt;
+pub mod project;
 pub mod rule;
 pub mod secret;
 pub mod session;
