@@ -41,6 +41,7 @@ beforeEach(() => {
     dirs: [],
     skills: [],
     conflictCount: 0,
+    migration: null,
   });
 });
 

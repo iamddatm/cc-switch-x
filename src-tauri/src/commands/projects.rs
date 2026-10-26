@@ -1,9 +1,12 @@
 use crate::commands::backup::open_directory;
+use crate::domain::project::ProjectSkillDirKey;
 use crate::error::AppError;
 use crate::services::agents::{detect_all, AgentStatus};
+use crate::services::project_migrate::{self, MigrationDecision, ProjectMigrationReport};
 use crate::services::project_registry::{
     self, ProjectSkillsView, ProjectSkillView, ProjectView,
 };
+use crate::services::project_scan;
 use crate::services::project_sync::{self, Resolution, SyncReport};
 use crate::state::AppState;
 use std::path::{Path, PathBuf};
@@ -242,6 +245,37 @@ pub async fn uninstall_project_skill(
         let _write = state.enter_write()?;
         let root = registered_project_root(state.inner(), &project_id)?;
         project_sync::uninstall(&state.store, &project_id, &root, &skill_id)
+    })
+    .await
+}
+
+/// v1 台账 → v2 项目真源的显式迁移。
+/// 迁移看的是仓库里实际有什么，所以扫全部落点而不是只扫已启用的 agent：
+/// 只按启用项扫会把停用了 agent 的副本误判成「不存在」而丢掉条目。
+#[tauri::command]
+pub async fn migrate_project_skills(
+    app: AppHandle,
+    project_id: String,
+    decisions: Vec<MigrationDecision>,
+) -> Result<ProjectMigrationReport, AppError> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let _project_guard = state
+            .project_ops
+            .lock()
+            .map_err(|_| AppError::Project("项目锁失败".into()))?;
+        let _write = state.enter_write()?;
+        let root = registered_project_root(state.inner(), &project_id)?;
+        let ledger = project_scan::load_ledger(&root)?;
+        let scan = project_scan::scan(&root, &ProjectSkillDirKey::ALL)?;
+        project_migrate::apply_migration(
+            &state.store,
+            &project_id,
+            &root,
+            &ledger,
+            &scan,
+            &decisions,
+        )
     })
     .await
 }

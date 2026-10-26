@@ -35,6 +35,8 @@ import type {
   ProjectSkillsView,
   ProjectSyncReport,
   ProjectView,
+  MigrationDecision,
+  ProjectMigrationReport,
   RestoreBackupReport,
   ScanReport,
   SkillBatchReport,
@@ -242,6 +244,9 @@ export const api = {
     invoke<ProjectSyncReport>("remove_project_skill_copy", { projectId, skillId, dir }),
   uninstallProjectSkill: (projectId: string, skillId: string) =>
     invoke<ProjectSyncReport>("uninstall_project_skill", { projectId, skillId }),
+  /** v1 台账 → 项目真源的显式迁移；decisions 覆盖所有冲突与候选，否则整体拒绝。 */
+  migrateProjectSkills: (projectId: string, decisions: MigrationDecision[]) =>
+    invoke<ProjectMigrationReport>("migrate_project_skills", { projectId, decisions }),
 };
 
 export interface ApplyReport {

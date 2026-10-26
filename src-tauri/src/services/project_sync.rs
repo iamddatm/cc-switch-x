@@ -1,5 +1,6 @@
 use crate::domain::project::{
-    ProjectDirState, ProjectLedger, ProjectSkillEntry, ProjectSkillOp, PROJECT_SKILL_DIRS,
+    ProjectDirState, ProjectLedger, ProjectSkillEntry, ProjectSkillOp, PROJECT_LEDGER_VERSION,
+    PROJECT_SKILL_DIRS,
 };
 use crate::error::AppError;
 use crate::services::project_scan::{self, ProjectScan};
@@ -514,6 +515,27 @@ fn rollback(applied: &Applied) -> Result<(), AppError> {
 }
 
 /// 手动/自动同步的唯一入口：算计划 → 落盘（先备份，失败整批回滚）→ 刷新基线。
+/// v2 台账的渲染引擎互锁。
+///
+/// 迁移（P2）会把 `dirs` 基线改写成「真源的内容」，而本文件里的判定还是 v1 的
+/// 「对等副本 + 最后操作」：与真源不一致的目录会被判成用户刚改动的一侧，
+/// 于是同步把用户刚刚否决的内容复制回去。因此只要台账里有真源落地，就拒绝
+/// v1 引擎的写入 —— 新项目的 v2 台账里 `canonical` 还是空的（没迁移也没采纳），
+/// 基线语义与 v1 相同，不受影响。按真源渲染的判定在下一期落地。
+fn ensure_render_engine_supports(ledger: &ProjectLedger) -> Result<(), AppError> {
+    let has_canonical = ledger
+        .skills
+        .values()
+        .any(|entry| entry.canonical.present);
+    if ledger.version >= PROJECT_LEDGER_VERSION && has_canonical {
+        return Err(AppError::Project(
+            "该项目已改用项目真源（.ccswitchx/skills/），从真源渲染的同步逻辑尚未上线；本次未改动任何文件。"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn sync_project(
     store: &Store,
     project_id: &str,
@@ -522,6 +544,7 @@ pub fn sync_project(
     resolutions: &[Resolution],
 ) -> Result<SyncReport, AppError> {
     let ledger = project_scan::load_ledger(project_root)?;
+    ensure_render_engine_supports(&ledger)?;
     let enabled_keys = project_scan::enabled_dir_keys(enabled_agent_ids);
     let enabled_names: Vec<String> = enabled_keys
         .iter()
@@ -874,7 +897,11 @@ pub fn set_targets(
     }
 
     let mut ledger = project_scan::load_ledger(project_root)?;
-    let entry = ledger.skills.entry(skill_id.to_string()).or_default();
+    ensure_render_engine_supports(&ledger)?;
+    let entry = ledger
+        .skills
+        .entry(skill_id.to_string())
+        .or_default();
     entry.targets = wanted.clone();
     for dir in &wanted {
         let path = skill_dir(project_root, dir, skill_id)?;
@@ -898,6 +925,7 @@ pub fn remove_copy(
     dir: &str,
 ) -> Result<SyncReport, AppError> {
     let mut ledger = project_scan::load_ledger(project_root)?;
+    ensure_render_engine_supports(&ledger)?;
     let entry = ledger
         .skills
         .get_mut(skill_id)
@@ -950,6 +978,7 @@ pub fn uninstall(
     skill_id: &str,
 ) -> Result<SyncReport, AppError> {
     let mut ledger = project_scan::load_ledger(project_root)?;
+    ensure_render_engine_supports(&ledger)?;
     let entry = ledger
         .skills
         .get(skill_id)
@@ -1230,6 +1259,63 @@ mod tests {
         let plan = plan_sync(&ledger_with("a", entry), &scan, &[]);
         assert!(plan.actions.is_empty());
         assert!(plan.conflicts.is_empty());
+    }
+
+    /// 迁移后的 v2 台账必须被 v1 引擎拒绝：v1 会把「与真源不一致」的目录判成
+    /// 最后操作，从而把用户在迁移裁决里否决的那一侧复制回去。
+    #[test]
+    fn a_migrated_ledger_refuses_every_v1_write_entry_point() {
+        let fixture = project_fixture();
+        seed_skill(&fixture.root.join(".claude/skills"), "a");
+        let view = fixture.add_project(&["claude".into(), "qoder".into()]);
+        fixture.set_targets(&view.id, "a", &["claude", "qoder"]);
+        let mut ledger = project_scan::load_ledger(&fixture.root).unwrap();
+        // 迁移后的样子：v2 + 真源已落地 + 基线等于真源。
+        ledger.version = PROJECT_LEDGER_VERSION;
+        ledger.skills.get_mut("a").unwrap().canonical =
+            project_scan::tree_state(&fixture.root.join(".claude/skills/a")).unwrap();
+        project_scan::save_ledger(&fixture.root, &ledger).unwrap();
+
+        let error = fixture.sync(&view.id, &[]).unwrap_err();
+        assert!(error.to_string().contains("真源"), "{error}");
+        assert!(
+            !fixture.root.join(".qoder/skills/a").exists(),
+            "拒绝时不能留下半个副本"
+        );
+        assert!(
+            fixture
+                .set_targets_allowed(&view.id, "a", &["claude"], &["claude", "qoder"])
+                .is_err(),
+            "勾选也会改写基线，同样要挡下"
+        );
+        assert!(matches!(
+            remove_copy(&fixture.store, &view.id, &fixture.root, "a", "claude"),
+            Err(AppError::Project(_))
+        ));
+        assert!(matches!(
+            uninstall(&fixture.store, &view.id, &fixture.root, "a"),
+            Err(AppError::Project(_))
+        ));
+        assert!(
+            fixture.root.join(".claude/skills/a").is_dir(),
+            "四个入口都被拒绝，磁盘必须原样"
+        );
+    }
+
+    /// 新项目的 v2 台账里真源还是空的，基线语义与 v1 相同，不能被互锁误伤。
+    #[test]
+    fn a_fresh_v2_ledger_still_syncs_between_dirs_until_it_is_migrated() {
+        let fixture = project_fixture();
+        seed_skill(&fixture.root.join(".claude/skills"), "a");
+        let view = fixture.add_project(&["claude".into(), "qoder".into()]);
+        assert_eq!(
+            project_scan::load_ledger(&fixture.root).unwrap().version,
+            PROJECT_LEDGER_VERSION
+        );
+        fixture.set_targets(&view.id, "a", &["claude", "qoder"]);
+
+        fixture.sync(&view.id, &[]).unwrap();
+        assert!(fixture.root.join(".qoder/skills/a").is_dir());
     }
 
     #[test]

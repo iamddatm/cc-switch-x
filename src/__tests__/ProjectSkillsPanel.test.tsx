@@ -13,6 +13,7 @@ vi.mock("../lib/api", () => ({
     removeProjectSkillCopy: vi.fn(),
     uninstallProjectSkill: vi.fn(),
     setProjectAutoSync: vi.fn(),
+    migrateProjectSkills: vi.fn(),
   },
 }));
 
@@ -71,6 +72,7 @@ function viewWithOneSkill(
       },
     ],
     conflictCount: 0,
+    migration: null,
   };
 }
 
@@ -144,6 +146,7 @@ test("renders project skill matrix with per-directory state", async () => {
       },
     ],
     conflictCount: 0,
+    migration: null,
   });
 
   render(<ProjectSkillsPanel project={projectView()} />);
@@ -158,6 +161,7 @@ test("shows empty state when project has no skills", async () => {
     dirs: [],
     skills: [],
     conflictCount: 0,
+    migration: null,
   });
 
   render(<ProjectSkillsPanel project={projectView()} />);
@@ -335,4 +339,78 @@ test("toggling auto sync persists through setProjectAutoSync", async () => {
   render(<ProjectSkillsPanel project={projectView({ autoSync: false })} />);
   fireEvent.click(await screen.findByRole("checkbox", { name: "自动同步" }));
   await waitFor(() => expect(api.setProjectAutoSync).toHaveBeenCalledWith("p1", true));
+});
+
+const migrationPlan = {
+  adopts: [{ skillId: "a", fromDir: "claude", files: [".ccswitchx/skills/a/SKILL.md"] }],
+  proposals: [
+    {
+      skillId: "b",
+      fromDir: "claude",
+      files: [".ccswitchx/skills/b/SKILL.md"],
+      candidates: ["claude"],
+      defaultAdopt: false,
+      reason: "该 skill 还没被勾选为渲染目标",
+    },
+  ],
+  conflicts: [
+    { skillId: "c", dirs: ["claude", "qoder"], recommended: "qoder", kind: "targetsDiffer" },
+  ],
+  drops: ["gone"],
+  warnings: [],
+};
+
+async function openMigrationDialog() {
+  vi.mocked(api.listProjectSkills).mockResolvedValue({
+    ...viewWithOneSkill(),
+    migration: migrationPlan,
+  });
+  render(<ProjectSkillsPanel project={projectView()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "查看迁移方案" }));
+  await screen.findByText("把项目 skill 收进项目真源");
+}
+
+test("旧台账显示迁移横幅，冲突未裁决时不能提交", async () => {
+  await openMigrationDialog();
+
+  // 安全性质必须写在界面上：迁移只新建真源，不碰 agent 目录。
+  expect(screen.getByText(/不会改动任何 agent 目录/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "确认迁移" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "确认迁移" })).toHaveAttribute(
+    "title",
+    "还有 1 个冲突需要你裁决",
+  );
+});
+
+test("迁移清单只列会真正新建的文件", async () => {
+  await openMigrationDialog();
+
+  expect(screen.getByText(".ccswitchx/skills/a/SKILL.md")).toBeInTheDocument();
+  expect(screen.getByText(".ccswitchx/skills.json")).toBeInTheDocument();
+  expect(screen.queryByText(".ccswitchx/skills/b/SKILL.md")).not.toBeInTheDocument();
+  expect(screen.getByText(/台账里有 1 个条目在磁盘上已经不存在/)).toBeInTheDocument();
+});
+
+test("确认迁移把候选与冲突裁决一起提交", async () => {
+  vi.mocked(api.migrateProjectSkills).mockResolvedValue({
+    adopted: ["a"],
+    skipped: ["b"],
+    dropped: ["gone"],
+    warnings: [],
+    version: 2,
+  });
+  await openMigrationDialog();
+
+  fireEvent.click(screen.getByRole("button", { name: "以 Qoder 为真源" }));
+  const confirm = screen.getByRole("button", { name: "确认迁移" });
+  expect(confirm).toBeEnabled();
+  fireEvent.click(confirm);
+
+  await waitFor(() =>
+    expect(api.migrateProjectSkills).toHaveBeenCalledWith("p1", [
+      { skillId: "b", dir: "" },
+      { skillId: "c", dir: "qoder" },
+    ]),
+  );
+  expect(await screen.findByText(/迁移完成：收进真源 1 个/)).toBeInTheDocument();
 });

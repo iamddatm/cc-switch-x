@@ -3,6 +3,7 @@ import { FolderOpen, RefreshCw, Sparkles } from "lucide-react";
 import { useProjectSkills } from "../hooks/useProjectSkills";
 import { api } from "../lib/api";
 import { ProjectConflictDialog } from "../components/projects/ProjectConflictDialog";
+import { ProjectMigrationDialog } from "../components/projects/ProjectMigrationDialog";
 import type { BadgeTone } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
@@ -11,6 +12,7 @@ import { Menu, type MenuItem } from "../components/ui/Menu";
 import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
 import type {
+  MigrationDecision,
   ProjectConflict,
   ProjectConflictResolution,
   ProjectDirMeta,
@@ -98,6 +100,8 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
   const [conflicts, setConflicts] = useState<ProjectConflict[]>([]);
   /** 自动同步发现的冲突只挂在这里，用户点开才是对话框。 */
   const [pending, setPending] = useState<ProjectConflict[]>([]);
+  const [migrating, setMigrating] = useState(false);
+  const [migrationNote, setMigrationNote] = useState<string | null>(null);
   const [autoSync, setAutoSync] = useState(project.autoSync);
   const autoSyncedFor = useRef<string | null>(null);
 
@@ -138,6 +142,17 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
         setConflicts(report.conflicts);
         setPending([]);
       }
+      await refresh();
+    });
+
+  /** 迁移由用户确认后才落盘；成功后刷新，计划消失即代表台账已是 v2。 */
+  const migrate = (decisions: MigrationDecision[]) =>
+    guard(async () => {
+      const report = await api.migrateProjectSkills(project.id, decisions);
+      setMigrationNote(
+        `迁移完成：收进真源 ${report.adopted.length} 个，跳过 ${report.skipped.length} 个，清理条目 ${report.dropped.length} 个。`,
+      );
+      setMigrating(false);
       await refresh();
     });
 
@@ -247,6 +262,25 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
       />
 
       <div className="min-h-0 flex-1 overflow-auto px-6 py-3">
+        {data?.migration && (
+          <Notice tone="warning" className="mb-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span>
+                这个项目的台账还是旧格式（各目录互为副本）。迁移后
+                <code className="mx-1 font-mono">.ccswitchx/skills/</code>
+                成为项目真源，agent 目录变成它的渲染产物；迁移只新建文件，不改动任何 agent 目录。
+              </span>
+              <Button size="sm" onClick={() => setMigrating(true)}>
+                查看迁移方案
+              </Button>
+            </div>
+          </Notice>
+        )}
+        {migrationNote && (
+          <Notice tone="success" className="mb-3">
+            {migrationNote}
+          </Notice>
+        )}
         {!selectable && dirs.length > 0 && (
           <Notice tone="warning" className="mb-3">
             这些项目级落点（{dirs.map((dir) => dir.relativePath).join("、")}）尚未在真机验证，
@@ -340,6 +374,16 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
           </div>
         )}
       </div>
+
+      {migrating && data?.migration && (
+        <ProjectMigrationDialog
+          plan={data.migration}
+          dirs={dirs}
+          busy={busy}
+          onCancel={() => setMigrating(false)}
+          onConfirm={(decisions) => void migrate(decisions)}
+        />
+      )}
 
       {conflicts.length > 0 && (
         <ProjectConflictDialog

@@ -65,6 +65,8 @@ pub struct ProjectSkillsView {
     pub dirs: Vec<ProjectDirMeta>,
     pub skills: Vec<ProjectSkillView>,
     pub conflict_count: usize,
+    /// v1 台账的迁移计划；已经是 v2 或无事可做时为 None。只读计算，不落盘。
+    pub migration: Option<crate::services::project_migrate::ProjectMigrationPlan>,
 }
 
 pub fn project_id(path: &Path) -> String {
@@ -315,6 +317,7 @@ pub fn list_project_skills(
             dirs: Vec::new(),
             skills: Vec::new(),
             conflict_count: 0,
+            migration: None,
         });
     }
 
@@ -403,11 +406,23 @@ pub fn list_project_skills(
         });
     }
 
+    // v1 台账要先给出迁移计划：界面据此提示「会在你仓库里新建哪些文件」。
+    let migration = if project_scan::ledger_needs_migration(&ledger) {
+        let plan = crate::services::project_migrate::plan_migration(&ledger, &scan);
+        (!plan.is_empty()).then_some(plan)
+    } else {
+        None
+    };
+    let conflict_count = migration
+        .as_ref()
+        .map_or(0, |plan| plan.conflicts.len());
+
     Ok(ProjectSkillsView {
         project,
         dirs: dir_metas,
         skills,
-        conflict_count: 0,
+        conflict_count,
+        migration,
     })
 }
 

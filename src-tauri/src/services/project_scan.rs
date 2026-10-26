@@ -107,6 +107,12 @@ fn collect_files(
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         let path = entry.path();
+        // 点开头条目不计入指纹：`.DS_Store`、编辑器临时文件、`.ccswitchx` 标记都不该
+        // 让一个 skill 永远显示「内容不一致」并因此被反复重渲染。
+        // 这也是与 `net::archive::compute_dir_hash` 对齐的口径。
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
         if is_link(&path) {
             return Err(AppError::InvalidInput(format!(
                 "拒绝符号链接：{}",
@@ -226,6 +232,11 @@ pub fn ledger_path(project_root: &Path) -> PathBuf {
     project_root.join(".ccswitchx").join("skills.json")
 }
 
+/// 台账与真源在项目根里的相对位置：给 UI 展示「会新建/重写哪些文件」用，
+/// 绝不暴露绝对路径（台账随仓库提交）。
+pub const LEDGER_RELATIVE: &str = ".ccswitchx/skills.json";
+pub const CANONICAL_RELATIVE: &str = ".ccswitchx/skills";
+
 /// 真源目录的扫描结果。真源不是落点，所以单独扫，不进 `dirs` 的 key 空间。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CanonicalScan {
@@ -249,6 +260,10 @@ pub fn scan_canonical(project_root: &Path) -> Result<CanonicalScan, AppError> {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
+        // 隐藏目录不是 skill：提交用的 staging 也以点开头，不能混进真源。
+        if name.starts_with('.') {
+            continue;
+        }
         if is_link(&path) {
             result
                 .warnings
@@ -497,6 +512,28 @@ mod tests {
             !text.contains(r#""files": {}"#),
             "台账随仓库提交，空清单只会制造 diff 噪音：{text}"
         );
+    }
+
+    /// 点开头条目不计入指纹，否则 `.DS_Store` 会让格子永远「不一致」并被反复重渲染。
+    #[test]
+    fn tree_state_skips_dot_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = dir.path().join("a");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "v1").unwrap();
+
+        let clean = tree_state(&skill).unwrap();
+        std::fs::write(skill.join(".DS_Store"), "junk").unwrap();
+        std::fs::create_dir_all(skill.join(".idea")).unwrap();
+        std::fs::write(skill.join(".idea/workspace.xml"), "junk").unwrap();
+        assert_eq!(
+            tree_state(&skill).unwrap().tree_hash,
+            clean.tree_hash,
+            "隐藏文件与隐藏目录都不能改变指纹"
+        );
+
+        std::fs::write(skill.join("SKILL.md"), "v2").unwrap();
+        assert_ne!(tree_state(&skill).unwrap().tree_hash, clean.tree_hash);
     }
 
     #[test]

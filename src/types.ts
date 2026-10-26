@@ -593,6 +593,55 @@ export interface ProjectSkillsView {
   dirs: ProjectDirMeta[];
   skills: ProjectSkillView[];
   conflictCount: number;
+  /** v1 台账的迁移计划；已迁移或无事可做时为 null。只读计算，不落盘。 */
+  migration: ProjectMigrationPlan | null;
+}
+
+/** 迁移的一条采纳：把某个目录的现有字节新建进项目真源，agent 目录本身不动。 */
+export interface MigrationItem {
+  skillId: string;
+  fromDir: string;
+  /** 将在真源里新建的文件（相对项目根）。 */
+  files: string[];
+}
+
+/** 从没被勾选为目标的副本：是否收进真源由用户决定。 */
+export interface MigrationProposal extends MigrationItem {
+  candidates: string[];
+  defaultAdopt: boolean;
+  reason: string;
+}
+
+export interface MigrationConflict {
+  skillId: string;
+  dirs: string[];
+  recommended: string | null;
+  /** targetsDiffer：各目录内容不一致；unresolvable：状态取不到（链接等）。 */
+  kind: "targetsDiffer" | "unresolvable" | string;
+}
+
+export interface ProjectMigrationPlan {
+  adopts: MigrationItem[];
+  proposals: MigrationProposal[];
+  conflicts: MigrationConflict[];
+  /** 台账里有、磁盘上什么都没有：只去条目，不写任何文件。 */
+  drops: string[];
+  warnings: string[];
+}
+
+/** 一条裁决；`dir` 为空串表示这条跳过不动。 */
+export interface MigrationDecision {
+  skillId: string;
+  dir: string;
+}
+
+export interface ProjectMigrationReport {
+  adopted: string[];
+  skipped: string[];
+  dropped: string[];
+  warnings: string[];
+  ledgerBackup?: string | null;
+  version: number;
 }
 
 export interface ProjectConflict {

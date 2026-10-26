@@ -138,6 +138,7 @@ pub fn run() {
             commands::projects::add_project,
             commands::projects::list_project_skills,
             commands::projects::list_projects,
+            commands::projects::migrate_project_skills,
             commands::projects::remove_project,
             commands::projects::remove_project_skill_copy,
             commands::projects::reveal_project_folder,
