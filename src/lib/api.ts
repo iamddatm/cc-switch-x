@@ -134,6 +134,8 @@ export const api = {
     invoke<GitStatus>("git_init", { branch: branch ?? null }),
   gitSetRemote: (remote: string | null, branch: string) =>
     invoke<GitStatus>("git_set_remote", { remote, branch }),
+  gitVerifyRemote: (remote: string | null, branch: string) =>
+    invoke<GitStatus>("git_verify_remote", { remote, branch }),
   gitCommitNow: (message?: string) =>
     invoke<GitStatus>("git_commit_now", { message: message ?? null }),
   gitPushNow: () => invoke<GitStatus>("git_push_now"),

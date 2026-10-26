@@ -11,6 +11,7 @@ use crate::domain::AssetType;
 use crate::error::AppError;
 use crate::index::Index;
 use crate::net::archive::{extract_archive, ArchiveLimits};
+use crate::services::git_sync;
 use crate::store::atomic::write_atomic;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -1129,10 +1130,19 @@ pub(crate) fn periodic_once(state: &crate::state::AppState) {
         return;
     };
 
+    // 远端备份只能选一种：Git 自动同步生效时不再上传 WebDAV。
+    // 历史设置可能同时开启两者；以「Git 已验证且已开启」为生效条件，避免两边都跑。
     let auto_upload = state
         .settings
         .lock()
-        .map(|settings| settings.cloud.auto_upload)
+        .map(|settings| {
+            let git_active = settings.backup.git.enabled
+                && git_sync::is_remote_verified(
+                    &state.store,
+                    settings.backup.git.remote.as_deref(),
+                );
+            settings.cloud.auto_upload && !git_active
+        })
         .unwrap_or(false);
     if !auto_upload {
         return;
@@ -1500,6 +1510,41 @@ mod tests {
         assert!(server
             .object("/dav/ccswitchx/ccswitchx-backup.zip")
             .is_none());
+    }
+
+    #[test]
+    fn periodic_once_skips_upload_when_git_backup_is_active() {
+        if !crate::services::git_sync::is_available() {
+            return;
+        }
+        let server = FakeWebDav::start("me", "pw");
+        let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
+        state.settings.lock().unwrap().backup.interval_hours = 1;
+
+        let bare = state.store.root().parent().unwrap().join("remote.git");
+        let output = std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let url = format!("file:///{}", bare.to_string_lossy().replace('\\', "/"));
+        crate::services::git_sync::init(&state.store, "main").unwrap();
+        crate::services::git_sync::verify_remote(&state.store, &url, "main").unwrap();
+        {
+            let mut settings = state.settings.lock().unwrap();
+            settings.backup.git.enabled = true;
+            settings.backup.git.remote = Some(url);
+        }
+
+        periodic_once(&state);
+
+        assert!(
+            server
+                .object("/dav/ccswitchx/ccswitchx-backup.zip")
+                .is_none(),
+            "Git 自动同步生效时不应再上传 WebDAV"
+        );
     }
 
     #[test]

@@ -153,6 +153,8 @@ export interface GitStatus {
   available: boolean;
   initialized: boolean;
   enabled: boolean;
+  /** 当前远端地址是否通过了 ls-remote 验证。 */
+  remoteVerified: boolean;
   branch: string | null;
   remote: string | null;
   dirty: number;

@@ -193,6 +193,10 @@ pub fn set_cloud_settings_at(
         current.cloud.auto_upload = auto_upload;
         secrets.insert(&cloud_secret_ref(), &next_password);
     }
+    if current.cloud.auto_upload {
+        // 远端备份只能选一种：开启 WebDAV 自动上传时停用 Git 自动同步。
+        current.backup.git.enabled = false;
+    }
 
     secrets.save(secrets_path)?;
     settings::save_to(config_path, &current)?;
@@ -283,8 +287,16 @@ pub fn set_backup_settings_at(
     if let Some(remote) = &backup.git.remote {
         settings::validate_git_remote(remote).map_err(AppError::InvalidInput)?;
     }
+    // 没有远端就无法验证；开启状态只会误导，直接纠正为停用，避免阻塞其他设置保存。
+    if backup.git.enabled && backup.git.remote.is_none() {
+        backup.git.enabled = false;
+    }
     let mut current = settings::load_from(config_path)?;
     current.backup = backup;
+    if current.backup.git.enabled {
+        // 远端备份只能选一种：开启 Git 自动同步时停用 WebDAV 自动上传。
+        current.cloud.auto_upload = false;
+    }
     settings::save_to(config_path, &current)?;
     Ok(current)
 }
@@ -393,6 +405,78 @@ mod tests {
             ..updated.backup.clone()
         };
         assert!(set_backup_settings_at(&config, invalid).is_err());
+    }
+
+    #[test]
+    fn git_and_webdav_auto_backup_are_mutually_exclusive() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let secrets_path = dir.path().join("secrets.local.json");
+
+        let (with_cloud, _) = set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            "https://dav.example.com/dav".into(),
+            "me".into(),
+            Some("pw".into()),
+            "ccswitchx".into(),
+            true,
+        )
+        .unwrap();
+        assert!(with_cloud.cloud.auto_upload);
+
+        let with_git = set_backup_settings_at(
+            &config,
+            BackupSettings {
+                git: crate::settings::GitBackupSettings {
+                    enabled: true,
+                    remote: Some("https://example.com/assets.git".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(with_git.backup.git.enabled);
+        assert!(
+            !with_git.cloud.auto_upload,
+            "启用 Git 自动同步时应停用 WebDAV 自动上传"
+        );
+
+        let (with_cloud_again, _) = set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            "https://dav.example.com/dav".into(),
+            "me".into(),
+            None,
+            "ccswitchx".into(),
+            true,
+        )
+        .unwrap();
+        assert!(with_cloud_again.cloud.auto_upload);
+        assert!(
+            !with_cloud_again.backup.git.enabled,
+            "启用 WebDAV 自动上传时应停用 Git 自动同步"
+        );
+    }
+
+    #[test]
+    fn git_backup_without_remote_is_forced_off() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let backup = BackupSettings {
+            git: crate::settings::GitBackupSettings {
+                enabled: true,
+                remote: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let updated = set_backup_settings_at(&config, backup).unwrap();
+        assert!(
+            !updated.backup.git.enabled,
+            "没有远端就无法验证，开启状态应被纠正"
+        );
     }
 
     #[test]

@@ -23,6 +23,7 @@ export function useBackups() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const alive = useRef(true);
+  const commitKey = useRef("");
 
   useEffect(() => {
     alive.current = true;
@@ -43,6 +44,21 @@ export function useBackups() {
     }
   }, []);
 
+  /** 提交历史只在 HEAD 提交时间变化时重拉，避免轮询反复跑 git log。 */
+  const syncCommits = useCallback(async (status: GitStatus) => {
+    const key = status.initialized ? String(status.lastCommitAt ?? "") : "";
+    if (key === commitKey.current) return;
+    if (!status.initialized) {
+      commitKey.current = "";
+      setCommits([]);
+      return;
+    }
+    const history = await api.gitListCommits(50);
+    if (!alive.current) return;
+    commitKey.current = key;
+    setCommits(history);
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       const [snapshotList, usageView, backupSettings, status, cloudSettings] =
@@ -59,12 +75,7 @@ export function useBackups() {
       setSettings(backupSettings);
       setGit(status);
       setCloud(cloudSettings);
-      if (status.initialized) {
-        const history = await api.gitListCommits(50);
-        if (alive.current) setCommits(history);
-      } else {
-        setCommits([]);
-      }
+      await syncCommits(status);
       setError(null);
       void refreshCloudStatus();
     } catch (reason) {
@@ -72,23 +83,18 @@ export function useBackups() {
     } finally {
       if (alive.current) setLoading(false);
     }
-  }, [refreshCloudStatus]);
+  }, [refreshCloudStatus, syncCommits]);
 
   const refreshGit = useCallback(async () => {
     try {
       const status = await api.getGitStatus();
       if (!alive.current) return;
       setGit(status);
-      if (status.initialized) {
-        const history = await api.gitListCommits(50);
-        if (alive.current) setCommits(history);
-      } else {
-        setCommits([]);
-      }
+      await syncCommits(status);
     } catch (reason) {
       if (alive.current) setError(String(reason));
     }
-  }, []);
+  }, [syncCommits]);
 
   useEffect(() => {
     void refresh();
@@ -97,7 +103,7 @@ export function useBackups() {
   useEffect(() => {
     const timer = window.setInterval(() => {
       void refreshGit();
-    }, 8000);
+    }, 15000);
     return () => window.clearInterval(timer);
   }, [refreshGit]);
 

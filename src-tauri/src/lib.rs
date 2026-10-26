@@ -6,12 +6,14 @@ pub mod error;
 pub mod import;
 pub mod index;
 pub mod net;
+pub mod process;
 pub mod services;
 pub mod sessions;
 pub mod settings;
 pub mod state;
 pub mod store;
 pub mod tray;
+pub mod window;
 
 #[tauri::command]
 fn ping() -> &'static str {
@@ -38,6 +40,12 @@ pub fn run() {
         .setup(|app| {
             use tauri::Manager;
             tray::setup(app)?;
+            // 配置里的 "center": true 只按工作区摆，这里再按整屏修正一次；摆位失败不拦启动。
+            if let Some(main_window) = app.get_webview_window("main") {
+                if let Err(e) = window::center_on_screen(&main_window) {
+                    eprintln!("主窗口未能按整屏居中，沿用 Tauri 的摆放：{e}");
+                }
+            }
             let app_state = app.state::<state::AppState>();
             // 后台线程只做事后备份/同步，不阻塞启动；索引被污染也不影响它们启动。
             if let Some(rx) = app_state.take_git_rx() {
@@ -101,6 +109,7 @@ pub fn run() {
             commands::git::git_resolve_conflict,
             commands::git::git_restore_commit,
             commands::git::git_set_remote,
+            commands::git::git_verify_remote,
             commands::import::import_apply,
             commands::import::import_preview,
             commands::import::revert_last,

@@ -19,6 +19,10 @@ import { IconButton } from "../components/ui/IconButton";
 import { Input } from "../components/ui/Input";
 import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
+import {
+  SegmentedControl,
+  type SegmentedItem,
+} from "../components/ui/SegmentedControl";
 import { Select } from "../components/ui/Select";
 import { useBackups } from "../hooks/useBackups";
 import { api } from "../lib/api";
@@ -33,6 +37,9 @@ import type {
 
 const INTERVALS = [0, 6, 12, 24, 48, 168];
 const RETAINS = [3, 5, 10, 15, 20, 30, 50];
+
+/** 远端备份只能启用一种；两种都未开启时只做本机快照。 */
+type BackupMethod = "none" | "git" | "webdav";
 
 const KIND_LABEL: Record<SnapshotKind, string> = {
   manual: "手动",
@@ -128,7 +135,6 @@ export function BackupsPanel() {
   const [cloudPasswordDirty, setCloudPasswordDirty] = useState(false);
   const [showCloudPassword, setShowCloudPassword] = useState(false);
   const [cloudRemoteDir, setCloudRemoteDir] = useState("ccswitchx");
-  const [cloudAutoUpload, setCloudAutoUpload] = useState(false);
   const [cloudRestoreOpen, setCloudRestoreOpen] = useState(false);
   const inputsReady = useRef(false);
   const cloudInputsReady = useRef(false);
@@ -145,7 +151,6 @@ export function BackupsPanel() {
     setCloudBaseUrl(cloud.baseUrl);
     setCloudUsername(cloud.username);
     setCloudRemoteDir(cloud.remoteDir);
-    setCloudAutoUpload(cloud.autoUpload);
     cloudInputsReady.current = true;
   }, [cloud]);
 
@@ -188,6 +193,22 @@ export function BackupsPanel() {
         ),
       "远端设置已保存",
     );
+  };
+
+  const verifyRemote = async () => {
+    setNotice(null);
+    try {
+      await run("git-verify", () =>
+        api.gitVerifyRemote(
+          remoteInput.trim() ? remoteInput.trim() : null,
+          branchInput.trim() || "main",
+        ),
+      );
+      setNotice("远端验证通过，可以启用 Git 备份");
+    } catch {
+      // 错误已展示；验证失败时地址仍已保存，刷新一次让状态同步
+      void refresh();
+    }
   };
 
   const createSnapshot = () => {
@@ -319,13 +340,12 @@ export function BackupsPanel() {
           username: cloudUsername.trim(),
           password: cloudPasswordValue(),
           remoteDir: cloudRemoteDir.trim(),
-          autoUpload: cloudAutoUpload,
+          autoUpload: cloud?.autoUpload ?? false,
         }),
       );
       setCloudBaseUrl(saved.baseUrl);
       setCloudUsername(saved.username);
       setCloudRemoteDir(saved.remoteDir);
-      setCloudAutoUpload(saved.autoUpload);
       setCloudPassword("");
       setCloudPasswordDirty(false);
       setShowCloudPassword(false);
@@ -389,6 +409,81 @@ export function BackupsPanel() {
         .replace(/^\/+/, "")}/ccswitchx-backup.zip`
     : "—";
 
+  // 单选值由实际生效的配置推导：Git 必须已验证，否则即使 enabled 也不显示为选中。
+  const method: BackupMethod =
+    settings?.git.enabled && git?.remoteVerified
+      ? "git"
+      : cloud?.autoUpload
+        ? "webdav"
+        : "none";
+  const gitMethodReady =
+    !!git?.initialized && !!settings?.git.remote && !!git?.remoteVerified;
+  const webdavMethodReady =
+    !!cloud?.baseUrl && !!cloud?.username && !!cloud?.hasPassword;
+  const methodItems: SegmentedItem<BackupMethod>[] = [
+    { value: "none", label: "不启用" },
+    { value: "git", label: "Git 备份", disabled: !gitMethodReady },
+    { value: "webdav", label: "WebDAV 云备份", disabled: !webdavMethodReady },
+  ];
+
+  const selectMethod = (value: BackupMethod) => {
+    if (!settings || !cloud) return;
+    if (value === method) {
+      // 未验证的 Git 可能仍残留 enabled；点「不启用」或「WebDAV」时顺带清掉。
+      if (value === "git" || !settings.git.enabled) return;
+    }
+    if (value === "git") {
+      if (!gitMethodReady) return;
+      void act(
+        "method",
+        () =>
+          api.setBackupSettings({
+            ...settings,
+            git: { ...settings.git, enabled: true },
+          }),
+        "已启用 Git 备份",
+      );
+      return;
+    }
+    if (value === "webdav") {
+      if (!webdavMethodReady) return;
+      void act(
+        "method",
+        () =>
+          api.setCloudSettings({
+            baseUrl: cloud.baseUrl,
+            username: cloud.username,
+            password: null,
+            remoteDir: cloud.remoteDir,
+            autoUpload: true,
+          }),
+        "已启用 WebDAV 云备份",
+      );
+      return;
+    }
+    void act(
+      "method",
+      async () => {
+        if (settings.git.enabled) {
+          await api.setBackupSettings({
+            ...settings,
+            git: { ...settings.git, enabled: false },
+          });
+        }
+        if (cloud.autoUpload) {
+          await api.setCloudSettings({
+            baseUrl: cloud.baseUrl,
+            username: cloud.username,
+            password: null,
+            remoteDir: cloud.remoteDir,
+            autoUpload: false,
+          });
+        }
+      },
+      "已关闭远端自动备份",
+    );
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader
@@ -415,6 +510,23 @@ export function BackupsPanel() {
         <div className="max-w-4xl space-y-6">
           {error && <Notice tone="danger">{error}</Notice>}
           {notice && <Notice tone="success">{notice}</Notice>}
+
+          <section className="rounded-panel border border-border bg-surface px-4 py-3">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <div className="min-w-0 flex-1">
+                <h3 className="text-strong text-fg-1">远端备份方式</h3>
+                <p className="text-caption text-fg-3">
+                  Git 与 WebDAV 只能启用一种；本机快照不受影响。Git 需先初始化并验证远端，WebDAV 需先保存完整连接配置。
+                </p>
+              </div>
+              <SegmentedControl
+                ariaLabel="远端备份方式"
+                value={method}
+                items={methodItems}
+                onValueChange={selectMethod}
+              />
+            </div>
+          </section>
 
           <section className="rounded-panel border border-border bg-surface">
             <div className="flex items-center gap-2 border-b border-border px-4 py-3">
@@ -595,6 +707,11 @@ export function BackupsPanel() {
               <GitBranch size={15} className="text-fg-3" aria-hidden />
               <h3 className="text-strong text-fg-1">Git 备份</h3>
               {git && <Badge tone={gitStateTone(git)}>{gitStateLabel(git)}</Badge>}
+              {git?.initialized && (
+                <Badge tone={git.remoteVerified ? "success" : "warning"}>
+                  {git.remoteVerified ? "远端已验证" : "远端未验证"}
+                </Badge>
+              )}
               <span className="ml-auto flex gap-1.5">
                 <Button
                   size="sm"
@@ -618,7 +735,7 @@ export function BackupsPanel() {
             ) : !git.initialized ? (
               <div className="space-y-3 px-4 py-3">
                 <p className="text-body text-fg-2">
-                  在存储目录初始化 Git 仓库，之后每次写操作自动提交；配置远端后还会推送。
+                  在存储目录初始化 Git 仓库；之后填写并验证远端，才能启用自动同步。
                 </p>
                 <Button
                   variant="primary"
@@ -667,6 +784,14 @@ export function BackupsPanel() {
                   </div>
                 </div>
 
+                {settings?.git.enabled && !git.remoteVerified && (
+                  <div className="px-4 pt-3">
+                    <Notice tone="warning">
+                      远端地址已变更或尚未验证，自动同步已暂停；请重新验证远端后再启用。
+                    </Notice>
+                  </div>
+                )}
+
                 {git.lastError && git.conflictFiles.length === 0 && (
                   <div className="px-4 pt-3">
                     <Notice tone="danger">{git.lastError}</Notice>
@@ -707,14 +832,6 @@ export function BackupsPanel() {
 
                 <div className="space-y-3 border-b border-border px-4 py-3">
                   <div className="flex flex-wrap items-center gap-4">
-                    <Checkbox
-                      id="git-enabled"
-                      label="启用自动同步"
-                      checked={settings?.git.enabled ?? false}
-                      onChange={(event) =>
-                        saveGitToggle({ enabled: event.target.checked })
-                      }
-                    />
                     <Checkbox
                       id="git-auto-commit"
                       label="写操作后自动提交"
@@ -757,9 +874,17 @@ export function BackupsPanel() {
                     >
                       保存远端
                     </Button>
+                    <Button
+                      className="mb-0.5"
+                      loading={busy === "git-verify"}
+                      disabled={!remoteInput.trim() || !git.initialized}
+                      onClick={() => void verifyRemote()}
+                    >
+                      验证远端
+                    </Button>
                   </div>
                   <p className="text-caption text-fg-3">
-                    凭据交给系统 Git（credential helper / SSH agent），应用不会保存 token。
+                    凭据交给系统 Git（credential helper / SSH agent），应用不会保存 token；验证远端后才能在上方启用 Git 备份。
                   </p>
                   <div className="flex flex-wrap gap-2">
                     <Button
@@ -904,12 +1029,9 @@ export function BackupsPanel() {
                       />
                     </Field>
                   </div>
-                  <Checkbox
-                    id="cloud-auto-upload"
-                    label="自动快照后自动上传"
-                    checked={cloudAutoUpload}
-                    onChange={(event) => setCloudAutoUpload(event.target.checked)}
-                  />
+                  <p className="text-caption text-fg-3">
+                    在页面顶部选择「WebDAV 云备份」后，每次自动快照都会上传；与 Git 备份互斥。
+                  </p>
                   <div className="flex flex-wrap gap-2">
                     <Button
                       onClick={() => void testCloud()}

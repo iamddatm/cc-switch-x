@@ -50,7 +50,7 @@ impl Default for BackupSettings {
     }
 }
 
-/// Git 备份：enabled 只在 git init 成功后置真；关闭只停自动同步，不删仓库。
+/// Git 备份：enabled 仅在远端验证通过后由用户开启；关闭只停自动同步，不删仓库。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitBackupSettings {
@@ -79,7 +79,7 @@ impl Default for GitBackupSettings {
     }
 }
 
-/// WebDAV 云备份：远端只保留一份最新状态包；密码单独放在 secrets.local.json。
+/// WebDAV 云备份：远端只保留一份最新状态包；与 Git 自动同步互斥，密码单独放在 secrets.local.json。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudBackupSettings {

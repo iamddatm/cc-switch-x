@@ -30,6 +30,7 @@ vi.mock("../lib/api", () => ({
     getGitStatus: vi.fn(),
     gitInit: vi.fn(),
     gitSetRemote: vi.fn(),
+    gitVerifyRemote: vi.fn(),
     gitCommitNow: vi.fn(),
     gitPushNow: vi.fn(),
     gitPullNow: vi.fn(),
@@ -63,6 +64,7 @@ const healthyGit: GitStatus = {
   available: true,
   initialized: true,
   enabled: true,
+  remoteVerified: true,
   branch: "main",
   remote: "git@github.com:me/assets.git",
   dirty: 1,
@@ -83,7 +85,7 @@ const commit = {
 };
 
 const cloudView: CloudSettingsView = {
-  autoUpload: true,
+  autoUpload: false,
   baseUrl: "https://dav.example.com/dav",
   username: "me",
   remoteDir: "ccswitchx",
@@ -93,7 +95,7 @@ const cloudView: CloudSettingsView = {
 const cloudStatus: CloudStatus = {
   configured: true,
   hasPassword: true,
-  autoUpload: true,
+  autoUpload: false,
   remote: {
     exists: true,
     sizeBytes: 2048,
@@ -154,6 +156,7 @@ function mockBase(git: GitStatus = healthyGit) {
   vi.mocked(api.revealBackupLocation).mockResolvedValue(undefined);
   vi.mocked(api.gitInit).mockResolvedValue({ ...healthyGit, initialized: true });
   vi.mocked(api.gitSetRemote).mockResolvedValue(healthyGit);
+  vi.mocked(api.gitVerifyRemote).mockResolvedValue(healthyGit);
   vi.mocked(api.gitCommitNow).mockResolvedValue(healthyGit);
   vi.mocked(api.gitPushNow).mockResolvedValue(healthyGit);
   vi.mocked(api.gitPullNow).mockResolvedValue({ kind: "upToDate" });
@@ -239,6 +242,63 @@ test("saves retention policy", async () => {
   );
 });
 
+test("remote backup method is mutually exclusive", async () => {
+  render(<BackupsPanel />);
+  await screen.findByText(snapshot.name);
+
+  fireEvent.click(screen.getByRole("button", { name: "不启用" }));
+  await waitFor(() =>
+    expect(api.setBackupSettings).toHaveBeenCalledWith({
+      ...settings,
+      git: { ...settings.git, enabled: false },
+    }),
+  );
+});
+
+test("enables webdav through the method selector", async () => {
+  render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  fireEvent.click(screen.getByRole("button", { name: "WebDAV 云备份" }));
+  await waitFor(() =>
+    expect(api.setCloudSettings).toHaveBeenCalledWith({
+      baseUrl: cloudView.baseUrl,
+      username: cloudView.username,
+      password: null,
+      remoteDir: cloudView.remoteDir,
+      autoUpload: true,
+    }),
+  );
+});
+
+test("disables git backup until the remote is verified", async () => {
+  vi.mocked(api.getGitStatus).mockResolvedValue({
+    ...healthyGit,
+    remoteVerified: false,
+  });
+  render(<BackupsPanel />);
+  expect(await screen.findByText("远端未验证")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Git 备份" })).toBeDisabled();
+});
+
+test("verifies the filled remote before enabling git backup", async () => {
+  vi.mocked(api.getGitStatus).mockResolvedValue({
+    ...healthyGit,
+    remoteVerified: false,
+  });
+  render(<BackupsPanel />);
+  await screen.findByText("远端未验证");
+  fireEvent.click(screen.getByRole("button", { name: "验证远端" }));
+  await waitFor(() =>
+    expect(api.gitVerifyRemote).toHaveBeenCalledWith(
+      "git@github.com:me/assets.git",
+      "main",
+    ),
+  );
+  expect(
+    await screen.findByText("远端验证通过，可以启用 Git 备份"),
+  ).toBeInTheDocument();
+});
+
 test("disables git actions when git is unavailable", async () => {
   vi.mocked(api.getGitStatus).mockResolvedValue({
     ...healthyGit,
@@ -291,7 +351,7 @@ test("saves cloud settings without overwriting the saved password", async () => 
       username: "me",
       password: null,
       remoteDir: "ccswitchx",
-      autoUpload: true,
+      autoUpload: false,
     }),
   );
 });
@@ -338,4 +398,5 @@ test("disables cloud actions without config", async () => {
   expect(await screen.findByText("未配置")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "立即上传" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "从云端恢复" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "WebDAV 云备份" })).toBeDisabled();
 });
