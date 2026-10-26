@@ -5,6 +5,7 @@ pub mod backup;
 pub mod drift;
 pub mod git_sync;
 pub mod import;
+pub mod project_scan;
 pub mod scan;
 pub mod sessions;
 pub mod settings;
