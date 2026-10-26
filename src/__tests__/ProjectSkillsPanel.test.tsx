@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
+import { open } from "@tauri-apps/plugin-dialog";
 import { ProjectSkillsPanel } from "../panels/ProjectSkillsPanel";
 import { api } from "../lib/api";
 import type { ProjectSkillView, ProjectSkillsView, ProjectView } from "../types";
@@ -17,7 +18,23 @@ vi.mock("../lib/api", () => ({
     adoptProjectSkill: vi.fn(),
     readProjectSkillBody: vi.fn(),
     writeProjectSkillBody: vi.fn(),
+    installProjectSkill: vi.fn(),
+    importProjectSkillDir: vi.fn(),
+    createProjectSkill: vi.fn(),
+    checkProjectSkillUpdates: vi.fn(),
+    updateProjectSkills: vi.fn(),
+    previewSkillSource: vi.fn(),
+    writeAsset: vi.fn(),
+    getSkillRepos: vi.fn(),
+    discoverSkills: vi.fn(),
+    listSkillsShTrending: vi.fn(),
+    searchSkillsSh: vi.fn(),
+    installDiscoveredProjectSkill: vi.fn(),
   },
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn(),
 }));
 
 function projectView(overrides: Partial<ProjectView> = {}): ProjectView {
@@ -101,7 +118,62 @@ beforeEach(() => {
     warnings: [],
   });
   vi.mocked(api.setProjectAutoSync).mockResolvedValue(projectView());
+  vi.mocked(api.getSkillRepos).mockResolvedValue([]);
+  vi.mocked(api.discoverSkills).mockResolvedValue({ skills: [], failures: [], repos: [] });
+  vi.mocked(api.checkProjectSkillUpdates).mockResolvedValue({
+    checkedAt: 0,
+    updates: [],
+    upToDate: [],
+    skipped: [],
+    repoFailures: [],
+    skillFailures: [],
+  });
+  vi.mocked(open).mockResolvedValue(null);
 });
+
+/** 三行不同状态的清单，用来证明搜索与筛选真的在收窄列表。 */
+function viewWithRows(): ProjectSkillsView {
+  const base = viewWithOneSkill();
+  const row = (
+    id: string,
+    description: string | null,
+    states: Record<string, ProjectSkillView["dirs"][string]["state"]>,
+    overrides: Partial<ProjectSkillView> = {},
+  ): ProjectSkillView => ({
+    ...base.skills[0],
+    id,
+    name: id,
+    description,
+    targets: Object.keys(states),
+    dirs: Object.fromEntries(
+      Object.entries(states).map(([key, state]) => [
+        key,
+        {
+          ...(key === "claude" ? CLAUDE_DIR : QODER_DIR),
+          agents: [key],
+          state,
+        },
+      ]),
+    ),
+    ...overrides,
+  });
+  return {
+    ...base,
+    skills: [
+      row("alpha", "代码审查", { claude: "present" }),
+      row("beta", "部署清单", { claude: "present", qoder: "edited" }),
+      row(
+        "gamma",
+        null,
+        { qoder: "absent" },
+        {
+          source: { kind: "github", repo: "acme/skills", branch: "main", subpath: "gamma" },
+          check: { updateAvailable: true, lastCheckedAt: 1, updatable: true },
+        },
+      ),
+    ],
+  };
+}
 
 test("renders project skill matrix with per-directory state", async () => {
   vi.mocked(api.listProjectSkills).mockResolvedValue({
@@ -158,8 +230,9 @@ test("renders project skill matrix with per-directory state", async () => {
 
   render(<ProjectSkillsPanel project={projectView()} />);
   expect(await screen.findByText("code-review")).toBeInTheDocument();
-  expect(screen.getByText("已同步")).toBeInTheDocument();
-  expect(screen.getByText("无")).toBeInTheDocument();
+  // 状态文字要看的是格子里那份，筛选下拉里也有同名选项。
+  expect(screen.getByRole("checkbox", { name: "同步到 Claude Code" })).toHaveTextContent("已同步");
+  expect(screen.getByRole("checkbox", { name: "同步到 Qoder" })).toHaveTextContent("无");
 });
 
 test("shows empty state when project has no skills", async () => {
@@ -479,4 +552,164 @@ test("真源丢失时只能显式确认「删除全部副本」", async () => {
       { skillId: "a", dir: "", action: "purge" },
     ]),
   );
+});
+
+test("搜索、渲染目录与部署状态筛选收窄列表并给出计数", async () => {
+  vi.mocked(api.listProjectSkills).mockResolvedValue(viewWithRows());
+  render(<ProjectSkillsPanel project={projectView()} />);
+  await screen.findByText("alpha");
+  expect(screen.getByText("3 / 3 个 Skill")).toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText("搜索 Skill"), { target: { value: "部署" } });
+  expect(screen.getByText("1 / 3 个 Skill")).toBeInTheDocument();
+  expect(screen.getByText("beta")).toBeInTheDocument();
+  expect(screen.queryByText("alpha")).not.toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText("搜索 Skill"), { target: { value: "" } });
+  fireEvent.change(screen.getByLabelText("按部署状态筛选"), { target: { value: "edited" } });
+  expect(screen.getByText("1 / 3 个 Skill")).toBeInTheDocument();
+  expect(screen.queryByText("alpha")).not.toBeInTheDocument();
+  expect(screen.queryByText("gamma")).not.toBeInTheDocument();
+
+  // 目录筛选改的是「看哪个目录的状态」：beta 被改过的那格在 qoder，换到 claude 就不再命中。
+  fireEvent.change(screen.getByLabelText("按渲染目录筛选"), { target: { value: "claude" } });
+  expect(screen.getByText("0 / 3 个 Skill")).toBeInTheDocument();
+  // 同一目录上 alpha 与 beta 都是已同步，说明目录筛选本身不额外删行。
+  fireEvent.change(screen.getByLabelText("按部署状态筛选"), { target: { value: "present" } });
+  expect(screen.getByText("2 / 3 个 Skill")).toBeInTheDocument();
+});
+
+test("批量渲染把选中的 Skill 铺到目录并立即同步", async () => {
+  vi.mocked(api.listProjectSkills).mockResolvedValue(viewWithRows());
+  render(<ProjectSkillsPanel project={projectView()} />);
+  await screen.findByText("alpha");
+
+  fireEvent.click(screen.getByRole("checkbox", { name: "全选当前列表" }));
+  expect(screen.getByText("已选 3 个")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "批量渲染到" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Qoder" }));
+
+  await waitFor(() =>
+    expect(api.setProjectSkillTargets).toHaveBeenCalledWith("p1", "alpha", ["claude", "qoder"]),
+  );
+  expect(api.setProjectSkillTargets).toHaveBeenCalledWith("p1", "beta", ["claude", "qoder"]);
+  expect(api.setProjectSkillTargets).toHaveBeenCalledWith("p1", "gamma", ["qoder"]);
+  await waitFor(() => expect(api.syncProjectSkills).toHaveBeenCalledWith("p1"));
+});
+
+test("安装抽屉装进项目真源，且不带任何渲染目标", async () => {
+  vi.mocked(api.previewSkillSource).mockResolvedValue({
+    kind: "local",
+    stagingId: null,
+    warnings: [],
+    candidates: [{ relativePath: ".", name: "Demo", suggestedId: "demo", exists: false }],
+  });
+  vi.mocked(api.installProjectSkill).mockResolvedValue({
+    installed: [{ id: "demo", name: ".", status: "installed", warnings: [] }],
+    render: { outcomes: [], conflicts: [], warnings: [] },
+    warnings: [],
+  });
+
+  render(<ProjectSkillsPanel project={projectView()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "添加 Skill" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "从来源安装…" }));
+  // 去向说明必须是项目真源，不是中央库。
+  expect(await screen.findByText(/安装只写入项目真源/)).toBeInTheDocument();
+
+  vi.mocked(open).mockResolvedValue("D:/skills");
+  fireEvent.click(screen.getByRole("button", { name: "本地目录" }));
+  fireEvent.click(screen.getByRole("button", { name: "选择目录" }));
+  await waitFor(() => expect(screen.getByLabelText("本地目录")).toHaveValue("D:/skills"));
+  fireEvent.click(screen.getByRole("button", { name: "扫描来源" }));
+  await screen.findByText("Demo");
+  fireEvent.click(screen.getByRole("button", { name: "安装选中 (1)" }));
+
+  await waitFor(() =>
+    expect(api.installProjectSkill).toHaveBeenCalledWith(
+      "p1",
+      { kind: "directory", path: "D:/skills" },
+      null,
+      [{ relativePath: ".", id: "demo" }],
+      "skip",
+      [],
+    ),
+  );
+});
+
+test("详情与编辑读写项目真源，不碰中央库", async () => {
+  vi.mocked(api.readProjectSkillBody).mockResolvedValue("---\nname: a\ndescription: 演示\n---\n\n# 正文\n");
+  vi.mocked(api.writeProjectSkillBody).mockResolvedValue({
+    outcomes: [],
+    conflicts: [],
+    warnings: [],
+  });
+
+  render(<ProjectSkillsPanel project={projectView()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "查看 a" }));
+  expect(await screen.findByText("# 正文")).toBeInTheDocument();
+  // 项目专属的那一段：真源路径 + 已经渲染到哪些目录。
+  expect(screen.getByText(/\.ccswitchx\/skills\/a/)).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+  fireEvent.change(screen.getByLabelText(/正文/), { target: { value: "# 新正文\n" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  await waitFor(() =>
+    expect(api.writeProjectSkillBody).toHaveBeenCalledWith(
+      "p1",
+      "a",
+      expect.stringContaining("# 新正文"),
+    ),
+  );
+  expect(api.writeAsset).not.toHaveBeenCalled();
+});
+
+test("项目里没有 cc-switch 导入这条来源", async () => {
+  vi.mocked(api.listProjectSkills).mockResolvedValue(viewWithRows());
+  render(<ProjectSkillsPanel project={projectView()} />);
+  await screen.findByText("alpha");
+
+  fireEvent.click(screen.getByRole("button", { name: "添加 Skill" }));
+  expect(await screen.findByRole("menuitem", { name: "从文件夹导入" })).toBeInTheDocument();
+  expect(screen.queryByRole("menuitem", { name: /cc-switch/i })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "项目 Skills 的更多操作" }));
+  expect(await screen.findByRole("menuitem", { name: "打开文件夹" })).toBeInTheDocument();
+  expect(screen.queryByRole("menuitem", { name: /cc-switch/i })).not.toBeInTheDocument();
+
+  expect(screen.getByLabelText("按来源筛选")).not.toHaveTextContent(/cc-switch/);
+});
+
+test("检查更新与更新走项目命令：只换真源，渲染留给同步", async () => {
+  vi.mocked(api.listProjectSkills).mockResolvedValue(viewWithRows());
+  vi.mocked(api.checkProjectSkillUpdates).mockResolvedValue({
+    checkedAt: 1,
+    updates: [{ id: "gamma", name: "gamma", remoteHash: "h2", missingLocal: false }],
+    upToDate: [],
+    skipped: [],
+    repoFailures: [],
+    skillFailures: [],
+  });
+  vi.mocked(api.updateProjectSkills).mockResolvedValue({
+    outcomes: [{ id: "gamma", name: "gamma", status: "updated", warnings: [] }],
+  });
+
+  render(<ProjectSkillsPanel project={projectView()} />);
+  await screen.findByText("alpha");
+  // 本机检查状态折进行数据：gamma 带「可更新」徽标。
+  expect(screen.getByText("可更新")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "检查更新" }));
+  expect(await screen.findByText(/发现 1 个可更新/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "全部更新（1 个）" }));
+  fireEvent.click(await screen.findByRole("button", { name: "更新 1 个" }));
+  await waitFor(() => expect(api.checkProjectSkillUpdates).toHaveBeenCalledWith("p1", undefined));
+  await waitFor(() => expect(api.updateProjectSkills).toHaveBeenCalledWith("p1", ["gamma"]));
+  expect(await screen.findByText(/只换了项目真源/)).toBeInTheDocument();
+});
+
+test("发现 tab 复用同一个市场面板，落点选择器给的是项目目录", async () => {
+  render(<ProjectSkillsPanel project={projectView()} />);
+  fireEvent.click(await screen.findByRole("tab", { name: /发现/ }));
+  // 落点措辞来自作用域适配器：项目说「目录」，全局说「Agent」。
+  expect(await screen.findByText("安装到：全部目录（2）")).toBeInTheDocument();
 });

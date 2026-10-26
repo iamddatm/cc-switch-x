@@ -18,6 +18,7 @@ import {
   selectedRepoKeys as selectedRepos,
   toggled,
 } from "../components/skills/skillFilters";
+import { storeScope } from "../components/skills/skillScope";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Checkbox } from "../components/ui/Checkbox";
@@ -87,6 +88,7 @@ export function SkillsPanel() {
   } = skillCheck;
 
   const agentsForType = enabledAgents.filter((agent) => supported(agent, "skill"));
+  const scope = useMemo(() => storeScope(agentsForType), [agentsForType]);
   const refreshAll = () => {
     void refresh();
     void refreshAgents();
@@ -170,7 +172,7 @@ export function SkillsPanel() {
     setLoadingEdit(true);
     setActionError(null);
     try {
-      return await api.readAsset("skill", item.id);
+      return await scope.readBody(item.id);
     } catch (e) {
       setActionError(String(e));
       return null;
@@ -206,13 +208,13 @@ export function SkillsPanel() {
   const importDirectory = async () => {
     setActionError(null);
     try {
-      const selected = await open({
+      const picked = await open({
         directory: true,
         multiple: false,
         title: "选择包含 SKILL.md 的目录",
       });
-      if (typeof selected !== "string") return;
-      await api.importSkillDir(selected);
+      if (typeof picked !== "string") return;
+      await scope.importDir(picked);
       refreshAll();
     } catch (e) {
       setActionError(String(e));
@@ -573,10 +575,15 @@ export function SkillsPanel() {
           <div className="mb-3">
             <SkillBatchBar
               count={selectedItems.length}
-              agents={agentsForType}
-              enabledAgents={enabledAgentsForSelected}
+              targets={scope.deployTargets}
+              enabledTargets={enabledAgentsForSelected.map((agent) => ({
+                key: agent.id,
+                label: agent.displayName,
+              }))}
               updatableCount={updatableSelected}
               busy={batchBusy || checking || updating}
+              wording={scope.wording}
+              noneEnabledLabel="没有已启用的 Agent"
               onCheck={() => void checkUpdates(selectedIds)}
               onUpdate={() =>
                 askUpdate(
@@ -706,7 +713,19 @@ export function SkillsPanel() {
         <div className={view === "discover" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
           <SkillDiscoveryPanel
             installedItems={items}
-            agents={agentsForType}
+            scope={scope}
+            targets={{
+              options: scope.deployTargets,
+              label: (selected) =>
+                scope.deployTargets.length === 0
+                  ? "未启用 Agent"
+                  : selected.length === scope.deployTargets.length
+                    ? `全部 Agent（${scope.deployTargets.length}）`
+                    : selected.length === 0
+                      ? "未选择 Agent"
+                      : selected.map((target) => target.label).join("、"),
+              emptyHint: "没有启用支持 Skills 的 Agent。",
+            }}
             onInstalled={refreshAll}
             onShowInstalled={() => setView("installed")}
           />
@@ -727,6 +746,7 @@ export function SkillsPanel() {
           mode={editing.mode}
           id={editing.id}
           initial={editing.form}
+          scope={scope}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
@@ -737,6 +757,7 @@ export function SkillsPanel() {
 
       {installing && (
         <SkillInstallSheet
+          scope={scope}
           onClose={() => setInstalling(false)}
           onInstalled={refreshAll}
         />

@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import { open } from "@tauri-apps/plugin-dialog";
 import { SkillInstallSheet } from "../components/skills/SkillInstallSheet";
+import { storeScope } from "../components/skills/skillScope";
 import { api } from "../lib/api";
 
 vi.mock("../lib/api", () => ({
@@ -49,7 +50,7 @@ test("previews a local directory and installs all selected candidates", async ()
   });
   const onInstalled = vi.fn();
 
-  render(<SkillInstallSheet onClose={vi.fn()} onInstalled={onInstalled} />);
+  render(<SkillInstallSheet scope={storeScope()} onClose={vi.fn()} onInstalled={onInstalled} />);
   fireEvent.click(screen.getByRole("button", { name: "本地目录" }));
   fireEvent.click(screen.getByRole("button", { name: "选择目录" }));
   await waitFor(() => expect(screen.getByLabelText("本地目录")).toHaveValue("D:/skills"));

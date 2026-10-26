@@ -1,4 +1,5 @@
 import { Pencil } from "lucide-react";
+import type { ReactNode } from "react";
 import type { SkillForm } from "../../lib/canonical";
 import { formatRelativeTime } from "../../lib/format";
 import type { AssetSummary } from "../../types";
@@ -13,11 +14,14 @@ export function SkillDetailSheet({
   form,
   onEdit,
   onClose,
+  extra,
 }: {
   item: AssetSummary;
   form: SkillForm;
   onEdit: () => void;
   onClose: () => void;
+  /** 作用域专属的信息（例如项目里的渲染目录），放在来源行下面。 */
+  extra?: ReactNode;
 }) {
   const checkedAt = item.origin?.lastCheckedAt
     ? `检查于 ${formatRelativeTime(item.origin.lastCheckedAt)}`
@@ -45,6 +49,8 @@ export function SkillDetailSheet({
           {updatedAt && <span>{updatedAt}</span>}
           {checkedAt && <span>{checkedAt}</span>}
         </div>
+
+        {extra}
 
         {form.description && (
           <p className="text-body text-fg-2">{form.description}</p>

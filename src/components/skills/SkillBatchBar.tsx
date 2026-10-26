@@ -1,18 +1,23 @@
-import type { AgentStatus } from "../../types";
+import type { SkillDeployTarget } from "./skillScope";
 import { Button } from "../ui/Button";
 import { Menu } from "../ui/Menu";
 
 export interface SkillBatchBarProps {
   count: number;
-  agents: AgentStatus[];
-  /** 选中项里至少给一个 agent 启用了，才提供停用入口。 */
-  enabledAgents: AgentStatus[];
+  /** 落点：全局是已实测的 agent，项目是已实测的渲染目录。 */
+  targets: SkillDeployTarget[];
+  /** 选中项里至少铺到一个落点上的，才提供撤回入口。 */
+  enabledTargets: SkillDeployTarget[];
   updatableCount: number;
   busy?: boolean;
+  /** 落点动作的措辞由作用域给，组件自己不判断是全局还是项目。 */
+  wording: { targets: string; deployed: string; noneDeployed: string };
+  /** 没有可撤回的落点时批量停用菜单上的说明。 */
+  noneEnabledLabel: string;
   onCheck: () => void;
   onUpdate: () => void;
-  onEnable: (agentId: string) => void;
-  onDisable: (agentId: string) => void;
+  onEnable: (targetKey: string) => void;
+  onDisable: (targetKey: string) => void;
   onDelete: () => void;
   onClear: () => void;
 }
@@ -20,10 +25,12 @@ export interface SkillBatchBarProps {
 /** 多选后出现的批量操作条；只操作当前可见列表里被选中的 Skill。 */
 export function SkillBatchBar({
   count,
-  agents,
-  enabledAgents,
+  targets,
+  enabledTargets,
   updatableCount,
   busy = false,
+  wording,
+  noneEnabledLabel,
   onCheck,
   onUpdate,
   onEnable,
@@ -46,13 +53,13 @@ export function SkillBatchBar({
         更新
       </Button>
       <Menu
-        label="批量启用给"
-        trigger="启用给"
+        label={`批量${wording.targets}`}
+        trigger={wording.targets}
         buttonClassName="h-7 w-auto whitespace-nowrap px-2.5 text-caption font-medium"
-        items={agents.map((agent) => ({
-          label: agent.displayName,
+        items={targets.map((target) => ({
+          label: target.label,
           disabled: busy,
-          onSelect: () => onEnable(agent.id),
+          onSelect: () => onEnable(target.key),
         }))}
       />
       <Menu
@@ -60,12 +67,12 @@ export function SkillBatchBar({
         trigger="停用"
         buttonClassName="h-7 w-auto whitespace-nowrap px-2.5 text-caption font-medium"
         items={
-          enabledAgents.length === 0
-            ? [{ label: "没有已启用的 Agent", disabled: true, onSelect: () => {} }]
-            : enabledAgents.map((agent) => ({
-                label: agent.displayName,
+          enabledTargets.length === 0
+            ? [{ label: noneEnabledLabel, disabled: true, onSelect: () => {} }]
+            : enabledTargets.map((target) => ({
+                label: target.label,
                 disabled: busy,
-                onSelect: () => onDisable(agent.id),
+                onSelect: () => onDisable(target.key),
               }))
         }
       />

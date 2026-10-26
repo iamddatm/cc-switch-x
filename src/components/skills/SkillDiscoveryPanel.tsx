@@ -2,13 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, RefreshCw, Sparkles } from "lucide-react";
 import { api } from "../../lib/api";
 import type {
-  AgentStatus,
   AssetSummary,
   DiscoverableSkill,
   SkillDiscoveryReport,
   SkillRepo,
   SkillsShSkill,
 } from "../../types";
+import type { SkillDeployTarget, SkillScope } from "./skillScope";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { Checkbox } from "../ui/Checkbox";
@@ -44,12 +44,20 @@ function mergeShPage(
 
 export function SkillDiscoveryPanel({
   installedItems,
-  agents,
+  scope,
+  targets,
   onInstalled,
   onShowInstalled,
 }: {
   installedItems: AssetSummary[];
-  agents: AgentStatus[];
+  /** 装到哪、怎么铺开、落点选择器怎么措辞，都由作用域适配器给；组件不判断全局还是项目。 */
+  scope: SkillScope;
+  targets: {
+    options: SkillDeployTarget[];
+    /** 触发器上的已选摘要。 */
+    label: (selected: SkillDeployTarget[]) => string;
+    emptyHint: string;
+  };
   onInstalled: () => void;
   onShowInstalled: () => void;
 }) {
@@ -155,15 +163,8 @@ export function SkillDiscoveryPanel({
       ),
     [enabledRepos, deselectedRepos],
   );
-  const targetAgents = agents.filter((agent) => !deselectedTargets.has(agent.id));
-  const targetLabel =
-    agents.length === 0
-      ? "未启用 Agent"
-      : targetAgents.length === agents.length
-        ? `全部 Agent（${agents.length}）`
-        : targetAgents.length === 0
-          ? "未选择 Agent"
-          : targetAgents.map((agent) => agent.displayName).join("、");
+  const chosenTargets = targets.options.filter((target) => !deselectedTargets.has(target.key));
+  const targetLabel = targets.label(chosenTargets);
 
   // 结果列表每行都要判断是否已安装；预先按「同名 + 仓库」和「同名 + 目录」建索引，
   // 避免每行线性扫描 installedItems。
@@ -258,26 +259,20 @@ export function SkillDiscoveryPanel({
       return next;
     });
     try {
-      const outcome = await api.installDiscoveredSkill(
-        { ...input, name: skill.name },
-        "skip",
-      );
+      const outcome = await scope.installDiscovered({ ...input, name: skill.name }, "skip");
       if (outcome.status === "failed") {
         throw new Error(outcome.error ?? "安装失败");
       }
-      const failures: string[] = [];
-      for (const agent of targetAgents) {
-        const applied = await api.setSkillsEnabled([outcome.id], agent.id, true);
-        failures.push(
-          ...applied.failed.map((item) => `${agent.displayName}：${item.error}`),
-        );
-      }
+      const failures = await scope.deploy(
+        outcome.id,
+        chosenTargets.map((target) => target.key),
+      );
       markInstalled();
       onInstalled();
       const targetText =
-        targetAgents.length > 0
-          ? `，已启用给 ${targetAgents.map((agent) => agent.displayName).join("、")}`
-          : "，未启用给任何 Agent";
+        chosenTargets.length > 0
+          ? `，${scope.wording.deployed} ${chosenTargets.map((target) => target.label).join("、")}`
+          : `，${scope.wording.noneDeployed}`;
       setMessage(
         `已安装 ${skill.name}${outcome.status === "overwritten" ? "（覆盖旧版本）" : ""}${targetText}。`,
       );
@@ -669,17 +664,15 @@ export function SkillDiscoveryPanel({
         </label>
         <div className="flex-1" />
         <CheckPopover label={`安装到：${targetLabel}`}>
-          {agents.length === 0 ? (
-            <p className="px-1.5 py-1 text-caption text-fg-3">
-              没有启用支持 Skills 的 Agent。
-            </p>
+          {targets.options.length === 0 ? (
+            <p className="px-1.5 py-1 text-caption text-fg-3">{targets.emptyHint}</p>
           ) : (
-            agents.map((agent) => (
+            targets.options.map((target) => (
               <CheckOption
-                key={agent.id}
-                label={agent.displayName}
-                checked={!deselectedTargets.has(agent.id)}
-                onChange={(checked) => toggleTarget(agent.id, checked)}
+                key={target.key}
+                label={target.label}
+                checked={!deselectedTargets.has(target.key)}
+                onChange={(checked) => toggleTarget(target.key, checked)}
               />
             ))
           )}

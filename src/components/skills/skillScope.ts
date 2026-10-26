@@ -30,6 +30,19 @@ export interface SkillScope {
   label: string;
   /** 覆盖真源之外还能一步铺开的落点：全局是 agent，项目是渲染目录。 */
   deployTargets: SkillDeployTarget[];
+  /** 落点动作的措辞。组件不判断作用域，文案由这里给，两个面板才对得上。 */
+  wording: {
+    /** 批量条与市场的落点选择器标题，例如「启用给」「渲染到」。 */
+    targets: string;
+    /** 成功提示里「已启用给 X」/「已渲染到 X」。 */
+    deployed: string;
+    /** 一个落点都没选时的收尾话术。 */
+    noneDeployed: string;
+  };
+  /** 安装抽屉末尾的去向说明：装完会不会自动铺开，两个作用域不一样。 */
+  installHint: string;
+  /** 预览候选已在目的端存在时的徽标文案。 */
+  existsLabel: string;
   previewSource: (input: SkillSourceInput) => Promise<SkillSourcePreview>;
   installSource: (
     input: SkillSourceInput,
@@ -51,20 +64,34 @@ export interface SkillScope {
   updateSkills: (ids: string[]) => Promise<SkillUpdateReport>;
 }
 
-export function storeScope(agents: { id: string; displayName: string }[]): SkillScope {
+export function storeScope(
+  agents: { id: string; displayName: string }[] = [],
+): SkillScope {
+  const targets: SkillDeployTarget[] = agents.map((agent) => ({
+    key: agent.id,
+    label: agent.displayName,
+  }));
   return {
     kind: "store",
     label: "中央库真源",
-    deployTargets: agents.map((agent) => ({ key: agent.id, label: agent.displayName })),
+    deployTargets: targets,
+    wording: {
+      targets: "启用给",
+      deployed: "已启用给",
+      noneDeployed: "未启用给任何 Agent",
+    },
+    installHint: "安装只写入中央库真源，不会自动启用给 agent。",
+    existsLabel: "真源已存在",
     previewSource: (input) => api.previewSkillSource(input),
     installSource: async (input, stagingId, selections, policy) =>
       (await api.installSkill(input, stagingId, selections, policy)).outcomes,
     installDiscovered: (input, policy) => api.installDiscoveredSkill(input, policy),
-    deploy: async (id, targets) => {
+    deploy: async (id, targetsToEnable) => {
       const failures: string[] = [];
-      for (const agentId of targets) {
-        const applied = await api.setSkillsEnabled([id], agentId, true);
-        failures.push(...applied.failed.map((item) => `${agentId}：${item.error}`));
+      for (const key of targetsToEnable) {
+        const label = targets.find((target) => target.key === key)?.label ?? key;
+        const applied = await api.setSkillsEnabled([id], key, true);
+        failures.push(...applied.failed.map((item) => `${label}：${item.error}`));
       }
       return failures;
     },
@@ -103,6 +130,14 @@ export function projectScope(
     kind: "project",
     label: "项目真源",
     deployTargets: dirs,
+    wording: {
+      targets: "渲染到",
+      deployed: "已渲染到",
+      noneDeployed: "未渲染到任何目录",
+    },
+    installHint:
+      "安装只写入项目真源 .ccswitchx/skills/，要铺开还得勾选渲染目录后同步。",
+    existsLabel: "项目真源里已存在",
     previewSource,
     // 安装只落真源，不带渲染目标：往仓库的 agent 目录里写文件必须由「勾选 + 同步」明确发生。
     installSource: async (input, stagingId, selections, policy) =>

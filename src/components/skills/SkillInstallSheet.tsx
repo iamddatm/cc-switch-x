@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FileArchive, FolderOpen, GitBranch } from "lucide-react";
-import { api } from "../../lib/api";
+import type { SkillScope } from "./skillScope";
 import type {
   ConflictPolicy,
   SkillCandidate,
@@ -29,9 +29,11 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 export function SkillInstallSheet({
+  scope,
   onClose,
   onInstalled,
 }: {
+  scope: SkillScope;
   onClose: () => void;
   onInstalled: () => void;
 }) {
@@ -106,7 +108,7 @@ export function SkillInstallSheet({
     setReport(null);
     setPreview(null);
     try {
-      const result = await api.previewSkillSource(input);
+      const result = await scope.previewSource(input);
       setPreview(result);
       setChosen(new Set(result.candidates.map((candidate) => candidate.relativePath)));
     } catch (e) {
@@ -132,13 +134,13 @@ export function SkillInstallSheet({
     setBusy("install");
     setError(null);
     try {
-      const result = await api.installSkill(
+      const outcomes = await scope.installSource(
         input,
         preview.stagingId ?? null,
         selections,
         policy,
       );
-      setReport(result);
+      setReport({ outcomes });
       setPreview(null);
       onInstalled();
     } catch (e) {
@@ -249,7 +251,7 @@ export function SkillInstallSheet({
 
         <div className="flex items-center gap-2 text-caption text-fg-3">
           {kind === "github" ? <GitBranch size={14} aria-hidden /> : null}
-          只支持公共仓库；下载走系统代理，单仓库上限 512 MiB。安装只写入真源，不会自动启用给 agent。
+          只支持公共仓库；下载走系统代理，单仓库上限 512 MiB。{scope.installHint}
         </div>
 
         {error && <Notice tone="danger">{error}</Notice>}
@@ -293,7 +295,7 @@ export function SkillInstallSheet({
                       <span className="truncate text-body font-medium text-fg-1">
                         {candidate.name}
                       </span>
-                      {candidate.exists && <Badge tone="warning">真源已存在</Badge>}
+                      {candidate.exists && <Badge tone="warning">{scope.existsLabel}</Badge>}
                     </div>
                     <p className="truncate text-caption text-fg-3" title={candidate.description ?? undefined}>
                       {candidate.relativePath} · 将安装为 <span className="font-mono">{candidate.suggestedId}</span>

@@ -4,20 +4,29 @@ import { Field } from "../ui/Field";
 import { Input, Textarea } from "../ui/Input";
 import { Notice } from "../ui/Notice";
 import { Sheet } from "../ui/Sheet";
-import { api } from "../../lib/api";
 import { renderSkill, type SkillForm } from "../../lib/canonical";
+import type { SkillScope } from "./skillScope";
 
 export interface SkillFormSheetProps {
   mode: "create" | "edit";
   id: string;
   initial: SkillForm;
+  /** 写到哪一份真源：中央库还是项目。 */
+  scope: SkillScope;
   onClose: () => void;
   onSaved: () => void;
 }
 
 const ID_PATTERN = /^[A-Za-z0-9._-]+$/;
 
-export function SkillFormSheet({ mode, id: initialId, initial, onClose, onSaved }: SkillFormSheetProps) {
+export function SkillFormSheet({
+  mode,
+  id: initialId,
+  initial,
+  scope,
+  onClose,
+  onSaved,
+}: SkillFormSheetProps) {
   const [id, setId] = useState(initialId);
   const [form, setForm] = useState<SkillForm>(initial);
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +48,7 @@ export function SkillFormSheet({ mode, id: initialId, initial, onClose, onSaved 
     setSaving(true);
     setError(null);
     try {
-      await api.writeAsset("skill", trimmedId, renderSkill(form));
+      await scope.saveSkill(trimmedId, renderSkill(form), mode === "create");
       onSaved();
     } catch (e) {
       setError(String(e));
