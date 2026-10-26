@@ -233,7 +233,56 @@ test("row menu removes a single copy without touching the other target", async (
   render(<ProjectSkillsPanel project={projectView()} />);
   fireEvent.click(await screen.findByRole("button", { name: "a 更多操作" }));
   fireEvent.click(await screen.findByRole("menuitem", { name: "移除 Qoder 副本" }));
+  fireEvent.click(await screen.findByRole("button", { name: "确认移除" }));
   await waitFor(() => expect(api.removeProjectSkillCopy).toHaveBeenCalledWith("p1", "a", "qoder"));
+});
+
+test("uninstall needs an explicit confirmation before deleting every copy", async () => {
+  vi.mocked(api.listProjectSkills).mockResolvedValue({
+    ...viewWithOneSkill(),
+    skills: [
+      {
+        ...viewWithOneSkill().skills[0],
+        targets: ["claude", "qoder"],
+        dirs: {
+          claude: { ...CLAUDE_DIR, agents: ["claude"], state: "present" },
+          qoder: { ...QODER_DIR, agents: ["qoder"], state: "present" },
+        },
+      },
+    ],
+  });
+
+  render(<ProjectSkillsPanel project={projectView()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "a 更多操作" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "卸载" }));
+  expect(api.uninstallProjectSkill).not.toHaveBeenCalled();
+  expect(await screen.findByText(/claude\/skills、\.qoder\/skills/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "确认卸载" }));
+  await waitFor(() => expect(api.uninstallProjectSkill).toHaveBeenCalledWith("p1", "a"));
+});
+
+test("sync is disabled and explained while no project directory is verified", async () => {
+  vi.mocked(api.listProjectSkills).mockResolvedValue({
+    ...viewWithOneSkill(),
+    dirs: [
+      { ...CLAUDE_DIR, agents: ["claude"], verified: false },
+      { ...QODER_DIR, agents: ["qoder"], verified: false },
+    ],
+    skills: [
+      {
+        ...viewWithOneSkill().skills[0],
+        dirs: {
+          claude: { ...CLAUDE_DIR, agents: ["claude"], verified: false, state: "present" },
+          qoder: { ...QODER_DIR, agents: ["qoder"], verified: false, state: "absent" },
+        },
+      },
+    ],
+  });
+
+  render(<ProjectSkillsPanel project={projectView()} />);
+  expect(await screen.findByText(/尚未在真机验证/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "立即同步" })).toBeDisabled();
+  expect(screen.queryByRole("checkbox", { name: /Claude/ })).not.toBeInTheDocument();
 });
 
 test("a failed sync reports the backend reason instead of failing silently", async () => {

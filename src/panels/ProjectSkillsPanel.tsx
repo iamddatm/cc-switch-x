@@ -5,6 +5,7 @@ import { api } from "../lib/api";
 import { ProjectConflictDialog } from "../components/projects/ProjectConflictDialog";
 import type { BadgeTone } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Menu, type MenuItem } from "../components/ui/Menu";
 import { Notice } from "../components/ui/Notice";
@@ -104,6 +105,8 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
   const dirs = data?.dirs ?? [];
   const skills = data?.skills ?? [];
   const hasTargets = skills.some((skill) => skill.targets.length > 0);
+  /** 一个可同步的目录都没有（落点未实测）时，同步按钮只能说明原因，不能让人点了吃一个错。 */
+  const selectable = dirs.some((dir) => dir.verified);
 
   useEffect(() => setAutoSync(project.autoSync), [project.autoSync]);
 
@@ -140,12 +143,12 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
 
   // 自动同步：每个项目一次挂载只跑一次，且没有勾选目标时绝不写盘（首次添加不复制）。
   useEffect(() => {
-    if (!data || !autoSync || !hasTargets) return;
+    if (!data || !autoSync || !hasTargets || !selectable) return;
     if (autoSyncedFor.current === project.id) return;
     autoSyncedFor.current = project.id;
     void sync([], true);
     // sync 依赖 refresh/data，放进依赖会反复触发；这里只按项目 + 是否可自动同步执行。
-  }, [autoSync, data, hasTargets, project.id]);
+  }, [autoSync, data, hasTargets, project.id, selectable]);
 
   const toggleAutoSync = (enabled: boolean) =>
     guard(async () => {
@@ -166,14 +169,25 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
       await refresh();
     });
 
+  /** 删除类动作一律先确认：磁盘上可能是用户手工改过的那一份。 */
+  const [pendingDelete, setPendingDelete] = useState<
+    { kind: "remove"; skill: ProjectSkillView; dir: string } | { kind: "uninstall"; skill: ProjectSkillView } | null
+  >(null);
+
   const menuItems = (skill: ProjectSkillView): MenuItem[] => [
     ...dirs.map((dir) => ({
       label: `移除 ${dir.label || dir.relativePath} 副本`,
       disabled: stateOf(skill, dir.key) === "absent",
-      onSelect: () => void removeCopy(skill, dir.key),
+      onSelect: () => setPendingDelete({ kind: "remove", skill, dir: dir.key }),
     })),
-    { label: "卸载", danger: true, onSelect: () => void uninstall(skill) },
+    {
+      label: "卸载",
+      danger: true,
+      onSelect: () => setPendingDelete({ kind: "uninstall", skill }),
+    },
   ];
+
+  const dirOf = (key: string) => dirs.find((dir) => dir.key === key);
 
   const copies = result?.outcomes.filter((item) => item.action === "copy").length ?? 0;
   const deletes = result?.outcomes.filter((item) => item.action === "delete").length ?? 0;
@@ -209,16 +223,21 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
               <FolderOpen size={14} aria-hidden />
               打开文件夹
             </Button>
-            <Button size="sm" variant="primary" loading={busy} onClick={() => void sync()}>
+            <Button
+              size="sm"
+              variant="primary"
+              loading={busy}
+              disabled={!selectable}
+              title={selectable ? undefined : "项目级落点尚未在真机验证"}
+              onClick={() => void sync()}
+            >
               立即同步
             </Button>
             <Button
               size="sm"
               loading={loading || busy}
               // 自动同步开着时，刷新顺带把无歧义的改动推一遍。
-              onClick={() =>
-                void (autoSync && hasTargets ? sync([], true) : refresh())
-              }
+              onClick={() => void (autoSync && hasTargets && selectable ? sync([], true) : refresh())}
             >
               <RefreshCw size={14} aria-hidden />
               刷新
@@ -228,6 +247,12 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
       />
 
       <div className="min-h-0 flex-1 overflow-auto px-6 py-3">
+        {!selectable && dirs.length > 0 && (
+          <Notice tone="warning" className="mb-3">
+            这些项目级落点（{dirs.map((dir) => dir.relativePath).join("、")}）尚未在真机验证，
+            因此不能勾选为同步目标，也不能同步。请在临时项目里实测后再回来。
+          </Notice>
+        )}
         {!current.exists && (
           <Notice tone="danger" className="mb-3">
             项目路径不存在：{current.path}
@@ -325,6 +350,53 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
           onResolve={(resolutions) => void sync(resolutions)}
         />
       )}
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title={
+          pendingDelete?.kind === "uninstall"
+            ? `卸载 ${pendingDelete.skill.name}`
+            : `移除 ${dirOf(pendingDelete?.dir ?? "")?.label ?? pendingDelete?.dir} 的副本`
+        }
+        body={
+          pendingDelete?.kind === "uninstall" ? (
+            <div className="space-y-1">
+              <p>
+                删除该项目里所有已跟踪副本（
+                {pendingDelete.skill.targets
+                  .map((key) => dirOf(key)?.relativePath ?? key)
+                  .join("、")}
+                ），并移除 .ccswitchx/skills.json 里的条目。
+              </p>
+              <p className="text-caption text-fg-3">
+                磁盘上与基线不一致的改动会先备份到备份目录，但不会保留在原位置。
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-1">
+              <p>
+                只删除{' '}
+                <code className="font-mono">
+                  {dirOf(pendingDelete?.dir ?? "")?.relativePath}/{pendingDelete?.skill.id}
+                </code>
+                ，其他目录的副本保持不变。
+              </p>
+              <p className="text-caption text-fg-3">删除前会先备份到备份目录。</p>
+            </div>
+          )
+        }
+        danger
+        pending={busy}
+        confirmLabel={pendingDelete?.kind === "uninstall" ? "确认卸载" : "确认移除"}
+        onConfirm={() => {
+          const request = pendingDelete;
+          setPendingDelete(null);
+          if (!request) return;
+          if (request.kind === "uninstall") void uninstall(request.skill);
+          else void removeCopy(request.skill, request.dir);
+        }}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }

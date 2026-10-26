@@ -193,8 +193,6 @@ pub async fn set_project_skill_targets(
         let agents = enabled_agents(state.inner())?;
         let root = registered_project_root(state.inner(), &project_id)?;
         project_sync::set_targets(
-            &state.store,
-            &project_id,
             &root,
             &skill_id,
             &targets,

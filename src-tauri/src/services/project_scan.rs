@@ -20,6 +20,22 @@ pub struct ProjectScan {
     pub skills: BTreeMap<String, ProjectSkillSnapshot>,
     pub dirs: Vec<ProjectSkillDirKey>,
     pub warnings: Vec<String>,
+    /// 基目录本身是链接/junction 而被跳过的目录 key：该 key 下所有 skill 状态都未知。
+    pub unresolved_dirs: Vec<String>,
+    /// 因链接被跳过的 (目录 key, skill id)：这些格子状态未知，
+    /// 绝不能按「不存在」参与差异判定，否则会把别的健康副本判成删除。
+    pub unresolved_skills: Vec<(String, String)>,
+}
+
+impl ProjectScan {
+    /// 某目录 key 下某 skill 的当前状态是否不可解析（链接跳过或整个目录是链接）。
+    pub fn blocks(&self, dir: &str, skill_id: &str) -> bool {
+        self.unresolved_dirs.iter().any(|key| key == dir)
+            || self
+                .unresolved_skills
+                .iter()
+                .any(|(key, id)| key == dir && id == skill_id)
+    }
 }
 
 /// 把 Settings 里启用的 agent 映射到项目物理目录；同一目录只保留一次。
@@ -117,11 +133,14 @@ pub(crate) fn is_link(path: &Path) -> bool {
 pub fn scan(project_root: &Path, keys: &[ProjectSkillDirKey]) -> Result<ProjectScan, AppError> {
     let mut skills: BTreeMap<String, ProjectSkillSnapshot> = BTreeMap::new();
     let mut warnings = Vec::new();
+    let mut unresolved_dirs: Vec<String> = Vec::new();
+    let mut unresolved_skills: Vec<(String, String)> = Vec::new();
 
     for key in keys {
         let base = project_root.join(dir_spec(*key).relative_path);
         if is_link(&base) {
             warnings.push(format!("跳过符号链接：{}", base.display()));
+            unresolved_dirs.push(key.as_str().to_string());
             continue;
         }
         let entries = match std::fs::read_dir(&base) {
@@ -135,6 +154,7 @@ pub fn scan(project_root: &Path, keys: &[ProjectSkillDirKey]) -> Result<ProjectS
             let name = entry.file_name().to_string_lossy().to_string();
             if is_link(&path) {
                 warnings.push(format!("跳过符号链接：{}", path.display()));
+                mark_unresolved(&mut unresolved_skills, key.as_str(), &name);
                 continue;
             }
             if !entry.file_type()?.is_dir() || !path.join("SKILL.md").is_file() {
@@ -144,6 +164,7 @@ pub fn scan(project_root: &Path, keys: &[ProjectSkillDirKey]) -> Result<ProjectS
                 Ok(state) => state,
                 Err(error) => {
                     warnings.push(format!("跳过包含符号链接的 skill {name}：{error}"));
+                    mark_unresolved(&mut unresolved_skills, key.as_str(), &name);
                     continue;
                 }
             };
@@ -171,7 +192,16 @@ pub fn scan(project_root: &Path, keys: &[ProjectSkillDirKey]) -> Result<ProjectS
         skills,
         dirs: keys.to_vec(),
         warnings,
+        unresolved_dirs,
+        unresolved_skills,
     })
+}
+
+fn mark_unresolved(unresolved: &mut Vec<(String, String)>, dir_key: &str, skill_id: &str) {
+    let pair = (dir_key.to_string(), skill_id.to_string());
+    if !unresolved.contains(&pair) {
+        unresolved.push(pair);
+    }
 }
 
 pub fn ledger_path(project_root: &Path) -> PathBuf {
@@ -303,5 +333,42 @@ mod tests {
         let scan = scan(dir.path(), &[ProjectSkillDirKey::Claude]).unwrap();
         assert!(!scan.skills.contains_key("evil"));
         assert!(scan.warnings.iter().any(|w| w.contains("符号链接")));
+    }
+
+    /// 被链接跳过的目录状态未知：必须标出来，否则同步会把它当成「用户删除」。
+    #[cfg(windows)]
+    #[test]
+    fn symlink_skill_dir_is_recorded_as_unresolved_not_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills = dir.path().join(".claude/skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        let target = dir.path().join("outside");
+        seed_skill(dir.path(), "outside");
+        if std::os::windows::fs::symlink_dir(&target, skills.join("evil")).is_err() {
+            return; // 没有开发者模式/权限时跳过，避免测试环境差异
+        }
+
+        let scan = scan(dir.path(), &[ProjectSkillDirKey::Claude]).unwrap();
+        assert!(!scan.skills.contains_key("evil"), "链接目录不进矩阵");
+        assert_eq!(
+            scan.unresolved_skills,
+            vec![("claude".to_string(), "evil".to_string())]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn symlink_base_dir_marks_the_whole_key_unresolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("shared/skills");
+        std::fs::create_dir_all(&real).unwrap();
+        let claude = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        if std::os::windows::fs::symlink_dir(&real, claude.join("skills")).is_err() {
+            return;
+        }
+
+        let scan = scan(dir.path(), &[ProjectSkillDirKey::Claude]).unwrap();
+        assert_eq!(scan.unresolved_dirs, vec!["claude".to_string()]);
     }
 }

@@ -7,6 +7,7 @@ import { useTheme } from "../../hooks/useTheme";
 import { useUpdate } from "../../hooks/useUpdate";
 import { Button } from "../ui/Button";
 import { EmptyState } from "../ui/EmptyState";
+import { Notice } from "../ui/Notice";
 import { PageHeader } from "../ui/PageHeader";
 import { Sidebar } from "./Sidebar";
 import { TitleBar } from "./TitleBar";
@@ -81,7 +82,7 @@ export function AppShell() {
     skill:
       scope === "project" ? (
         projects.active ? (
-          <ProjectSkillsPanel project={projects.active} />
+          <ProjectSkillsPanel key={projects.active.id} project={projects.active} />
         ) : (
           <ProjectEmptyState onAdd={() => void projects.add()} />
         )
@@ -116,7 +117,14 @@ export function AppShell() {
           onRemoveProject={(id) => void projects.remove(id)}
           onRelocateProject={(id) => void relocate(id)}
         />
-        <main className="flex min-h-0 min-w-0 flex-1 flex-col">{content}</main>
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {projects.error && (
+            <div className="px-6 pt-3">
+              <Notice tone="danger">项目注册表操作失败：{projects.error}</Notice>
+            </div>
+          )}
+          {content}
+        </main>
       </div>
     </div>
   );

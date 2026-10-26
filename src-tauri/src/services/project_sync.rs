@@ -121,15 +121,32 @@ fn same_state(left: &ProjectDirState, right: &ProjectDirState) -> bool {
     left.present == right.present && left.tree_hash == right.tree_hash
 }
 
-/// 变化目录里排除不可用的（agent 被停用等）；不可用目录既不判定也不写入。
+/// 该 skill 在这一轮里不能判定的目录：agent 停用/账本里的陌生 key，以及被链接跳过、状态未知的格子。
+/// 这些目录既不驱动 add/delete，也不写入、不刷基线。
+fn blocked_dirs(
+    entry: &ProjectSkillEntry,
+    scan: &ProjectScan,
+    skill_id: &str,
+    unavailable: &[String],
+) -> Vec<String> {
+    let mut blocked: Vec<String> = entry
+        .targets
+        .iter()
+        .filter(|dir| unavailable.contains(dir) || scan.blocks(dir, skill_id))
+        .cloned()
+        .collect();
+    blocked.dedup();
+    blocked
+}
+
 fn actionable_changes(
     entry: &ProjectSkillEntry,
     current: &BTreeMap<String, ProjectDirState>,
-    unavailable: &[String],
+    blocked: &[String],
 ) -> Vec<DirChange> {
     diff_entry(entry, current)
         .into_iter()
-        .filter(|change| !unavailable.contains(&change.dir))
+        .filter(|change| !blocked.contains(&change.dir))
         .collect()
 }
 
@@ -147,7 +164,20 @@ pub fn plan_sync(ledger: &ProjectLedger, scan: &ProjectScan, unavailable: &[Stri
     let mut plan = SyncPlan::default();
 
     for (skill_id, entry) in &ledger.skills {
-        let changes = actionable_changes(entry, &current_dirs(scan, skill_id), unavailable);
+        let blocked = blocked_dirs(entry, scan, skill_id, unavailable);
+        let current = current_dirs(scan, skill_id);
+        let all = diff_entry(entry, &current);
+        let changes: Vec<DirChange> = all
+            .iter()
+            .filter(|change| !blocked.contains(&change.dir))
+            .cloned()
+            .collect();
+        for change in all.iter().filter(|change| blocked.contains(&change.dir)) {
+            plan.warnings.push(format!(
+                "{skill_id}：目标 {} 不可用或状态未知，本轮同步已跳过",
+                change.dir
+            ));
+        }
         if changes.is_empty() {
             continue;
         }
@@ -155,12 +185,7 @@ pub fn plan_sync(ledger: &ProjectLedger, scan: &ProjectScan, unavailable: &[Stri
         if changes.len() == 1 {
             let change = &changes[0];
             for target in &entry.targets {
-                if target == &change.dir {
-                    continue;
-                }
-                if unavailable.contains(target) {
-                    plan.warnings
-                        .push(format!("{skill_id}：目标 {target} 当前不可用，同步已跳过"));
+                if target == &change.dir || blocked.contains(target) {
                     continue;
                 }
                 plan.actions.push(match change.kind {
@@ -556,12 +581,13 @@ pub fn sync_project(
         let Some(entry) = ledger.skills.get(&conflict.skill_id) else {
             continue;
         };
-        let changes = actionable_changes(entry, &current_dirs(&scan, &conflict.skill_id), &unavailable);
+        let blocked = blocked_dirs(entry, &scan, &conflict.skill_id, &unavailable);
+        let changes = actionable_changes(entry, &current_dirs(&scan, &conflict.skill_id), &blocked);
         let Some(winner) = changes.iter().find(|change| change.dir == resolution.dir) else {
             continue;
         };
         for target in &entry.targets {
-            if target == &resolution.dir || unavailable.contains(target) {
+            if target == &resolution.dir || blocked.contains(target) {
                 continue;
             }
             if resolution.action == "keepBoth" {
@@ -600,65 +626,68 @@ pub fn sync_project(
 
     // 3. 新勾选目标：目标缺失而已有 target 有内容时按首次同步复制；内容不同则冲突。
     for (skill_id, entry) in &ledger.skills {
-        if !applied_skills.contains(skill_id) {
-            let current = current_dirs(&scan, skill_id);
-            let changes = actionable_changes(entry, &current, &unavailable);
-            if !changes.is_empty() {
-                continue;
-            }
-            let tracked: Vec<&String> = entry
-                .targets
+        if applied_skills.contains(skill_id) {
+            continue;
+        }
+        let blocked = blocked_dirs(entry, &scan, skill_id, &unavailable);
+        let current = current_dirs(&scan, skill_id);
+        if !actionable_changes(entry, &current, &blocked).is_empty() {
+            continue;
+        }
+        let tracked: Vec<String> = entry
+            .targets
+            .iter()
+            .filter(|target| !blocked.contains(target))
+            .cloned()
+            .collect();
+        let present: Vec<String> = tracked
+            .iter()
+            .filter(|target| current.get(*target).is_some_and(|state| state.present))
+            .cloned()
+            .collect();
+        if present.is_empty() {
+            continue;
+        }
+        // 各 target 内容不一致 = 需要人工裁决，不自动挑一个覆盖另一个。
+        let hashes: BTreeSet<Option<String>> = present
+            .iter()
+            .map(|target| current.get(target).and_then(|state| state.tree_hash.clone()))
+            .collect();
+        if hashes.len() > 1 {
+            let recommended = present
                 .iter()
-                .filter(|target| !unavailable.contains(target))
-                .collect();
-            let present: Vec<&String> = tracked
-                .iter()
-                .copied()
-                .filter(|target| current.get(*target).is_some_and(|state| state.present))
-                .collect();
-            if present.is_empty() || present.len() == tracked.len() {
-                continue;
-            }
-            let hashes: BTreeSet<Option<String>> = present
-                .iter()
-                .map(|target| current.get(*target).and_then(|state| state.tree_hash.clone()))
-                .collect();
-            if hashes.len() > 1 {
-                let recommended = present
-                    .iter()
-                    .copied()
-                    .max_by_key(|target| current.get(*target).map_or(0, |state| state.mtime))
-                    .map(|target| target.to_string());
-                report.conflicts.push(SyncConflict {
-                    skill_id: skill_id.clone(),
-                    dirs: present.iter().map(|target| target.to_string()).collect(),
-                    recommended,
-                });
-                continue;
-            }
-            // 源优先取基线里已存在且内容未变的目录。
-            let source = present
-                .iter()
-                .copied()
-                .find(|target| {
-                    entry
-                        .dirs
-                        .get(*target)
-                        .is_some_and(|state| state.present && same_state(state, &current[*target]))
-                })
-                .or_else(|| present.first().copied())
-                .expect("present 非空");
-            for target in tracked.iter().copied() {
-                if present.contains(&target) {
-                    continue;
-                }
-                steps.push(Step::Apply(SyncAction {
-                    skill_id: skill_id.clone(),
-                    action: "copy".into(),
-                    dir: target.clone(),
-                    source_dir: Some(source.to_string()),
-                }));
-            }
+                .max_by_key(|target| current.get(*target).map_or(0, |state| state.mtime))
+                .cloned();
+            report.conflicts.push(SyncConflict {
+                skill_id: skill_id.clone(),
+                dirs: present.clone(),
+                recommended,
+            });
+            continue;
+        }
+        // 源优先取基线里已存在且内容未变的目录。
+        let source = present
+            .iter()
+            .find(|target| {
+                entry
+                    .dirs
+                    .get(*target)
+                    .is_some_and(|state| state.present && same_state(state, &current[*target]))
+            })
+            .or_else(|| present.first())
+            .cloned()
+            .expect("present 非空");
+        let mut copied = false;
+        for target in tracked.iter().filter(|target| !present.contains(target)) {
+            steps.push(Step::Apply(SyncAction {
+                skill_id: skill_id.clone(),
+                action: "copy".into(),
+                dir: target.clone(),
+                source_dir: Some(source.clone()),
+            }));
+            copied = true;
+        }
+        if copied {
             applied_skills.insert(skill_id.clone());
         }
     }
@@ -671,25 +700,44 @@ pub fn sync_project(
                 && identical_operation(&actionable_changes(
                     entry,
                     &current_dirs(&scan, skill_id),
-                    &unavailable,
+                    &blocked_dirs(entry, &scan, skill_id, &unavailable),
                 ))
         })
         .map(|(skill_id, _)| skill_id.clone())
         .collect();
 
+    // 被停用或被链接跳过的 target：明确告诉用户这一轮没同步它，别让他以为已经一致了。
+    for (skill_id, entry) in &ledger.skills {
+        for target in blocked_dirs(entry, &scan, skill_id, &unavailable) {
+            let warning = format!("{skill_id}：目标 {target} 不可用或状态未知，本轮同步已跳过");
+            if !report.warnings.contains(&warning) {
+                report.warnings.push(warning);
+            }
+        }
+    }
+
     let timestamp = chrono::Utc::now().timestamp_millis();
     let mut applied: Vec<Applied> = Vec::new();
     let mut last_ops: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let rollback_all = |done: &[Applied]| -> Vec<String> {
+        let mut errors = Vec::new();
+        for record in done.iter().rev() {
+            if let Err(error) = rollback(record) {
+                errors.push(format!("{error}"));
+            }
+        }
+        errors
+    };
+
     for step in &steps {
         let result = match step {
             Step::Preserve { skill_id, dir } => apply_preserve(project_root, skill_id, dir),
             Step::Apply(action) => {
-                let prepared = if action.action == "delete" {
+                if action.action == "delete" {
                     apply_delete(store, project_id, timestamp, project_root, action)
                 } else {
                     apply_copy(store, project_id, timestamp, project_root, action)
-                };
-                prepared
+                }
             }
         };
         match result {
@@ -710,33 +758,66 @@ pub fn sync_project(
                 report.outcomes.push(outcome);
                 applied.push(record);
             }
-            Err(error) => {
-                let mut rollback_errors: Vec<String> = Vec::new();
-                for record in applied.iter().rev() {
-                    if let Err(e) = rollback(record) {
-                        rollback_errors.push(format!("{e}"));
-                    }
-                }
-                if rollback_errors.is_empty() {
-                    return Err(error);
-                }
-                return Err(AppError::Project(format!(
-                    "同步失败，回滚出现问题：{}",
-                    rollback_errors.join("；")
-                )));
-            }
+            Err(error) => return Err(sync_error(error, rollback_all(&applied))),
         }
     }
 
+    // 账本刷新与写入也在同一个回滚保护圈内：目录改了而账本没跟上，下一轮会重复判定甚至误删。
     let now = chrono::Utc::now().to_rfc3339();
-    let mut ledger = ledger;
+    let mut updated = ledger.clone();
+    if let Err(error) = refresh_ledger(
+        &mut updated,
+        &scan,
+        &unavailable,
+        &applied_skills,
+        &refresh_only,
+        &last_ops,
+        project_root,
+        &now,
+    ) {
+        return Err(sync_error(error, rollback_all(&applied)));
+    }
+    // 空跑（自动同步每次进项目都会来一轮）不该改仓库里要提交的文件。
+    if updated != ledger {
+        if let Err(error) = project_scan::save_ledger(project_root, &updated) {
+            return Err(sync_error(error, rollback_all(&applied)));
+        }
+    }
+
+    Ok(report)
+}
+
+fn sync_error(error: AppError, rollback_errors: Vec<String>) -> AppError {
+    if rollback_errors.is_empty() {
+        return error;
+    }
+    AppError::Project(format!(
+        "{}；且回滚出现问题：{}",
+        error,
+        rollback_errors.join("；")
+    ))
+}
+
+/// 把本轮真正处理过的 skill 的基线刷成磁盘现状，并记录最近一次操作。
+#[allow(clippy::too_many_arguments)]
+fn refresh_ledger(
+    ledger: &mut ProjectLedger,
+    scan: &ProjectScan,
+    unavailable: &[String],
+    applied_skills: &BTreeSet<String>,
+    refresh_only: &[String],
+    last_ops: &BTreeMap<String, (String, String)>,
+    project_root: &Path,
+    now: &str,
+) -> Result<(), AppError> {
     let mut removed: Vec<String> = Vec::new();
     for skill_id in applied_skills.iter().chain(refresh_only.iter()) {
         let Some(entry) = ledger.skills.get_mut(skill_id) else {
             continue;
         };
+        let blocked = blocked_dirs(entry, scan, skill_id, unavailable);
         for target in entry.targets.clone() {
-            if unavailable.contains(&target) {
+            if blocked.contains(&target) {
                 continue;
             }
             let path = skill_dir(project_root, &target, skill_id)?;
@@ -747,11 +828,12 @@ pub fn sync_project(
             entry.last_op = Some(ProjectSkillOp {
                 dir: dir.clone(),
                 action: action.clone(),
-                at: now.clone(),
+                at: now.to_string(),
             });
         }
-        let has_unavailable = entry.targets.iter().any(|target| unavailable.contains(target));
-        if !has_unavailable
+        ledger.updated_at = now.to_string();
+        let has_blocked = entry.targets.iter().any(|target| blocked.contains(target));
+        if !has_blocked
             && !entry.targets.is_empty()
             && applied_skills.contains(skill_id)
             && entry
@@ -765,46 +847,12 @@ pub fn sync_project(
     for skill_id in &removed {
         ledger.skills.remove(skill_id);
     }
-    ledger.updated_at = now;
-    project_scan::save_ledger(project_root, &ledger)?;
-
-    Ok(report)
+    Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Reference {
-    dir: String,
-    state: ProjectDirState,
-}
-
-fn reference_of(
-    dirs: &[String],
-    current: &BTreeMap<String, ProjectDirState>,
-    baseline: &BTreeMap<String, ProjectDirState>,
-) -> Option<Reference> {
-    let present: Vec<&String> = dirs
-        .iter()
-        .filter(|dir| current.get(*dir).is_some_and(|state| state.present))
-        .collect();
-    let chosen = present
-        .iter()
-        .copied()
-        .find(|dir| {
-            baseline
-                .get(*dir)
-                .is_some_and(|state| state.present && same_state(state, &current[*dir]))
-        })
-        .or_else(|| present.first().copied())?;
-    Some(Reference {
-        dir: chosen.clone(),
-        state: current[chosen].clone(),
-    })
-}
-
-/// 勾选 / 取消同步目标。新增的缺失目录立刻从已有目标复制；取消勾选只留文件和基线。
+/// 勾选 / 取消同步目标：只记账本，不写盘 —— 复制由下一次同步完成（设计 5.3 的两步流程）。
+/// 新勾选的目录按磁盘现状写入基线：内容与其他 target 不一致时，那一轮同步会报冲突。
 pub fn set_targets(
-    store: &Store,
-    project_id: &str,
     project_root: &Path,
     skill_id: &str,
     targets: &[String],
@@ -827,110 +875,14 @@ pub fn set_targets(
 
     let mut ledger = project_scan::load_ledger(project_root)?;
     let entry = ledger.skills.entry(skill_id.to_string()).or_default();
-    let previous = entry.targets.clone();
-    let baseline = entry.dirs.clone();
-    let added: Vec<String> = wanted
-        .iter()
-        .filter(|dir| !previous.contains(dir))
-        .cloned()
-        .collect();
-
-    let mut current: BTreeMap<String, ProjectDirState> = BTreeMap::new();
-    for dir in &wanted {
-        let path = skill_dir(project_root, dir, skill_id)?;
-        current.insert(dir.clone(), project_scan::tree_state(&path)?);
-    }
-
-    // 源优先取保留下来、内容与基线一致的目标；一个都没有时，新目录自己就是首个内容来源。
-    let stable: Vec<String> = wanted
-        .iter()
-        .filter(|dir| previous.contains(dir))
-        .cloned()
-        .collect();
-    let mut reference = reference_of(&stable, &current, &baseline);
-    let mut copies: Vec<(String, String)> = Vec::new();
-    for dir in &added {
-        let state = &current[dir];
-        match &reference {
-            Some(source) => {
-                if state.present {
-                    if !same_state(&source.state, state) {
-                        return Err(AppError::Project(
-                            "目标目录已有不同内容，请先处理冲突".to_string(),
-                        ));
-                    }
-                } else {
-                    copies.push((dir.clone(), source.dir.clone()));
-                }
-            }
-            None => {
-                if state.present {
-                    reference = Some(Reference {
-                        dir: dir.clone(),
-                        state: state.clone(),
-                    });
-                }
-            }
-        }
-    }
-
-    let timestamp = chrono::Utc::now().timestamp_millis();
-    let mut applied: Vec<Applied> = Vec::new();
-    let mut source_dir: Option<String> = None;
-    for (dir, from) in &copies {
-        let action = SyncAction {
-            skill_id: skill_id.to_string(),
-            action: "copy".into(),
-            dir: dir.clone(),
-            source_dir: Some(from.clone()),
-        };
-        match apply_copy(store, project_id, timestamp, project_root, &action) {
-            Ok((_, record)) => {
-                applied.push(record);
-                source_dir = Some(from.clone());
-            }
-            Err(error) => {
-                let mut rollback_errors: Vec<String> = Vec::new();
-                for record in applied.iter().rev() {
-                    if let Err(e) = rollback(record) {
-                        rollback_errors.push(format!("{e}"));
-                    }
-                }
-                if rollback_errors.is_empty() {
-                    return Err(error);
-                }
-                return Err(AppError::Project(format!(
-                    "同步失败，回滚出现问题：{}",
-                    rollback_errors.join("；")
-                )));
-            }
-        }
-    }
-
-    // 复制成功后重新扫描，基线记的是磁盘现状。
-    let mut refreshed: BTreeMap<String, ProjectDirState> = BTreeMap::new();
-    for dir in &wanted {
-        let path = skill_dir(project_root, dir, skill_id)?;
-        refreshed.insert(dir.clone(), project_scan::tree_state(&path)?);
-    }
-    let entry = ledger.skills.get_mut(skill_id).expect("条目已创建");
     entry.targets = wanted.clone();
-    for (dir, state) in &refreshed {
-        entry.dirs.insert(dir.clone(), state.clone());
+    for dir in &wanted {
+        let path = skill_dir(project_root, dir, skill_id)?;
+        entry.dirs.insert(dir.clone(), project_scan::tree_state(&path)?);
     }
     entry.last_op = Some(ProjectSkillOp {
-        dir: source_dir.unwrap_or_else(|| {
-            reference
-                .as_ref()
-                .map(|item| item.dir.clone())
-                .or_else(|| wanted.first().cloned())
-                .unwrap_or_default()
-        }),
-        action: if copies.is_empty() {
-            "targets".into()
-        } else {
-            "copy".into()
-        },
+        dir: wanted.first().cloned().unwrap_or_default(),
+        action: "targets".into(),
         at: chrono::Utc::now().to_rfc3339(),
     });
     ledger.updated_at = chrono::Utc::now().to_rfc3339();
@@ -1104,14 +1056,12 @@ mod tests {
 
         fn set_targets_allowed(
             &self,
-            project_id: &str,
+            _project_id: &str,
             skill_id: &str,
             dirs: &[&str],
             allowed: &[&str],
         ) -> Result<(), AppError> {
             set_targets(
-                &self.store,
-                project_id,
                 &self.root,
                 skill_id,
                 &dirs.iter().map(|dir| dir.to_string()).collect::<Vec<_>>(),
@@ -1203,6 +1153,8 @@ mod tests {
             .collect(),
             dirs: Vec::new(),
             warnings: Vec::new(),
+            unresolved_dirs: Vec::new(),
+            unresolved_skills: Vec::new(),
         }
     }
 
@@ -1249,6 +1201,35 @@ mod tests {
             .any(|warning| warning.contains("qoder")));
     }
 
+    /// 符号链接被跳过的目录状态未知：不能当成「用户删了它」去删其他副本。
+    #[test]
+    fn unresolved_dir_never_drives_a_delete() {
+        let entry = entry_with_targets(&["claude", "qoder"]);
+        let mut current = states(&[("qoder", "h1")]);
+        current.insert("claude".into(), absent());
+        let mut scan = scan_with("a", current);
+        scan.unresolved_skills = vec![("claude".into(), "a".into())];
+
+        let plan = plan_sync(&ledger_with("a", entry), &scan, &[]);
+        assert!(plan.actions.is_empty());
+        assert!(plan.conflicts.is_empty());
+        assert!(plan.warnings.iter().any(|w| w.contains("claude")));
+    }
+
+    /// 整个基目录是链接时同理：该 key 下所有 skill 都不参与判定。
+    #[test]
+    fn unresolved_base_dir_never_drives_a_delete() {
+        let entry = entry_with_targets(&["claude", "qoder"]);
+        let mut current = states(&[("qoder", "h1")]);
+        current.insert("claude".into(), absent());
+        let mut scan = scan_with("a", current);
+        scan.unresolved_dirs = vec!["claude".into()];
+
+        let plan = plan_sync(&ledger_with("a", entry), &scan, &[]);
+        assert!(plan.actions.is_empty());
+        assert!(plan.conflicts.is_empty());
+    }
+
     #[test]
     fn sync_copies_missing_target_and_backs_up_before_delete() {
         let fixture = project_fixture();
@@ -1289,7 +1270,7 @@ mod tests {
     }
 
     #[test]
-    fn adding_a_second_target_copies_from_existing_target() {
+    fn checking_a_target_waits_for_sync_then_copies() {
         let fixture = project_fixture();
         seed_skill(&fixture.root.join(".claude/skills"), "a");
         let view = fixture.add_project(&["claude".into(), "qoder".into()]);
@@ -1297,7 +1278,60 @@ mod tests {
         fixture.sync(&view.id, &[]).unwrap();
 
         fixture.set_targets(&view.id, "a", &["claude", "qoder"]);
+        assert!(
+            !fixture.root.join(".qoder/skills/a").exists(),
+            "勾选只写账本，不该替用户点同步"
+        );
+
+        fixture.sync(&view.id, &[]).unwrap();
         assert!(fixture.root.join(".qoder/skills/a/SKILL.md").is_file());
+    }
+
+    #[test]
+    fn differing_content_on_a_new_target_becomes_a_conflict_not_an_error() {
+        let fixture = project_fixture();
+        seed_skill(&fixture.root.join(".claude/skills"), "a");
+        let qoder = fixture.root.join(".qoder/skills/a");
+        std::fs::create_dir_all(&qoder).unwrap();
+        std::fs::write(qoder.join("SKILL.md"), "不一样的内容").unwrap();
+        let view = fixture.add_project(&["claude".into(), "qoder".into()]);
+
+        fixture.set_targets(&view.id, "a", &["claude", "qoder"]);
+        let report = fixture.sync(&view.id, &[]).unwrap();
+
+        assert_eq!(report.conflicts.len(), 1);
+        assert!(report.outcomes.is_empty());
+        assert_eq!(
+            std::fs::read(qoder.join("SKILL.md")).unwrap(),
+            "不一样的内容".as_bytes()
+        );
+    }
+
+    #[test]
+    fn sync_without_anything_to_do_leaves_the_ledger_file_untouched() {
+        let fixture = project_fixture();
+        seed_skill(&fixture.root.join(".claude/skills"), "a");
+        let view = fixture.add_project(&["claude".into()]);
+        fixture.mark_targets("a", &["claude"]);
+
+        let path = fixture.root.join(".ccswitchx").join("skills.json");
+        let before = std::fs::read(&path).unwrap();
+        fixture.sync(&view.id, &[]).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before, "空跑不该改仓库里的账本");
+    }
+
+    /// 账本里出现无法解析的 target key（手改或 git 合并留下的），只能跳过并提示，不能借它删掉健康副本。
+    #[test]
+    fn unresolvable_target_key_is_skipped_and_reported() {
+        let fixture = project_fixture();
+        seed_skill(&fixture.root.join(".claude/skills"), "a");
+        let view = fixture.add_project(&["claude".into(), "qoder".into()]);
+        fixture.mark_targets("a", &["claude", "bogus"]);
+
+        let report = fixture.sync(&view.id, &[]).unwrap();
+        assert!(report.outcomes.is_empty());
+        assert!(fixture.root.join(".claude/skills/a").is_dir());
+        assert!(report.warnings.iter().any(|w| w.contains("bogus")));
     }
 
     #[test]

@@ -44,3 +44,10 @@ test("切到项目范围时从 MCP 自动跳到 Skills", async () => {
 
   expect(await screen.findByRole("heading", { name: "Skills" })).toBeInTheDocument();
 });
+
+test("注册表读不出来时必须说明原因，不能当成没有项目", async () => {
+  vi.mocked(api.listProjects).mockRejectedValue("项目注册表格式损坏：expected value at line 1");
+
+  render(<App />);
+  expect(await screen.findByText(/格式损坏/)).toBeInTheDocument();
+});

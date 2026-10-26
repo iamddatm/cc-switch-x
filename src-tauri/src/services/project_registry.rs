@@ -214,10 +214,11 @@ pub fn selectable_dir_keys(agents: &[AgentStatus]) -> Vec<String> {
 
 fn dir_meta(key: ProjectSkillDirKey, agents: &[AgentStatus]) -> ProjectDirMeta {
     let spec = dir_spec(key);
+    // 列名带上所有映射到该目录的 agent（含已停用的）：已停用的列也要显示名字，用户才认得出那是自己勾过的目标。
     let names: Vec<String> = spec
         .agent_ids
         .iter()
-        .filter_map(|id| agents.iter().find(|agent| agent.enabled && agent.id == *id))
+        .filter_map(|id| agents.iter().find(|agent| agent.id == *id))
         .map(|agent| agent.display_name.clone())
         .collect();
     ProjectDirMeta {
@@ -310,7 +311,21 @@ pub fn list_project_skills(
     let scan = project_scan::scan(&entry.path, &keys)?;
     let ledger = project_scan::load_ledger(&entry.path)?;
 
-    let dir_metas: Vec<ProjectDirMeta> = keys.iter().map(|key| dir_meta(*key, agents)).collect();
+    // 列 = 本次启用的目录 + 账本里已勾选但当前停用的目录（后者标 unavailable，让用户能取消）。
+    let mut column_keys = keys.clone();
+    for entry in ledger.skills.values() {
+        for target in &entry.targets {
+            if let Some(key) = key_from_str(target) {
+                if !column_keys.contains(&key) {
+                    column_keys.push(key);
+                }
+            }
+        }
+    }
+    let dir_metas: Vec<ProjectDirMeta> = column_keys
+        .iter()
+        .map(|key| dir_meta(*key, agents))
+        .collect();
     let meta_by_key: BTreeMap<String, ProjectDirMeta> = dir_metas
         .iter()
         .map(|meta| (meta.key.as_str().to_string(), meta.clone()))
@@ -463,6 +478,59 @@ mod tests {
         assert!(skills.skills[0].targets.is_empty());
         assert_eq!(skills.skills[0].dirs["claude"].state, "untracked");
         assert_eq!(skills.skills[0].dirs["qoder"].state, "absent");
+    }
+
+    /// 焦点 1 的接线：拒绝逻辑在 domain 里，但真正调用它的是 add_project 构造的 roots。
+    /// 这两条测试钉住「roots 必须传进来」，漏传就会静默把用户级目录当项目扫。
+    #[test]
+    fn add_project_refuses_a_path_inside_a_user_level_agent_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let home = dir.path().join("home");
+        let inside = home.join(".claude").join("skills").join("demo");
+        std::fs::create_dir_all(&inside).unwrap();
+
+        let error = add_project(&store, &home, &inside, &["claude".into()]).unwrap_err();
+        assert!(matches!(error, AppError::InvalidInput(_)), "{error:?}");
+        assert!(list_projects(&store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn add_project_refuses_a_path_inside_the_store_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let inside = store.root().join("assets").join("skills").join("demo");
+        std::fs::create_dir_all(&inside).unwrap();
+
+        let error = add_project(&store, &home, &inside, &["claude".into()]).unwrap_err();
+        assert!(matches!(error, AppError::InvalidInput(_)), "{error:?}");
+        assert!(list_projects(&store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_disabled_agents_target_still_shows_as_a_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let home = dir.path().join("home");
+        let project = home.join("work/app");
+        std::fs::create_dir_all(&project).unwrap();
+        seed_skill(&project.join(".claude/skills"), "a");
+        let view = add_project(&store, &home, &project, &["claude".into()]).unwrap();
+
+        let mut ledger = project_scan::load_ledger(&project).unwrap();
+        ledger.skills.get_mut("a").unwrap().targets =
+            vec!["claude".to_string(), "qoder".to_string()];
+        project_scan::save_ledger(&project, &ledger).unwrap();
+
+        let agents = vec![agent_status("claude", true), agent_status("qoder", false)];
+        let skills = list_project_skills(&store, &view.id, &agents).unwrap();
+        assert!(skills
+            .dirs
+            .iter()
+            .any(|meta| meta.key == ProjectSkillDirKey::Qoder));
+        assert_eq!(skills.skills[0].dirs["qoder"].state, "unavailable");
     }
 
     #[test]
