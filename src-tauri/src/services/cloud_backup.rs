@@ -3,14 +3,18 @@
 //! 网络请求统一持有 `cloud_ops` 串行锁；请求期间不持有 settings / secrets 锁。
 
 use crate::error::AppError;
-use crate::net::webdav::{WebDavClient, WebDavConfig};
+use crate::net::webdav::{RemoteObject, WebDavClient, WebDavConfig};
+use crate::net::ProxyConfig;
+use crate::services::backup::{self, SnapshotKind};
 use crate::services::settings::cloud_secret_ref;
+use crate::settings::CloudBackupSettings;
 use crate::state::AppState;
 use crate::store::atomic::write_atomic;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,6 +188,153 @@ pub fn test_connection(
     Ok(started.elapsed().as_millis() as u64)
 }
 
+struct CloudConnection {
+    cloud: CloudBackupSettings,
+    password: String,
+}
+
+fn read_connection(state: &AppState) -> Result<CloudConnection, AppError> {
+    let cloud = {
+        let settings = state
+            .settings
+            .lock()
+            .map_err(|_| AppError::Cloud("读取云备份设置失败".into()))?;
+        settings.cloud.clone()
+    };
+    let password = {
+        let secrets = state
+            .secrets
+            .lock()
+            .map_err(|_| AppError::Cloud("读取云备份密钥失败".into()))?;
+        secrets
+            .get(&cloud_secret_ref())
+            .map(str::to_string)
+            .unwrap_or_default()
+    };
+    if cloud.base_url.trim().is_empty()
+        || cloud.username.trim().is_empty()
+        || password.trim().is_empty()
+    {
+        return Err(AppError::InvalidInput(
+            "请先配置完整的 WebDAV 云备份".into(),
+        ));
+    }
+    Ok(CloudConnection { cloud, password })
+}
+
+fn client_for(
+    connection: &CloudConnection,
+    proxy: &ProxyConfig,
+) -> Result<WebDavClient, AppError> {
+    WebDavClient::new(
+        WebDavConfig {
+            base_url: connection.cloud.base_url.clone(),
+            username: connection.cloud.username.clone(),
+            password: connection.password.clone(),
+            remote_dir: connection.cloud.remote_dir.clone(),
+        },
+        Some(proxy),
+    )
+}
+
+fn record_failure(state: &AppState, error: &AppError) {
+    let mut runtime = load_runtime_status(&state.store);
+    runtime.last_error = Some(error.to_string());
+    if let Err(save_error) = save_runtime_status(&state.store, &runtime) {
+        eprintln!("保存云备份状态失败：{save_error}");
+    }
+}
+
+fn status_from_remote(connection: &CloudConnection, remote: RemoteObject) -> CloudStatus {
+    CloudStatus {
+        configured: true,
+        has_password: true,
+        auto_upload: connection.cloud.auto_upload,
+        remote: Some(RemoteStatus {
+            exists: remote.exists,
+            size_bytes: remote.size_bytes,
+            modified_at: remote.modified_at,
+            etag: remote.etag,
+        }),
+        remote_error: None,
+        last_upload_at: None,
+        last_error: None,
+    }
+}
+
+/// 手动上传：在 `maintenance` 写锁下打包当前真源，释放锁后再联网。
+pub fn upload_now(state: &AppState) -> Result<CloudStatus, AppError> {
+    let connection = read_connection(state)?;
+    let proxy = state.proxy_config()?;
+    let _guard = state
+        .cloud_ops
+        .lock()
+        .map_err(|_| AppError::Cloud("云备份任务锁失败".into()))?;
+
+    let staging = state.store.staging_dir();
+    fs::create_dir_all(&staging)?;
+    let archive = staging.join(format!(
+        "cloud-{}.zip",
+        chrono::Utc::now().timestamp_millis()
+    ));
+    let build = {
+        let _maintenance = state.enter_maintenance()?;
+        backup::write_archive_to(&state.store, &archive, SnapshotKind::Manual)
+    };
+    let result = match build {
+        Ok(_) => upload_archive_locked(state, &connection, &proxy, &archive),
+        Err(error) => {
+            record_failure(state, &error);
+            let _ = fs::remove_file(&archive);
+            Err(error)
+        }
+    };
+    let _ = fs::remove_file(&archive);
+    result
+}
+
+/// 自动上传入口：直接上传已有快照，调用方无需持有 `cloud_ops`。
+pub fn upload_archive(state: &AppState, archive: &Path) -> Result<CloudStatus, AppError> {
+    let connection = read_connection(state)?;
+    let proxy = state.proxy_config()?;
+    let _guard = state
+        .cloud_ops
+        .lock()
+        .map_err(|_| AppError::Cloud("云备份任务锁失败".into()))?;
+    upload_archive_locked(state, &connection, &proxy, archive)
+}
+
+fn upload_archive_locked(
+    state: &AppState,
+    connection: &CloudConnection,
+    proxy: &ProxyConfig,
+    archive: &Path,
+) -> Result<CloudStatus, AppError> {
+    let result = (|| -> Result<RemoteObject, AppError> {
+        backup::validate_archive_for_restore(archive)?;
+        let client = client_for(connection, proxy)?;
+        client.put(archive)
+    })();
+    match result {
+        Ok(remote) => {
+            let mut runtime = load_runtime_status(&state.store);
+            runtime.last_upload_at = Some(chrono::Utc::now().timestamp_millis());
+            runtime.last_error = None;
+            if let Err(error) = save_runtime_status(&state.store, &runtime) {
+                eprintln!("保存云备份状态失败：{error}");
+            }
+            let mut status = status_from_remote(connection, remote);
+            status.last_upload_at = runtime.last_upload_at;
+            status.last_error = runtime.last_error;
+            Ok(status)
+        }
+        Err(error) => {
+            record_failure(state, &error);
+            Err(error)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +370,19 @@ mod tests {
                 .insert(&cloud_secret_ref(), password);
         }
         TEMP_DIRS.lock().unwrap().push(dir);
+        state
+    }
+
+    fn test_state_with_asset(settings: CloudBackupSettings, password: Option<&str>) -> AppState {
+        let state = test_state(settings, password);
+        state
+            .store
+            .write(
+                crate::domain::AssetType::Mcp,
+                "pw",
+                br#"{"id":"pw","name":"Playwright","transport":"stdio","command":"npx"}"#,
+            )
+            .unwrap();
         state
     }
 
@@ -284,5 +448,55 @@ mod tests {
         let latency =
             test_connection(&state, &server.base_url(), "me", Some("pw"), "ccswitchx").unwrap();
         assert!(latency < 5_000);
+    }
+
+    #[test]
+    fn upload_now_writes_remote_and_status() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = test_state_with_asset(config_for(&server), Some("pw"));
+        let status = upload_now(&state).unwrap();
+        assert!(server
+            .object("/dav/ccswitchx/ccswitchx-backup.zip")
+            .is_some());
+        assert!(status.remote.as_ref().unwrap().exists);
+        assert!(status.last_upload_at.is_some());
+        assert_eq!(load_runtime_status(&state.store).last_error, None);
+    }
+
+    #[test]
+    fn upload_rejects_empty_store() {
+        let server = FakeWebDav::start("me", "pw");
+        server.put_object("/dav/ccswitchx/ccswitchx-backup.zip", b"existing".to_vec());
+        let state = test_state(config_for(&server), Some("pw"));
+        let error = upload_now(&state).unwrap_err().to_string();
+        assert!(error.contains("没有可备份的资产"));
+        assert_eq!(
+            server.object("/dav/ccswitchx/ccswitchx-backup.zip").unwrap(),
+            b"existing"
+        );
+    }
+
+    #[test]
+    fn upload_failure_records_last_error() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = test_state_with_asset(config_for(&server), Some("wrong"));
+        assert!(upload_now(&state).is_err());
+        let runtime = load_runtime_status(&state.store);
+        assert!(runtime.last_error.is_some());
+        assert!(runtime.last_upload_at.is_none());
+    }
+
+    #[test]
+    fn upload_now_cleans_temp_archive() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = test_state_with_asset(config_for(&server), Some("pw"));
+        upload_now(&state).unwrap();
+        let staging = state.store.root().join("state/staging");
+        let leftovers = std::fs::read_dir(&staging)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("cloud-"))
+            .count();
+        assert_eq!(leftovers, 0);
     }
 }
