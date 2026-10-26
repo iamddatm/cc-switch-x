@@ -313,11 +313,12 @@
 ## 9. 前端改动
 
 - `components/shell/ScopeSwitcher.tsx`：项目选择器（选中项目即切范围、单一选中态、portal 菜单的外点豁免）。
-- `panels/SkillsPanel.tsx` 与 `panels/ProjectSkillsPanel.tsx`：共用抽出的 `SkillInstalledView`（过滤条 + 计数 + 批量条 + 空状态 + 行列表）、`skillFilters`（纯函数）、`MatrixCells`（列格子与列头）、`skillScope`（作用域适配器，两个实现：中央库 / 项目真源）。
+- `panels/SkillsPanel.tsx` 与 `panels/ProjectSkillsPanel.tsx`：共用 `skillFilters`（搜索/来源/仓库/筛选谓词的纯函数）与 `skillScope`（作用域适配器，两个实现：中央库 / 项目真源）；行列表直接用现成的 `AssetRow` + `SkillSourceBadge`，项目行经 `projectRow()` 折算成 `AssetSummary` 形状，两个面板因此不需要知道彼此的存在。
+  - 实现期修订：原计划的 `SkillInstalledView` 与 `MatrixCells` 两个抽取**没有做**。全局行列表的 DOM 是冻结的回归证明（`SkillsPanel.test.tsx` 一行不改必须绿），而项目格子的六态必须写成文字（`已同步`/`待更新`/`已改`/`无`/`未跟踪`/`待实测`）才说得清 —— 全局那颗圆点只表达「开/关」两态，把「已改（要人工裁决）」压成颜色正是最容易误导人的地方。项目格子仍占全局格子那一列宽（`w-9`），只是里面放文字 + 悬停说明。复用因此停在行组件这一层，没有再往上抽。
 - `components/skills/`：`SkillInstallSheet` / `SkillDiscoveryPanel` / `SkillFormSheet` 接 `scope`；`SkillDetailSheet` 签名不变（可选 `extra` 传项目专属信息）。
 - `panels/ProjectSkillsPanel.tsx`：迁移横幅与 `ProjectMigrationSheet`、立即同步 / 自动同步 / 结果条 / 冲突对话框 / 收进真源。
 - `hooks/useProjects.ts`、`hooks/useProjectSkills.ts`：项目列表、当前项目、增删、自动同步设置、项目 skill 视图。
-- `types.ts`：`ProjectView`、`ProjectSkillView`（含 `summary`/`drift`/`stale`）、六态单元格、`SyncReport`、冲突与迁移类型。
+- `types.ts`：`ProjectView`、`ProjectSkillView`（含本机检查状态 `check`）、六态单元格、`SyncReport`、`ProjectInstallReport`、冲突与迁移类型；前端行数据由 `projectRow()` 折算成 `AssetSummary` 形状，不另立一套。
 - `lib/api.ts`：项目相关 invoke，参数 camelCase。
 - 范围与项目选择持久化在 localStorage；启动时校验项目仍存在，失效回退全局。
 - 用户可见文案全部中文。
@@ -338,25 +339,31 @@ Rust 单测（全部 `tempfile` 临时 store + 临时项目根）：
 - `skillFilters` / `skillScope` 纯函数与适配器调用矩阵测试。
 - 项目面板：范围切换与置灰、自动跳 Skills、`stale`/`edited` 标签、迁移文案（明写「只新建文件、不改 agent 目录」）、搜索与目录/状态/来源/仓库筛选、批量部署与取消部署、安装抽屉带 `targets`、`···` 里没有 cc-switch 导入、单一选中态、菜单项在 portal 下仍点得动。
 
-真机验证：
+真机验证（2026-10-27 已跑，结论如下）：
 
 - 临时 store + `baseOverride` 临时 home + 临时项目目录；禁止拿用户真实 `~/.claude`、`~/.qoder-cn` 或真实仓库当试验田。
-- `scripts/seed-ui-e2e.ps1` 铺项目沙箱，`scripts/drive-ui-e2e.cjs` 走「添加项目 → 迁移 → 收进真源 → 勾选 qoder → 同步 → 编辑正文 → 再同步」并逐张看截图。
-- 完成断言：项目里新增文件只有 `.ccswitchx/**`；原 `.claude/skills/probe` 前后 SHA 一致；未实测的 `.agents/skills` 不存在。
-- 对 Claude / Qoder / Codex·Gemini·Pi 分别确认项目目录能被读取；**未取得真机证据的列保持「待实测」，测试全绿不得升档**。
+- `scripts/seed-ui-e2e.ps1 -Project` 铺项目沙箱，`scripts/drive-ui-e2e.cjs` 走「添加项目 → 收进真源 → 勾选两个目录 → 同步 → 搜索筛选 → 编辑正文 → 再同步」并逐张看截图。几点与最初写法不同，都是为了让断言真的成立：
+  - 「添加项目…」开的是原生文件夹对话框，CDP 操作不了 —— driver 直接调同一条 `add_project` IPC，注册表 / 台账 / 能力闸仍全部由后端算。
+  - 项目默认开着自动同步，勾完目标立刻铺盘；流程先关掉它，才验得到「勾选只改台账、同步才写盘」这条两步纪律。
+  - 已断言：收进真源只新建 `.ccswitchx/skills/probe`，原 `.claude/skills/probe` 字节不变；勾选两个目录后磁盘仍无变化；同步后两份产物与真源逐字相同；编辑正文只有真源先变，两份产物保持落后直到下一次同步；`.agents/` 全程没被创建。
+  - **迁移横幅没走 UI**：沙箱项目是新建的（直接 v2，无迁移可做），v1→v2 的迁移路径由 `project_migrate` 的 Rust 测试与 `#[ignore]` 集成测试覆盖。
+- 用户级配置的保护：`#[ignore]` 集成测试结尾用 `compute_dir_hash` 比对真实 `~/.claude/skills`、`~/.qoder-cn/skills` 与三个用户级配置文件的字节，证明项目级同步一格都没碰到 home。
+- 能力档位：`.claude/skills` 与 `.qoder/skills` 已有真机读取证据（`domain/project.rs` 注明日期与证据）；`.agents/skills` 本机取不到证（codex CLI 无 skills 概念、gemini 未安装、pi 报 Connection error），**继续 `verified: false`，测试全绿不升档**。
 
 门禁：`pnpm build` → `cargo test --manifest-path src-tauri/Cargo.toml` → `pnpm test`（顺序不能反，`tauri::generate_context!` 编译期读 `dist/`）。
 
 ## 11. 分期
 
-- P0：本文档改口径（已完成于本修订）。
-- P1：v2 模型与扫描地基（`canonical` 字段、版本闸、跳点文件、真源扫描、视图投影与前端类型）。
-- P2：v1→v2 迁移。**preview（只读）与 apply 分两步发布**，先在真实仓库核对「将新建哪些文件」清单。
-- P3：同步引擎按真源重写（`SyncSourceRef`、`plan_sync` 两轴、回读校验、写入侧能力闸、`adopt`/`purge`/正文读写、条目移除条件）。
-- P4：安装/更新管道参数化到项目真源 + 本机检查缓存 + 项目命令。
-- P5：前端抽取（`skillFilters`/`MatrixCells`/`SkillInstalledView`/`skillScope`），`SkillsPanel` 改为消费者。
-- P6：项目面板接上全量能力（tabs、添加菜单、详情/编辑、批量、筛选、冲突文案）。
-- P7：`.agents/skills` 真机取证、集成测试扩段、e2e 脚本、文档收尾。
+分支 `project-skills-parity`，括号内是落地提交。
+
+- P0：本文档改口径（`e8f28b1`）。
+- P1：v2 模型与扫描地基（`e9769e1`）。
+- P2：v1→v2 迁移（`3025fbb`）。**preview（只读）与 apply 分两步发布**，先在真实仓库核对「将新建哪些文件」清单。
+- P3：同步引擎按真源重写（`7a6a847`）。
+- P4：安装/更新管道参数化到项目真源 + 本机检查缓存 + 项目命令（`02e658b`、`86bd649`、`0711a81`，回归锚点 `3d367de`）。
+- P5：前端抽取（`6918f27` 筛选项 + `skillScope` 作用域适配器）。原计划的 `MatrixCells` / `SkillInstalledView` 未做，理由见 §9。
+- P6：项目面板接上全量能力（`0653cc1`）。
+- P7：集成测试扩段与真机取证（`c466c5e`、`52d6c4b`）；`.agents/skills` 本机取不到证，继续 `verified: false`。
 - 后续：项目级 MCP 独立设计。其他资产的项目级支持不在本期。
 
 ## 12. 已定决策与实现者裁量
@@ -374,6 +381,8 @@ Rust 单测（全部 `tempfile` 临时 store + 临时项目根）：
 - 项目级写入只复制，不 symlink/junction；不写 `.meta.json` 与归属标记文件。
 - 项目根拒绝 home、storeRoot 和用户级 agent 配置根内的路径。
 - 「从 cc-switch 导入」仅全局，不做项目版。
+- 安装 / 导入 / 新建**只落项目真源，不带渲染目标**：往仓库里的 agent 目录写文件必须由「勾选 + 同步」这一步显式发生。
+- 检查更新的结果只写本机 `local/project-skill-checks/<pid>.json`，绝不进随仓库提交的 `skills.json`；更新只换真源，渲染留给下一次同步。
 - Skills 先行，MCP 后做。
 
 实现者可自行决定（写进实现计划即可）：
@@ -381,7 +390,7 @@ Rust 单测（全部 `tempfile` 临时 store + 临时项目根）：
 - 共享目录的列头展示方式（多 agent 名称堆叠或合并文案）。
 - 自动同步的结果展示形式（结果条或 toast）。
 - 同步批次内动作顺序、备份保留数量。
-- 项目格子的具体视觉尺寸（与全局统一为 `w-9` 圆点即可，无需另案）。
+- 项目格子的具体视觉：实现期定为「占全局格子那一列宽（`w-9`），里面写状态文字 + 悬停说明」，不用全局的两态圆点 —— 六态里「已改（要人工裁决）」不能被压成一种颜色。（2026-10-27 定，真机截图已核对。）
 
 ## 13. 项目级 MCP 边界（后续）
 
