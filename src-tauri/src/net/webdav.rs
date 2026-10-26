@@ -208,8 +208,9 @@ impl WebDavClient {
             .map_err(transport_error("MOVE"))?
             .status();
         if move_status.as_u16() == 405 || move_status.as_u16() == 501 {
-            let _ = self.delete_url(temp_url);
+            // 直写成功前不动临时对象：直写失败时它是唯一的完整副本。
             self.put_file(source, length, final_url)?;
+            let _ = self.delete_url(temp_url);
         } else if !move_status.is_success() {
             let _ = self.delete_url(temp_url);
             return Err(status_error("MOVE", move_status));
@@ -469,6 +470,8 @@ pub(crate) mod test_support {
         fail_move: bool,
         redirect: bool,
         fail_put: bool,
+        fail_put_after: Option<usize>,
+        put_attempts: usize,
         truncate_after_put: bool,
         head_size_override: Option<u64>,
     }
@@ -492,6 +495,8 @@ pub(crate) mod test_support {
                 fail_move: false,
                 redirect: false,
                 fail_put: false,
+                fail_put_after: None,
+                put_attempts: 0,
                 truncate_after_put: false,
                 head_size_override: None,
             }));
@@ -566,6 +571,11 @@ pub(crate) mod test_support {
             self.state.lock().unwrap().fail_put = fail;
         }
 
+        /// 前 `n` 次 PUT 成功，之后失败；用于覆盖「临时对象已传、直写最终对象失败」。
+        pub(crate) fn set_fail_put_after(&self, attempts: usize) {
+            self.state.lock().unwrap().fail_put_after = Some(attempts);
+        }
+
         pub(crate) fn set_truncate_after_put(&self, truncate: bool) {
             self.state.lock().unwrap().truncate_after_put = truncate;
         }
@@ -619,7 +629,12 @@ pub(crate) mod test_support {
                 }
             }
             "PUT" => {
-                if state.fail_put {
+                state.put_attempts += 1;
+                let should_fail = state.fail_put
+                    || state
+                        .fail_put_after
+                        .is_some_and(|limit| state.put_attempts > limit);
+                if should_fail {
                     respond(&mut stream, "500 Internal Server Error", &[], b"");
                 } else {
                     let mut body = body;
@@ -920,6 +935,26 @@ mod tests {
         let file = temp_file(b"data");
         assert!(client.put(file.path()).is_err());
         assert!(server.paths().iter().all(|path| !path.contains(".tmp-")));
+    }
+
+    #[test]
+    fn failed_direct_put_keeps_complete_temp_object() {
+        let server = FakeWebDav::start("me", "pw");
+        server.put_object("/dav/ccswitchx/ccswitchx-backup.zip", b"old".to_vec());
+        server.set_reject_move(true);
+        server.set_fail_put_after(1);
+        let client = client_for(&server);
+        let file = temp_file(b"new-zip");
+        assert!(client.put(file.path()).is_err());
+        assert_eq!(
+            server.object("/dav/ccswitchx/ccswitchx-backup.zip").unwrap(),
+            b"old",
+            "直写失败不应改动旧副本"
+        );
+        assert!(
+            server.paths().iter().any(|path| path.contains(".tmp-")),
+            "回退直写失败时应保留完整临时对象供重试"
+        );
     }
 
     #[test]

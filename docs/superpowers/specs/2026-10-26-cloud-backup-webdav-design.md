@@ -72,7 +72,7 @@ v0.4.0 的备份面板已有两条路径：
 
 - `remote_dir` 默认 `ccswitchx`，允许安全的 `/` 分隔多级目录。
 - 固定对象名 `ccswitchx-backup.zip`；上传通过临时对象 + `MOVE` 原子替换，不做远端版本管理。
-- 上传先写 `ccswitchx-backup.zip.tmp-<时间戳>`，成功后 `MOVE` 覆盖最终对象；服务器不支持 `MOVE`（405/501）时清理临时对象并回退为直接 `PUT` 最终对象。失败路径尽力 `DELETE` 临时对象。
+- 上传先写 `ccswitchx-backup.zip.tmp-<时间戳>`，成功后 `MOVE` 覆盖最终对象；服务器不支持 `MOVE`（405/501）时回退为直接 `PUT` 最终对象，直写成功后再清理临时对象（直写失败时保留临时对象，避免两份副本同时丢失）。其他失败路径尽力 `DELETE` 临时对象。
 - 不额外写 sidecar 元数据；远端大小与修改时间由 `HEAD` 获取，包内 manifest 在下载后校验。
 - 多台机器使用同一路径时按“最后上传者获胜”处理；如需隔离，用户可配置不同的 `remote_dir`。
 
@@ -136,7 +136,7 @@ pub struct CloudBackupSettings {
 3. 在 `maintenance` 写锁下，把当前真源写到 `state/staging/cloud-*.zip` 临时文件；释放写锁后再联网，避免网络慢时阻塞本地写操作。
 4. 创建 WebDAV 客户端，确保远端目录存在。
 5. 以 `Content-Type: application/zip`、已知 `Content-Length` 流式 `PUT` 到临时对象 `ccswitchx-backup.zip.tmp-<时间戳>`；不把整包读进内存。
-6. `MOVE` 临时对象覆盖 `ccswitchx-backup.zip`（`Destination` 指向最终 URL，`Overwrite: T`）。服务器返回 405/501 时清理临时对象并回退为直接 `PUT` 最终对象；其他失败路径尽力 `DELETE` 临时对象。
+6. `MOVE` 临时对象覆盖 `ccswitchx-backup.zip`（`Destination` 指向最终 URL，`Overwrite: T`）。服务器返回 405/501 时回退为直接 `PUT` 最终对象，直写成功后再清理临时对象；其他失败路径尽力 `DELETE` 临时对象。
 7. `HEAD` 最终对象并比对 `Content-Length` 与本包大小；不一致视为上传失败（远端可能被写坏），`HEAD` 本身失败可降级为警告。
 8. 更新本机状态文件并清理临时包。
 9. 返回 `CloudStatus`。
@@ -320,7 +320,7 @@ lastError: string | null
   - 401 映射为认证失败；
   - 下载超限被中止；
   - 不跟随重定向；
-  - `MOVE` 成功替换最终对象；405/501 时回退直接 `PUT`；
+  - `MOVE` 成功替换最终对象；405/501 时回退直接 `PUT`，直写成功后再删临时对象；
   - 上传失败时临时对象被尽力清理；
   - 上传前拒绝空包与超过恢复限制的包；
   - 测试连接只做 `MKCOL` + `HEAD`，不写探针对象。
