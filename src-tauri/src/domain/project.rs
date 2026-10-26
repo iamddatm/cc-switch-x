@@ -164,9 +164,28 @@ impl Default for ProjectLedger {
     }
 }
 
+/// 去掉 Windows `canonicalize` 加上的 `\\?\` 逐字前缀。
+///
+/// 前缀只是给 WinAPI 用的（解超长路径与跳过规范化），Rust 标准库在需要时会自己补回，
+/// 因此真源与 UI 一律保存/显示去掉前缀的可读路径；`explorer.exe` 也不认逐字形式。
+/// 含非法 Unicode 的路径原样返回，不做有损转换。
+pub fn strip_verbatim(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(rest) = path.to_str().and_then(|text| text.strip_prefix(r"\\?\UNC\")) {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = path.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
 /// 校验项目根：拒绝 home 本身、storeRoot 内部、以及用户级 agent 配置根内部。
 ///
 /// 注意：home 的子目录是允许的（绝大多数项目都在 home 下），只拒绝 home 本身。
+/// 返回值是去掉逐字前缀的规范化路径，可直接落进注册表。
 pub fn validate_project_root(
     path: &Path,
     home: &Path,
@@ -201,7 +220,7 @@ pub fn validate_project_root(
             )));
         }
     }
-    Ok(canonical)
+    Ok(strip_verbatim(&canonical))
 }
 
 #[cfg(test)]
@@ -238,8 +257,54 @@ mod tests {
         let ok = validate_project_root(&project, &home, &store, &[claude]).unwrap();
         assert_eq!(
             ok,
-            project.canonicalize().unwrap(),
+            strip_verbatim(&project.canonicalize().unwrap()),
             "home 下的普通项目必须允许"
         );
+        assert!(
+            !ok.to_string_lossy().starts_with(r"\\?\"),
+            "注册表要存可读路径：{ok:?}"
+        );
+    }
+
+    #[test]
+    fn validate_strips_windows_verbatim_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let store = dir.path().join("store");
+        let project = home.join("work/app");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+
+        let plain = validate_project_root(&project, &home, &store, &[]).unwrap();
+        if cfg!(windows) {
+            let verbatim = PathBuf::from(format!(r"\\?\{}", plain.display()));
+            assert_eq!(
+                validate_project_root(&verbatim, &home, &store, &[]).unwrap(),
+                plain,
+                "同一项目的逐字与非逐字写法必须得到同一个 ID 输入"
+            );
+        } else {
+            assert_eq!(plain, project.canonicalize().unwrap());
+        }
+    }
+
+    #[test]
+    fn strip_verbatim_only_touches_windows_prefixes() {
+        assert_eq!(strip_verbatim(Path::new("/tmp/app")), PathBuf::from("/tmp/app"));
+        if cfg!(windows) {
+            assert_eq!(
+                strip_verbatim(Path::new(r"\\?\D:\repos\ai\PddWorker")),
+                PathBuf::from(r"D:\repos\ai\PddWorker")
+            );
+            assert_eq!(
+                strip_verbatim(Path::new(r"\\?\UNC\fileserver\team")),
+                PathBuf::from(r"\\fileserver\team")
+            );
+            assert_eq!(
+                strip_verbatim(Path::new(r"D:\repos\ai\PddWorker")),
+                PathBuf::from(r"D:\repos\ai\PddWorker")
+            );
+        }
     }
 }

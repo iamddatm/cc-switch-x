@@ -68,7 +68,8 @@ pub struct ProjectSkillsView {
 }
 
 pub fn project_id(path: &Path) -> String {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let canonical =
+        crate::domain::project::strip_verbatim(&path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
     let name = canonical
         .file_name()
         .and_then(|name| name.to_str())
@@ -491,11 +492,23 @@ mod tests {
 
         let first = add_project(&store, &home, &project, &["claude".into()]).unwrap();
         assert!(first.exists);
+        assert!(
+            !first.path.to_string_lossy().starts_with(r"\\?\"),
+            "注册表与 UI 必须是可读路径：{:?}",
+            first.path
+        );
         assert!(project.join(".ccswitchx/skills.json").is_file());
         let ids_before = list_projects(&store).unwrap().len();
 
         let second = add_project(&store, &home, &project, &["claude".into()]).unwrap();
         assert_eq!(first.id, second.id);
+        assert_eq!(list_projects(&store).unwrap().len(), ids_before);
+
+        let third = add_project(&store, &home, &first.path, &["claude".into()]).unwrap();
+        assert_eq!(
+            third.id, first.id,
+            "用注册表里的可读路径再添加一次不能产生第二条"
+        );
         assert_eq!(list_projects(&store).unwrap().len(), ids_before);
     }
 
