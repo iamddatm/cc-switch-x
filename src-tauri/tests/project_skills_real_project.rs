@@ -66,6 +66,94 @@ impl Drop for Restore {
     }
 }
 
+/// keepBoth 落败副本的名字由后端挑（`-copy`、`-copy-2`…），运行前猜不到，
+/// 所以记下运行前已有的名字，Drop 时只删本次新增的那些。
+struct KeptCopies {
+    skills_dir: PathBuf,
+    prefix: String,
+    before: Vec<String>,
+}
+
+impl KeptCopies {
+    fn snapshot(skills_dir: &Path, prefix: &str) -> Self {
+        Self {
+            skills_dir: skills_dir.to_path_buf(),
+            prefix: prefix.to_string(),
+            before: names_in(skills_dir, prefix),
+        }
+    }
+}
+
+impl Drop for KeptCopies {
+    fn drop(&mut self) {
+        for name in names_in(&self.skills_dir, &self.prefix) {
+            if self.before.contains(&name) {
+                continue;
+            }
+            let path = self.skills_dir.join(&name);
+            if std::fs::remove_dir_all(&path).is_err() {
+                eprintln!("清理落败副本失败，请手动删除：{}", path.display());
+            }
+        }
+    }
+}
+
+fn names_in(dir: &Path, prefix: &str) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .map(|read| {
+            read.flatten()
+                .map(|item| item.file_name().to_string_lossy().to_string())
+                .filter(|name| name.starts_with(prefix))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn sorted(names: &[String]) -> Vec<String> {
+    let mut sorted = names.to_vec();
+    sorted.sort();
+    sorted
+}
+
+/// 真实 home 里用户级的配置与 skills 目录清单。项目级同步只许写 `<项目>/…`，
+/// 这些路径必须逐字不变 —— 与 `asset_chain_e2e` 的 real_agent_config_roots_are_untouched 同一手法：
+/// 只记内容不记 mtime，别的工具顺手 touch 一次不算我们改了。
+fn user_state(home: &Path) -> Vec<(PathBuf, Snapshot)> {
+    [
+        ".claude.json",
+        ".qoder-cn/settings.json",
+        ".codex/config.toml",
+        ".claude/skills",
+        ".qoder-cn/skills",
+        ".agents/skills",
+    ]
+    .into_iter()
+    .map(|relative| home.join(relative))
+    .map(|path| (path.clone(), record(&path)))
+    .collect()
+}
+
+/// 一条路径的当前内容：文件留字节，目录用项目自己的内容哈希，不存在就记 Missing。
+#[derive(Debug, PartialEq, Eq)]
+enum Snapshot {
+    Missing,
+    Bytes(Vec<u8>),
+    Dir(String),
+}
+
+fn record(path: &Path) -> Snapshot {
+    if path.is_dir() {
+        return Snapshot::Dir(
+            cc_switch_x_lib::net::archive::compute_dir_hash(path)
+                .unwrap_or_else(|error| format!("哈希失败：{error}")),
+        );
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => Snapshot::Bytes(bytes),
+        Err(_) => Snapshot::Missing,
+    }
+}
+
 /// 用代码里的静态 agent 表造一份现状，只改启用位；不碰真实的 `~/.claude` 等配置根。
 fn enabled_agents() -> Vec<AgentStatus> {
     builtin_agents()
@@ -101,6 +189,10 @@ fn project_skills_render_from_the_project_canonical() {
     let canonical_dir = cc_switch_x_lib::domain::project::canonical_skill_dir(&root, PROBE).unwrap();
     let canonical_root = cc_switch_x_lib::domain::project::canonical_root(&root);
     let ledger_path = project_scan::ledger_path(&root);
+    // keepBoth 裁决会把落败的手改另存成未跟踪副本；它同样只属于本次运行，必须清掉。
+    let qoder_skills = root.join(".qoder/skills");
+    let preexisting_copies = sorted(&names_in(&qoder_skills, &format!("{PROBE}-copy")));
+    let kept_copies = KeptCopies::snapshot(&qoder_skills, &format!("{PROBE}-copy"));
 
     let restores = [
         Restore {
@@ -135,6 +227,11 @@ fn project_skills_render_from_the_project_canonical() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::init(temp.path().join("store")).unwrap();
     let home = dirs::home_dir().expect("需要真实 home 才能校验用户级配置根");
+    let user_before = user_state(&home);
+    assert!(
+        user_before.iter().any(|(path, _)| path.exists()),
+        "这台机器上没有可对照的真实 agent 用户级配置，本次验证证明不了「不碰用户级配置」"
+    );
     let enabled_ids: Vec<String> = ENABLED_AGENTS.iter().map(|id| id.to_string()).collect();
     let agents = enabled_agents();
     let selectable = project_registry::selectable_dir_keys(&agents);
@@ -276,14 +373,12 @@ fn project_skills_render_from_the_project_canonical() {
         std::fs::read(canonical_dir.join("SKILL.md")).unwrap(),
         "被改副本要按真源重渲染"
     );
+    let copies = sorted(&names_in(&qoder_skills, &format!("{PROBE}-copy")));
     assert!(
-        probe_dir(&root, ".qoder/skills").join(format!("{PROBE}-copy")).is_dir()
-            || root
-                .join(".qoder/skills")
-                .join(format!("{PROBE}-copy"))
-                .join("SKILL.md")
-                .is_file(),
-        "落败的手改必须另存为未跟踪副本"
+        copies
+            .iter()
+            .any(|name| qoder_skills.join(name).join("SKILL.md").is_file()),
+        "落败的手改必须另存为未跟踪副本，实际：{copies:?}"
     );
 
     // 8. 卸载：真源与全部副本一起删除，且都先留了备份；条目随之移除。
@@ -305,13 +400,33 @@ fn project_skills_render_from_the_project_canonical() {
         "未实测的 .agents/skills 一个文件都不该被写进去"
     );
 
+    // 8b. 未跟踪的落败副本不归本项目管，卸载不得顺手删掉它。
+    let mut after_uninstall = names_in(&qoder_skills, &format!("{PROBE}-copy"));
+    after_uninstall.sort();
+    assert_eq!(
+        after_uninstall, copies,
+        "卸载只清 tracked 副本，未跟踪副本必须原样留着"
+    );
+
     let final_ledger = project_scan::load_ledger(&root).unwrap();
     assert!(
         !final_ledger.skills.contains_key(PROBE),
         "真源与所有 target 都不存在时应移除条目"
     );
 
+    // 9. 用户级配置一个字节都没碰：真实 home 下的 agent 配置与 skills 目录内容必须逐字相同。
+    for (path, before) in &user_before {
+        assert_eq!(before, &record(path), "项目级同步改动了用户级配置：{path:?}");
+    }
+
     for restore in restores {
         std::mem::drop(restore);
     }
+    std::mem::drop(kept_copies);
+    // 清理只针对本次运行新建的东西；跑之前就在的（上一轮留下的）副本不归本测试管。
+    assert_eq!(
+        sorted(&names_in(&qoder_skills, &format!("{PROBE}-copy"))),
+        preexisting_copies,
+        "本次运行产生的未跟踪副本必须被清理掉"
+    );
 }
