@@ -1091,7 +1091,7 @@ pub fn spawn_periodic(app: tauri::AppHandle) {
         });
 }
 
-fn periodic_once(state: &crate::state::AppState) {
+pub(crate) fn periodic_once(state: &crate::state::AppState) {
     let (interval_hours, retain) = match state.settings.lock() {
         Ok(settings) => (
             settings.backup.interval_hours as i64,
@@ -1110,14 +1110,36 @@ fn periodic_once(state: &crate::state::AppState) {
     if chrono::Utc::now().timestamp_millis() < due {
         return;
     }
-    let Ok(_guard) = state.maintenance.write() else {
+    let created = {
+        let Ok(_guard) = state.maintenance.write() else {
+            return;
+        };
+        match create(&state.store, None, SnapshotKind::Auto) {
+            Ok(info) => {
+                let _ = prune(&state.store, retain);
+                Some(info)
+            }
+            Err(error) => {
+                eprintln!("自动备份失败：{error}");
+                None
+            }
+        }
+    };
+    let Some(info) = created else {
         return;
     };
-    match create(&state.store, None, SnapshotKind::Auto) {
-        Ok(_) => {
-            let _ = prune(&state.store, retain);
-        }
-        Err(error) => eprintln!("自动备份失败：{error}"),
+
+    let auto_upload = state
+        .settings
+        .lock()
+        .map(|settings| settings.cloud.auto_upload)
+        .unwrap_or(false);
+    if !auto_upload {
+        return;
+    }
+    let snapshot = snapshots_dir(&state.store).join(format!("{}.zip", info.name));
+    if let Err(error) = crate::services::cloud_backup::upload_archive(state, &snapshot) {
+        eprintln!("自动上传云备份失败：{error}");
     }
 }
 
@@ -1126,7 +1148,42 @@ mod tests {
     use super::*;
     use crate::domain::AssetType;
     use crate::index::Index;
+    use crate::net::webdav::test_support::FakeWebDav;
+    use crate::services::cloud_backup::load_runtime_status;
+    use crate::services::settings::cloud_secret_ref;
+    use crate::settings::{AppSettings, CloudBackupSettings};
+    use crate::state::AppState;
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    static CLOUD_TEST_DIRS: Mutex<Vec<tempfile::TempDir>> = Mutex::new(Vec::new());
+
+    fn state_with_asset_and_cloud(
+        auto_upload: bool,
+        base_url: String,
+        password: &str,
+    ) -> AppState {
+        let dir = tempdir().unwrap();
+        let settings = AppSettings {
+            store_root: dir.path().join("store"),
+            cloud: CloudBackupSettings {
+                auto_upload,
+                base_url,
+                username: "me".into(),
+                remote_dir: "ccswitchx".into(),
+            },
+            ..AppSettings::default()
+        };
+        let state = AppState::init(settings).unwrap();
+        state
+            .secrets
+            .lock()
+            .unwrap()
+            .insert(&cloud_secret_ref(), password);
+        write_mcp(&state.store, "pw", "Playwright");
+        CLOUD_TEST_DIRS.lock().unwrap().push(dir);
+        state
+    }
 
     fn fixture() -> (tempfile::TempDir, Store, Index) {
         let dir = tempdir().unwrap();
@@ -1416,5 +1473,44 @@ mod tests {
         let summary = validate_archive_for_restore(&path).unwrap();
         assert!(summary.files >= 2);
         assert!(summary.total_bytes > 0);
+    }
+
+    #[test]
+    fn periodic_once_auto_uploads_when_enabled() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
+        state.settings.lock().unwrap().backup.interval_hours = 1;
+
+        periodic_once(&state);
+
+        assert_eq!(list(&state.store).unwrap().len(), 1);
+        assert!(server
+            .object("/dav/ccswitchx/ccswitchx-backup.zip")
+            .is_some());
+    }
+
+    #[test]
+    fn periodic_once_skips_upload_when_disabled() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = state_with_asset_and_cloud(false, server.base_url(), "pw");
+        state.settings.lock().unwrap().backup.interval_hours = 1;
+
+        periodic_once(&state);
+
+        assert!(server
+            .object("/dav/ccswitchx/ccswitchx-backup.zip")
+            .is_none());
+    }
+
+    #[test]
+    fn auto_upload_failure_is_recorded() {
+        let server = FakeWebDav::start("me", "pw");
+        server.set_fail_put(true);
+        let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
+        state.settings.lock().unwrap().backup.interval_hours = 1;
+
+        periodic_once(&state);
+
+        assert!(load_runtime_status(&state.store).last_error.is_some());
     }
 }
