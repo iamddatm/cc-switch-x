@@ -56,6 +56,10 @@ pub struct ProjectSkillView {
     pub dirs: BTreeMap<String, ProjectDirView>,
     pub source: Option<ProjectSkillSource>,
     pub last_op: Option<ProjectSkillOp>,
+    /// 项目真源是否已落地（`.ccswitchx/skills/<id>/` 有 SKILL.md）。
+    pub canonical: bool,
+    /// 账本记着有真源、磁盘上却没有：只能由显式 purge 处置。
+    pub canonical_missing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -274,11 +278,15 @@ fn describe_skill(
     (id.to_string(), None)
 }
 
+/// 一格的状态。两轴：与基线的差 = 是否被外部改过；与真源的差 = 是否落后。
+/// `canonical` 是该项目当前的真源状态（None = 还没有真源）。
 fn state_for(
     key: ProjectSkillDirKey,
     entry: Option<&crate::domain::project::ProjectSkillEntry>,
     current: &ProjectDirState,
     enabled_keys: &[ProjectSkillDirKey],
+    allowed_dirs: &[String],
+    canonical: Option<&ProjectDirState>,
 ) -> &'static str {
     if !enabled_keys.contains(&key) {
         return "unavailable";
@@ -292,9 +300,19 @@ fn state_for(
     if !current.present {
         return "absent";
     }
+    // 未实测的落点我们从不写入，所以它的副本一律按「外部内容」处理，不能显示成已同步。
+    if !allowed_dirs.iter().any(|dir| *dir == key.as_str()) {
+        return "unavailable";
+    }
     let baseline = entry.and_then(|entry| entry.dirs.get(key.as_str()));
-    match baseline {
-        Some(baseline) if baseline.present && baseline.tree_hash != current.tree_hash => "different",
+    let matches_baseline = baseline.is_some_and(|baseline| {
+        baseline.present && baseline.tree_hash.as_deref() == current.tree_hash.as_deref()
+    });
+    if !matches_baseline {
+        return "edited";
+    }
+    match canonical {
+        Some(canonical) if canonical.tree_hash != current.tree_hash => "stale",
         _ => "present",
     }
 }
@@ -329,6 +347,8 @@ pub fn list_project_skills(
     let keys = enabled_dir_keys(&enabled_ids);
     let scan = project_scan::scan(&entry.path, &keys)?;
     let ledger = project_scan::load_ledger(&entry.path)?;
+    // 能力闸允许的渲染目标：格子的「不可用」状态与写入侧校验共用同一份判定。
+    let allowed = selectable_dir_keys(agents);
 
     // 列 = 本次启用的目录 + 账本里已勾选但当前停用的目录（后者标 unavailable，让用户能取消）。
     let mut column_keys = keys.clone();
@@ -350,10 +370,14 @@ pub fn list_project_skills(
         .map(|meta| (meta.key.as_str().to_string(), meta.clone()))
         .collect();
 
+    // 行 = 真源 ∪ 各目录 ∪ 账本：只装进真源、还没渲染到任何目录的 skill 也必须出现。
     let mut ids: BTreeSet<String> = scan.skills.keys().cloned().collect();
     ids.extend(ledger.skills.keys().cloned());
+    ids.extend(scan.canonical.keys().cloned());
 
     let mut skills = Vec::new();
+    // 需要人工裁决的格子数（edited / canonicalMissing），与迁移冲突一起构成待处理数。
+    let mut conflicts = 0usize;
     for id in ids {
         let ledger_entry = ledger.skills.get(&id);
         let targets = ledger_entry
@@ -368,6 +392,7 @@ pub fn list_project_skills(
             }
         }
 
+        let canonical_state = scan.canonical.get(&id);
         let mut dirs = BTreeMap::new();
         for key in dir_keys {
             let meta = meta_by_key
@@ -380,7 +405,10 @@ pub fn list_project_skills(
                 .and_then(|snapshot| snapshot.dirs.get(key.as_str()))
                 .cloned()
                 .unwrap_or_default();
-            let state = state_for(key, ledger_entry, &current, &keys);
+            let state = state_for(key, ledger_entry, &current, &keys, &allowed, canonical_state);
+            if state == "edited" {
+                conflicts += 1;
+            }
             dirs.insert(
                 key.as_str().to_string(),
                 ProjectDirView {
@@ -394,6 +422,12 @@ pub fn list_project_skills(
             );
         }
 
+        // 账本记着有真源、磁盘上却没有：整条等待用户处置，也要计入待处理数。
+        let ledger_says_canonical = ledger_entry.is_some_and(|entry| entry.canonical.present);
+        if ledger_says_canonical && canonical_state.is_none() {
+            conflicts += 1;
+        }
+
         let (name, description) = describe_skill(&entry.path, &id, &scan, &keys);
         skills.push(ProjectSkillView {
             id,
@@ -403,6 +437,8 @@ pub fn list_project_skills(
             dirs,
             source: ledger_entry.and_then(|entry| entry.source.clone()),
             last_op: ledger_entry.and_then(|entry| entry.last_op.clone()),
+            canonical: canonical_state.is_some(),
+            canonical_missing: ledger_says_canonical && canonical_state.is_none(),
         });
     }
 
@@ -413,9 +449,8 @@ pub fn list_project_skills(
     } else {
         None
     };
-    let conflict_count = migration
-        .as_ref()
-        .map_or(0, |plan| plan.conflicts.len());
+    let conflict_count =
+        conflicts + migration.as_ref().map_or(0, |plan| plan.conflicts.len());
 
     Ok(ProjectSkillsView {
         project,

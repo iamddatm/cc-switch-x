@@ -431,23 +431,12 @@ pub fn apply_migration(
                 .ok_or_else(|| AppError::Project(format!("台账里没有该 skill：{id}")))?;
             entry.canonical = canonical.clone();
             entry.targets = targets.clone();
-            // 渲染基线取真源：与真源不一致的目录会被判成 edited 要求人工裁决，
-            // 而不是「落后了就覆盖」—— 迁移本身不该替用户决定谁更新。
-            entry.dirs = PROJECT_SKILL_DIRS
+            // 渲染基线只记 targets，且取真源：与真源不一致的目录会被判成 edited
+            // 要求人工裁决，而不是「落后了就覆盖」—— 迁移本身不该替用户决定谁更新。
+            // 非 target 的副本不进 dirs，否则它看起来像我们写的，将来会被静默覆盖。
+            entry.dirs = targets
                 .iter()
-                .map(|spec| {
-                    let key = spec.key.as_str();
-                    let state = if targets.iter().any(|target| target == key) {
-                        canonical.clone()
-                    } else {
-                        scan.skills
-                            .get(id)
-                            .and_then(|snapshot| snapshot.dirs.get(key))
-                            .cloned()
-                            .unwrap_or_default()
-                    };
-                    (key.to_string(), state)
-                })
+                .map(|dir| (dir.clone(), canonical.clone()))
                 .collect();
             report.adopted.push(id.clone());
         }

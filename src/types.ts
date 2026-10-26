@@ -553,10 +553,18 @@ export interface ProjectDirMeta {
   verified: boolean;
 }
 
+/**
+ * 一格相对项目真源的状态。两轴：与上次渲染基线的差 = 是否被外部改过；
+ * 与真源的差 = 是否落后。
+ * - `stale` 真源已更新，可以直接覆盖（安全）。
+ * - `edited` 被外部改过，必须人工裁决，永不自动覆盖。
+ * - `untracked` 不在渲染目标里的副本，永不触碰。
+ */
 export type ProjectDirState =
   | "present"
   | "absent"
-  | "different"
+  | "stale"
+  | "edited"
   | "untracked"
   | "unavailable";
 
@@ -586,6 +594,10 @@ export interface ProjectSkillView {
   dirs: Record<string, ProjectDirView>;
   source: ProjectSkillSource | null;
   lastOp: ProjectSkillOp | null;
+  /** 项目真源 `.ccswitchx/skills/<id>/` 是否已落地。 */
+  canonical: boolean;
+  /** 账本记着有真源、磁盘上却没有：只能由显式「删除全部副本」处置。 */
+  canonicalMissing: boolean;
 }
 
 export interface ProjectSkillsView {
@@ -648,13 +660,20 @@ export interface ProjectConflict {
   skillId: string;
   dirs: string[];
   recommended: string | null;
+  /** targetVsCanonical：副本被外部改过；canonicalMissing：账本有真源、磁盘没有。 */
+  kind: "targetVsCanonical" | "canonicalMissing" | string;
 }
 
-/** 冲突处置：dir 是胜出目录，action 为 use（覆盖其余）或 keepBoth（落败方另存副本）。 */
+/**
+ * 冲突处置：
+ * - `use` dir 是胜出目录，先收进真源再渲染其余。
+ * - `keepBoth` dir 是被保住的手改副本，另存为未跟踪 `<id>-copy`。
+ * - `purge` 仅用于 canonicalMissing：删除全部副本（先备份）。
+ */
 export interface ProjectConflictResolution {
   skillId: string;
   dir: string;
-  action: "use" | "keepBoth";
+  action: "use" | "keepBoth" | "purge";
 }
 
 export interface ProjectSyncOutcome {

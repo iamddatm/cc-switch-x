@@ -172,9 +172,17 @@ pub async fn sync_project_skills(
             .lock()
             .map_err(|_| AppError::Project("项目锁失败".into()))?;
         let _write = state.enter_write()?;
-        let enabled = enabled_agent_ids(&enabled_agents(state.inner())?);
+        let agents = enabled_agents(state.inner())?;
+        let enabled = enabled_agent_ids(&agents);
         let root = registered_project_root(state.inner(), &project_id)?;
-        project_sync::sync_project(&state.store, &project_id, &root, &enabled, &resolutions)
+        project_sync::sync_project(
+            &state.store,
+            &project_id,
+            &root,
+            &enabled,
+            &project_registry::selectable_dir_keys(&agents),
+            &resolutions,
+        )
     })
     .await
 }
@@ -245,6 +253,63 @@ pub async fn uninstall_project_skill(
         let _write = state.enter_write()?;
         let root = registered_project_root(state.inner(), &project_id)?;
         project_sync::uninstall(&state.store, &project_id, &root, &skill_id)
+    })
+    .await
+}
+
+/// 收进真源：把某个目录里现有的 skill 目录变成项目真源（先备份旧真源）。
+#[tauri::command]
+pub async fn adopt_project_skill(
+    app: AppHandle,
+    project_id: String,
+    skill_id: String,
+    dir: String,
+) -> Result<SyncReport, AppError> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let _project_guard = state
+            .project_ops
+            .lock()
+            .map_err(|_| AppError::Project("项目锁失败".into()))?;
+        let _write = state.enter_write()?;
+        let root = registered_project_root(state.inner(), &project_id)?;
+        project_sync::adopt(&state.store, &project_id, &root, &skill_id, &dir)
+    })
+    .await
+}
+
+/// 读项目真源的 `SKILL.md` 正文（应用内编辑器用）。
+#[tauri::command]
+pub async fn read_project_skill_body(
+    app: AppHandle,
+    project_id: String,
+    skill_id: String,
+) -> Result<String, AppError> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let root = registered_project_root(state.inner(), &project_id)?;
+        project_sync::read_body(&root, &skill_id)
+    })
+    .await
+}
+
+/// 写项目真源的 `SKILL.md`：只替换正文，附件不动；渲染留给下一次同步。
+#[tauri::command]
+pub async fn write_project_skill_body(
+    app: AppHandle,
+    project_id: String,
+    skill_id: String,
+    content: String,
+) -> Result<SyncReport, AppError> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let _project_guard = state
+            .project_ops
+            .lock()
+            .map_err(|_| AppError::Project("项目锁失败".into()))?;
+        let _write = state.enter_write()?;
+        let root = registered_project_root(state.inner(), &project_id)?;
+        project_sync::write_body(&state.store, &project_id, &root, &skill_id, &content)
     })
     .await
 }

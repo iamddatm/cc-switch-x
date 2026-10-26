@@ -14,6 +14,9 @@ vi.mock("../lib/api", () => ({
     uninstallProjectSkill: vi.fn(),
     setProjectAutoSync: vi.fn(),
     migrateProjectSkills: vi.fn(),
+    adoptProjectSkill: vi.fn(),
+    readProjectSkillBody: vi.fn(),
+    writeProjectSkillBody: vi.fn(),
   },
 }));
 
@@ -68,6 +71,8 @@ function viewWithOneSkill(
         },
         source: null,
         lastOp: null,
+        canonical: true,
+        canonicalMissing: false,
         ...skill,
       },
     ],
@@ -143,6 +148,8 @@ test("renders project skill matrix with per-directory state", async () => {
         },
         source: null,
         lastOp: null,
+        canonical: true,
+        canonicalMissing: false,
       },
     ],
     conflictCount: 0,
@@ -151,7 +158,7 @@ test("renders project skill matrix with per-directory state", async () => {
 
   render(<ProjectSkillsPanel project={projectView()} />);
   expect(await screen.findByText("code-review")).toBeInTheDocument();
-  expect(screen.getByText("有")).toBeInTheDocument();
+  expect(screen.getByText("已同步")).toBeInTheDocument();
   expect(screen.getByText("无")).toBeInTheDocument();
 });
 
@@ -184,7 +191,7 @@ test("sync conflict opens dialog and resolves with chosen directory", async () =
   vi.mocked(api.syncProjectSkills)
     .mockResolvedValueOnce({
       outcomes: [],
-      conflicts: [{ skillId: "a", dirs: ["claude", "qoder"], recommended: "claude" }],
+      conflicts: [{ skillId: "a", dirs: ["claude", "qoder"], recommended: "claude", kind: "targetVsCanonical" }],
       warnings: [],
     })
     .mockResolvedValueOnce({ outcomes: [], conflicts: [], warnings: [] });
@@ -192,7 +199,7 @@ test("sync conflict opens dialog and resolves with chosen directory", async () =
   render(<ProjectSkillsPanel project={projectView()} />);
   fireEvent.click(await screen.findByRole("button", { name: "立即同步" }));
   expect(await screen.findByText("需要处理冲突")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "保留 Claude Code" }));
+  fireEvent.click(screen.getByRole("button", { name: "以 Claude Code 为真源" }));
   await waitFor(() =>
     expect(api.syncProjectSkills).toHaveBeenLastCalledWith("p1", [
       { skillId: "a", dir: "claude", action: "use" },
@@ -204,7 +211,7 @@ test("both-kept resolution asks the backend to preserve the losing copy", async 
   vi.mocked(api.syncProjectSkills)
     .mockResolvedValueOnce({
       outcomes: [],
-      conflicts: [{ skillId: "a", dirs: ["claude", "qoder"], recommended: "claude" }],
+      conflicts: [{ skillId: "a", dirs: ["claude", "qoder"], recommended: "claude", kind: "targetVsCanonical" }],
       warnings: [],
     })
     .mockResolvedValueOnce({ outcomes: [], conflicts: [], warnings: [] });
@@ -318,7 +325,7 @@ test("auto sync stays silent on first add and reports conflicts as an entry", as
   );
   vi.mocked(api.syncProjectSkills).mockResolvedValue({
     outcomes: [],
-    conflicts: [{ skillId: "a", dirs: ["claude", "qoder"], recommended: "claude" }],
+    conflicts: [{ skillId: "a", dirs: ["claude", "qoder"], recommended: "claude", kind: "targetVsCanonical" }],
     warnings: [],
   });
 
@@ -413,4 +420,63 @@ test("确认迁移把候选与冲突裁决一起提交", async () => {
     ]),
   );
   expect(await screen.findByText(/迁移完成：收进真源 1 个/)).toBeInTheDocument();
+});
+
+test("stale 与 edited 两种状态分得开", async () => {
+  vi.mocked(api.listProjectSkills).mockResolvedValue({
+    ...viewWithOneSkill(),
+    skills: [
+      {
+        ...viewWithOneSkill().skills[0],
+        targets: ["claude", "qoder"],
+        dirs: {
+          claude: { ...CLAUDE_DIR, agents: ["claude"], state: "stale" },
+          qoder: { ...QODER_DIR, agents: ["qoder"], state: "edited" },
+        },
+      },
+    ],
+  });
+
+  render(<ProjectSkillsPanel project={projectView()} />);
+  expect(await screen.findByText("待更新")).toBeInTheDocument();
+  expect(screen.getByText("已改")).toBeInTheDocument();
+  // 悬停提示必须说明「已改」不会被自动覆盖，这是用户最容易被误导的一格。
+  expect(
+    screen.getByRole("checkbox", { name: "同步到 Qoder" }),
+  ).toHaveAttribute("title", expect.stringContaining("需要你裁决"));
+});
+
+test("还没进真源的副本提供「收进真源」", async () => {
+  vi.mocked(api.listProjectSkills).mockResolvedValue({
+    ...viewWithOneSkill(),
+    skills: [{ ...viewWithOneSkill().skills[0], canonical: false }],
+  });
+  vi.mocked(api.adoptProjectSkill).mockResolvedValue({
+    outcomes: [],
+    conflicts: [],
+    warnings: [],
+  });
+
+  render(<ProjectSkillsPanel project={projectView()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "a 更多操作" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "把 Claude Code 的副本收进真源" }));
+  await waitFor(() => expect(api.adoptProjectSkill).toHaveBeenCalledWith("p1", "a", "claude"));
+});
+
+test("真源丢失时只能显式确认「删除全部副本」", async () => {
+  vi.mocked(api.listProjectSkills).mockResolvedValue({
+    ...viewWithOneSkill(),
+    skills: [{ ...viewWithOneSkill().skills[0], canonicalMissing: true }],
+  });
+
+  render(<ProjectSkillsPanel project={projectView()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "a 更多操作" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "真源已丢失：删除全部副本" }));
+  // 菜单项只打开确认框，不直接删。
+  fireEvent.click(screen.getByRole("button", { name: "确认删除全部副本" }));
+  await waitFor(() =>
+    expect(api.syncProjectSkills).toHaveBeenLastCalledWith("p1", [
+      { skillId: "a", dir: "", action: "purge" },
+    ]),
+  );
 });

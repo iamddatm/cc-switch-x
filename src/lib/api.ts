@@ -247,6 +247,14 @@ export const api = {
   /** v1 台账 → 项目真源的显式迁移；decisions 覆盖所有冲突与候选，否则整体拒绝。 */
   migrateProjectSkills: (projectId: string, decisions: MigrationDecision[]) =>
     invoke<ProjectMigrationReport>("migrate_project_skills", { projectId, decisions }),
+  /** 把某个目录里现有的 skill 收进项目真源（先备份旧真源）。 */
+  adoptProjectSkill: (projectId: string, skillId: string, dir: string) =>
+    invoke<ProjectSyncReport>("adopt_project_skill", { projectId, skillId, dir }),
+  readProjectSkillBody: (projectId: string, skillId: string) =>
+    invoke<string>("read_project_skill_body", { projectId, skillId }),
+  /** 只替换真源的 SKILL.md；渲染留给下一次同步。 */
+  writeProjectSkillBody: (projectId: string, skillId: string, content: string) =>
+    invoke<ProjectSyncReport>("write_project_skill_body", { projectId, skillId, content }),
 };
 
 export interface ApplyReport {

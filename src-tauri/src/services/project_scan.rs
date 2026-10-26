@@ -348,14 +348,17 @@ pub fn ensure_baseline(
         updated_at: chrono::Utc::now().to_rfc3339(),
         skills: BTreeMap::new(),
     };
-    for (id, snapshot) in &scan.skills {
+    for id in scan.skills.keys() {
         ledger.skills.insert(
             id.clone(),
             ProjectSkillEntry {
                 targets: Vec::new(),
                 source: None,
                 canonical: scan.canonical.get(id).cloned().unwrap_or_default(),
-                dirs: snapshot.dirs.clone(),
+                // 只记 targets 的渲染基线；此刻 targets 为空，所以什么都不记。
+                // 把「观察到的目录现状」写进 dirs 会让外来副本看起来像我们写的，
+                // 之后被勾选时就会被静默覆盖。未跟踪副本的状态由扫描现场给 UI。
+                dirs: BTreeMap::new(),
                 last_op: None,
             },
         );
@@ -402,7 +405,11 @@ mod tests {
         let ledger = ensure_baseline(dir.path(), &scan).unwrap();
 
         assert!(ledger.skills["a"].targets.is_empty());
-        assert!(ledger.skills["a"].dirs["claude"].present);
+        assert!(
+            ledger.skills["a"].dirs.is_empty(),
+            "dirs 只记渲染基线；把观察到的现状写进去会让外来副本看起来像我们写的"
+        );
+        assert!(dir.path().join(".claude/skills/a").is_dir(), "磁盘内容不受影响");
         assert!(!dir.path().join(".qoder/skills/a").exists());
         assert!(ledger_path(dir.path()).is_file());
     }

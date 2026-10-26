@@ -22,12 +22,27 @@ import type {
   ProjectView,
 } from "../types";
 
+/**
+ * 六态：`stale` 是「真源更新了」，同步会安全覆盖；`edited` 是「这份副本被外部改过」，
+ * 必须人工裁决，同步永不替用户决定谁更新。
+ */
 const STATE_LABEL: Record<ProjectDirState, { label: string; tone: BadgeTone }> = {
-  present: { label: "有", tone: "success" },
+  present: { label: "已同步", tone: "success" },
   absent: { label: "无", tone: "neutral" },
-  different: { label: "不同", tone: "warning" },
+  stale: { label: "待更新", tone: "brand" },
+  edited: { label: "已改", tone: "warning" },
   untracked: { label: "未跟踪", tone: "neutral" },
   unavailable: { label: "不可用", tone: "neutral" },
+};
+
+/** 悬停提示里把状态说成一句人话，光看两三个字容易误判。 */
+const STATE_HINT: Record<ProjectDirState, string> = {
+  present: "与项目真源一致",
+  absent: "还没有渲染到这里的副本",
+  stale: "项目真源已更新，同步会把它刷成最新",
+  edited: "这份副本被外部改过，需要你裁决，同步不会覆盖它",
+  untracked: "不是本项目渲染的副本，工具不会改动它",
+  unavailable: "对应 agent 已停用，或该落点尚未实测",
 };
 
 /** 未在真机验证的目录不给开关：状态列只显示「待实测」。 */
@@ -74,7 +89,7 @@ function DirCell({
       role="checkbox"
       aria-checked={on}
       aria-label={`同步到 ${meta.label}`}
-      title={`${meta.label}：${badge.label}${state === "unavailable" ? " · 对应 agent 已停用" : ""}`}
+      title={`${meta.label}：${badge.label} · ${STATE_HINT[state]}`}
       disabled={disabled}
       onClick={() =>
         onToggle(
@@ -184,12 +199,45 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
       await refresh();
     });
 
+  /** 收进真源：把某个目录里现有的 skill 目录变成项目真源，来源目录不受影响。 */
+  const adopt = (skillId: string, dir: string) =>
+    guard(async () => {
+      setResult(await api.adoptProjectSkill(project.id, skillId, dir));
+      await refresh();
+    });
+
+  /** 真源没了：只有用户显式要求，才允许删掉全部副本（后端会先备份）。 */
+  const purge = (skillId: string) =>
+    guard(async () => {
+      setResult(await api.syncProjectSkills(project.id, [{ skillId, dir: "", action: "purge" }]));
+      await refresh();
+    });
+
   /** 删除类动作一律先确认：磁盘上可能是用户手工改过的那一份。 */
   const [pendingDelete, setPendingDelete] = useState<
-    { kind: "remove"; skill: ProjectSkillView; dir: string } | { kind: "uninstall"; skill: ProjectSkillView } | null
+    | { kind: "remove"; skill: ProjectSkillView; dir: string }
+    | { kind: "uninstall"; skill: ProjectSkillView }
+    | { kind: "purge"; skill: ProjectSkillView }
+    | null
   >(null);
 
   const menuItems = (skill: ProjectSkillView): MenuItem[] => [
+    // 还没进真源的副本：先收进真源，之后才谈渲染。
+    ...dirs
+      .filter((dir) => !skill.canonical && stateOf(skill, dir.key) !== "absent")
+      .map((dir) => ({
+        label: `把 ${dir.label || dir.relativePath} 的副本收进真源`,
+        onSelect: () => void adopt(skill.id, dir.key),
+      })),
+    ...(skill.canonicalMissing
+      ? [
+          {
+            label: "真源已丢失：删除全部副本",
+            danger: true,
+            onSelect: () => setPendingDelete({ kind: "purge", skill }),
+          },
+        ]
+      : []),
     ...dirs.map((dir) => ({
       label: `移除 ${dir.label || dir.relativePath} 副本`,
       disabled: stateOf(skill, dir.key) === "absent",
@@ -400,20 +448,34 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
         title={
           pendingDelete?.kind === "uninstall"
             ? `卸载 ${pendingDelete.skill.name}`
-            : `移除 ${dirOf(pendingDelete?.dir ?? "")?.label ?? pendingDelete?.dir} 的副本`
+            : pendingDelete?.kind === "purge"
+              ? `删除 ${pendingDelete.skill.name} 的全部副本`
+              : `移除 ${dirOf(pendingDelete?.dir ?? "")?.label ?? pendingDelete?.dir} 的副本`
         }
         body={
           pendingDelete?.kind === "uninstall" ? (
             <div className="space-y-1">
               <p>
-                删除该项目里所有已跟踪副本（
+                删除项目真源 <code className="font-mono">.ccswitchx/skills/{pendingDelete.skill.id}</code>{' '}
+                与所有已跟踪副本（
                 {pendingDelete.skill.targets
                   .map((key) => dirOf(key)?.relativePath ?? key)
-                  .join("、")}
+                  .join("、")
+                  .replace(/^$/, "无")}
                 ），并移除 .ccswitchx/skills.json 里的条目。
               </p>
               <p className="text-caption text-fg-3">
                 磁盘上与基线不一致的改动会先备份到备份目录，但不会保留在原位置。
+              </p>
+            </div>
+          ) : pendingDelete?.kind === "purge" ? (
+            <div className="space-y-1">
+              <p>
+                账本记着这个项目有真源，但 <code className="font-mono">.ccswitchx/skills/</code>{' '}
+                下已经找不到它了。删除所有还留着的副本并移除条目；副本之外不会碰任何文件。
+              </p>
+              <p className="text-caption text-fg-3">
+                删除前会先备份到备份目录。想留下这些副本的话，改成在文件管理器里把内容放回真源。
               </p>
             </div>
           ) : (
@@ -423,7 +485,7 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
                 <code className="font-mono">
                   {dirOf(pendingDelete?.dir ?? "")?.relativePath}/{pendingDelete?.skill.id}
                 </code>
-                ，其他目录的副本保持不变。
+                ，其他目录的副本与项目真源保持不变。
               </p>
               <p className="text-caption text-fg-3">删除前会先备份到备份目录。</p>
             </div>
@@ -431,12 +493,19 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
         }
         danger
         pending={busy}
-        confirmLabel={pendingDelete?.kind === "uninstall" ? "确认卸载" : "确认移除"}
+        confirmLabel={
+          pendingDelete?.kind === "uninstall"
+            ? "确认卸载"
+            : pendingDelete?.kind === "purge"
+              ? "确认删除全部副本"
+              : "确认移除"
+        }
         onConfirm={() => {
           const request = pendingDelete;
           setPendingDelete(null);
           if (!request) return;
           if (request.kind === "uninstall") void uninstall(request.skill);
+          else if (request.kind === "purge") void purge(request.skill.id);
           else void removeCopy(request.skill, request.dir);
         }}
         onCancel={() => setPendingDelete(null)}
