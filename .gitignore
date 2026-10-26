@@ -1,4 +1,6 @@
 node_modules/
+# Qoder 本地 worktree 与会话元数据
+.qoder/
 dist/
 src-tauri/target/
 *.tsbuildinfo
