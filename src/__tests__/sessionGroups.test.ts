@@ -3,6 +3,8 @@ import {
   groupSessions,
   groupSessionsByProject,
   groupSessionsByTime,
+  isSessionInProject,
+  normalizeProjectPath,
   projectName,
 } from "../lib/sessionGroups";
 import type { SessionSummary } from "../types";
@@ -107,4 +109,31 @@ test("sessions_inside_one_bucket_are_sorted_by_updated_at_desc", () => {
   );
 
   expect(groups[0].buckets[0].sessions.map((item) => item.title)).toEqual(["晚", "早"]);
+});
+
+test("normalize_project_path_unifies_separators_case_and_trailing_slash", () => {
+  expect(normalizeProjectPath("D:\\repos\\ai\\PddWorker")).toBe("d:/repos/ai/pddworker");
+  expect(normalizeProjectPath("D:/repos/ai/PddWorker/")).toBe("d:/repos/ai/pddworker");
+  expect(normalizeProjectPath("  D:\\repos\\\\ai\\PddWorker  ")).toBe("d:/repos/ai/pddworker");
+  expect(normalizeProjectPath("D:\\")).toBe("d:");
+  expect(normalizeProjectPath("/")).toBe("/");
+  expect(normalizeProjectPath("")).toBe("");
+});
+
+test("session_belongs_to_the_project_root_or_any_subdirectory", () => {
+  const root = "D:\\repos\\ai\\PddWorker";
+  expect(isSessionInProject(session({ projectPath: "D:/repos/ai/PddWorker" }), root)).toBe(true);
+  expect(isSessionInProject(session({ projectPath: "d:\\repos\\ai\\pddworker\\" }), root)).toBe(true);
+  expect(isSessionInProject(session({ projectPath: "D:\\repos\\ai\\PddWorker\\web\\app" }), root)).toBe(
+    true,
+  );
+});
+
+test("sibling_and_unattributed_sessions_do_not_belong_to_the_project", () => {
+  const root = "D:\\repos\\ai\\PddWorker";
+  expect(isSessionInProject(session({ projectPath: "D:\\repos\\ai\\PddWorkerX" }), root)).toBe(false);
+  expect(isSessionInProject(session({ projectPath: "D:\\repos\\ai" }), root)).toBe(false);
+  expect(isSessionInProject(session({ projectPath: null }), root)).toBe(false);
+  expect(isSessionInProject(session({ projectPath: "   " }), root)).toBe(false);
+  expect(isSessionInProject(session({ projectPath: "D:\\repos\\ai\\PddWorker" }), "")).toBe(false);
 });

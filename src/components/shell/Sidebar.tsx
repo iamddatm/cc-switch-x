@@ -111,7 +111,7 @@ function SidebarGroup({
   );
 }
 
-/** 项目范围只支持 Skills；其余资产保持入口但禁用，提示它只在全局可用。 */
+/** 资产里项目范围只支持 Skills；其余资产保持入口但禁用，提示它只在全局可用。 */
 const PROJECT_DISABLED_PANES = new Set<Pane>(["mcp", "prompt", "rule", "subagent", "hook"]);
 
 export function Sidebar({

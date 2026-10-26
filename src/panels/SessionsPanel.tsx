@@ -14,15 +14,17 @@ import { SearchField } from "../components/ui/SearchField";
 import { SegmentedControl } from "../components/ui/SegmentedControl";
 import { Select } from "../components/ui/Select";
 import { useAgents } from "../hooks/useAgents";
-import { useSessions } from "../hooks/useSessions";
+import { ALL_SESSIONS_LIMIT, SESSION_SEARCH_LIMIT, useSessions } from "../hooks/useSessions";
 import { formatRelativeTime } from "../lib/format";
 import {
   groupSessionsByProject,
   groupSessionsByTime,
+  isSessionInProject,
   projectName,
   projectOf,
 } from "../lib/sessionGroups";
 import type {
+  ProjectView,
   SessionProviderStatus,
   SessionSearchHit,
   SessionSummary,
@@ -30,7 +32,11 @@ import type {
 
 type GroupMode = "time" | "project";
 
-export function SessionsPanel() {
+/**
+ * `project` 非空时（侧栏处于项目范围）只展示归属到该项目及其子目录的会话；
+ * 无归属（缺少 cwd）的会话只在全局范围出现。
+ */
+export function SessionsPanel({ project = null }: { project?: ProjectView | null }) {
   const {
     sessions,
     providers,
@@ -53,8 +59,20 @@ export function SessionsPanel() {
   const [sourcesOpen, setSourcesOpen] = useState(false);
 
   const enabledIds = new Set(enabledAgents.map((agent) => agent.id));
+  const inProject = (session: SessionSummary) =>
+    !project || isSessionInProject(session, project.path);
+  const projectSessions = project ? sessions.filter(inProject) : sessions;
+  // 项目范围下每个应用的数量必须按项目集合算，否则下拉写「Claude (300)」而列表只有 3 条。
+  const countByAgent = new Map<string, number>();
+  if (project) {
+    for (const session of projectSessions) {
+      countByAgent.set(session.agentId, (countByAgent.get(session.agentId) ?? 0) + 1);
+    }
+  }
+  const countFor = (provider: SessionProviderStatus) =>
+    project ? (countByAgent.get(provider.agentId) ?? 0) : provider.sessionCount;
   const presentProviders = providers.filter(
-    (provider) => enabledIds.has(provider.agentId) && provider.sessionCount > 0,
+    (provider) => enabledIds.has(provider.agentId) && countFor(provider) > 0,
   );
   const providerFor = (agentId: string) =>
     providers.find((provider) => provider.agentId === agentId);
@@ -71,16 +89,26 @@ export function SessionsPanel() {
   const matchesAgent = (agentId: string) =>
     (selectedAgent === "all" || agentId === selectedAgent) && enabledIds.has(agentId);
 
-  const visibleSessions = sessions.filter((session) => matchesAgent(session.agentId));
-  const visibleHits = hits?.filter((hit) => matchesAgent(hit.session.agentId)) ?? null;
-  const totalCount = presentProviders.reduce((sum, provider) => sum + provider.sessionCount, 0);
+  const visibleSessions = projectSessions.filter((session) => matchesAgent(session.agentId));
+  const visibleHits =
+    hits?.filter((hit) => matchesAgent(hit.session.agentId) && inProject(hit.session)) ?? null;
+  const totalCount = presentProviders.reduce((sum, provider) => sum + countFor(provider), 0);
   const allAgents = selectedAgent === "all";
+  // 项目范围下只剩一个项目，按项目分组等于「一个默认折叠的组 + 一片空白」，直接按时间平铺。
+  const byProject = !project && groupMode === "project";
+  // 过滤会静默剔除没有 cwd 的会话，必须把数量说出来，否则用户以为会话丢了。
+  const hiddenUnattributed = project
+    ? sessions.filter(
+        (session) => matchesAgent(session.agentId) && !session.projectPath?.trim(),
+      ).length
+    : 0;
+  const truncated = sessions.length >= ALL_SESSIONS_LIMIT;
 
-  const toggleGroup = (project: string) => {
+  const toggleGroup = (groupKey: string) => {
     setExpanded((current) => {
       const next = new Set(current);
-      if (next.has(project)) next.delete(project);
-      else next.add(project);
+      if (next.has(groupKey)) next.delete(groupKey);
+      else next.add(groupKey);
       return next;
     });
   };
@@ -105,6 +133,7 @@ export function SessionsPanel() {
       <PageHeader
         icon={History}
         title="会话"
+        description={project ? `${project.name} · ${project.path}` : undefined}
         actions={
           <Menu
             label="会话的更多操作"
@@ -146,7 +175,7 @@ export function SessionsPanel() {
             <option value="all">全部应用 ({totalCount})</option>
             {presentProviders.map((provider) => (
               <option key={provider.agentId} value={provider.agentId}>
-                {provider.displayName} ({provider.sessionCount})
+                {provider.displayName} ({countFor(provider)})
               </option>
             ))}
           </Select>
@@ -165,19 +194,26 @@ export function SessionsPanel() {
               void search(query);
             }
           }}
-          placeholder="搜索标题、目录、首条消息或会话 ID…"
+          placeholder={
+            project
+              ? `在 ${project.name} 内搜索标题、目录、首条消息或会话 ID…`
+              : "搜索标题、目录、首条消息或会话 ID…"
+          }
           ariaLabel="搜索会话内容"
         />
 
-        <SegmentedControl
-          ariaLabel="会话分组方式"
-          value={groupMode}
-          onValueChange={setGroupMode}
-          items={[
-            { value: "time", label: "按时间" },
-            { value: "project", label: "按项目" },
-          ]}
-        />
+        {/* 项目范围下只有一个项目，按项目分组没有信息量，直接按时间平铺。 */}
+        {!project && (
+          <SegmentedControl
+            ariaLabel="会话分组方式"
+            value={groupMode}
+            onValueChange={setGroupMode}
+            items={[
+              { value: "time", label: "按时间" },
+              { value: "project", label: "按项目" },
+            ]}
+          />
+        )}
         <span className="w-[92px] text-right text-caption text-fg-3">
           {visibleHits !== null ? `${visibleHits.length} 个匹配` : `${visibleSessions.length} 个会话`}
         </span>
@@ -223,6 +259,17 @@ export function SessionsPanel() {
           </Notice>
         )}
 
+        {project && hiddenUnattributed > 0 && (
+          <p className="mb-3 text-caption text-fg-3">
+            另有 {hiddenUnattributed} 个会话没有记录项目目录，无法判断归属，只在「全局配置」里列出。
+          </p>
+        )}
+        {project && truncated && (
+          <p className="mb-3 text-caption text-fg-3">
+            本机已索引的会话超过 {ALL_SESSIONS_LIMIT} 条，这里只在这部分最近活跃的会话里按项目筛选。
+          </p>
+        )}
+
         {loading && sessions.length === 0 ? (
           <p className="py-10 text-center text-caption text-fg-3">正在读取会话索引…</p>
         ) : sessions.length === 0 ? (
@@ -264,7 +311,15 @@ export function SessionsPanel() {
           </>
         ) : visibleHits !== null ? (
           visibleHits.length === 0 ? (
-            <EmptyState icon={Search} title="没有匹配的会话" description="换个关键词试试。" />
+            <EmptyState
+              icon={Search}
+              title="没有匹配的会话"
+              description={
+                project
+                  ? `当前项目内没有匹配的结果；搜索先在全库取最近 ${SESSION_SEARCH_LIMIT} 条命中，再按项目筛选。`
+                  : "换个关键词试试。"
+              }
+            />
           ) : (
             <div className="overflow-hidden rounded-panel border border-border bg-surface">
               <ul>
@@ -280,10 +335,18 @@ export function SessionsPanel() {
             </div>
           )
         ) : visibleSessions.length === 0 ? (
-          <EmptyState icon={History} title="没有匹配的会话" description="换个应用或关键词试试。" />
+          project ? (
+            <EmptyState
+              icon={History}
+              title="这个项目还没有会话"
+              description={`只统计项目目录 ${project.path} 及其子目录里的会话；切到「全局配置」可查看全部。`}
+            />
+          ) : (
+            <EmptyState icon={History} title="没有匹配的会话" description="换个应用或关键词试试。" />
+          )
         ) : (
           <div className="overflow-hidden rounded-panel border border-border bg-surface">
-            {groupMode === "project" ? (
+            {byProject ? (
               projectGroups.map((group) => {
                 const isOpen = expanded.has(group.project);
                 return (
@@ -325,7 +388,7 @@ export function SessionsPanel() {
                         session={session}
                         provider={providerFor(session.agentId)}
                         showAgent={allAgents}
-                        showProject
+                        showProject={!project}
                         onOpen={setOpenSession}
                       />
                     ))}

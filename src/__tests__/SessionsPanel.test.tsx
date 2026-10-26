@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { SessionsPanel } from "../panels/SessionsPanel";
 import { api } from "../lib/api";
 import { agentStatus } from "../test/agents";
-import type { SessionProviderStatus, SessionSummary } from "../types";
+import type { ProjectView, SessionProviderStatus, SessionSummary } from "../types";
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -57,6 +57,20 @@ function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
 
 function agent(id: string, displayName: string) {
   return agentStatus({ id, displayName });
+}
+
+/** 与注册表一致的项目条目：路径是 Rust `PathBuf` 序列化出的 Windows 写法。 */
+function project(overrides: Partial<ProjectView> = {}): ProjectView {
+  return {
+    id: "app-1a2b3c4d5e6f",
+    path: "D:\\repos\\ai\\App",
+    name: "App",
+    addedAt: "2026-10-26T00:00:00Z",
+    lastOpenedAt: "2026-10-26T00:00:00Z",
+    autoSync: true,
+    exists: true,
+    ...overrides,
+  };
 }
 
 beforeEach(() => {
@@ -284,4 +298,89 @@ test("scan_failures_are_listed_not_hidden", async () => {
 
   expect(await screen.findByText(/bad\.jsonl/)).toBeInTheDocument();
   expect(screen.getByText(/JSON 解析失败/)).toBeInTheDocument();
+});
+
+test("project_scope_keeps_only_that_project_including_subdirectories", async () => {
+  vi.mocked(api.listSessions).mockResolvedValue([
+    session({ sessionId: "in", title: "项目根会话", projectPath: "D:\\repos\\ai\\App" }),
+    session({ sessionId: "sub", title: "子目录会话", projectPath: "D:/repos/ai/App/web" }),
+    session({ sessionId: "sibling", title: "同名兄弟目录会话", projectPath: "D:\\repos\\ai\\Appweb" }),
+    session({ sessionId: "other", title: "别的项目会话", projectPath: "D:\\repos\\other" }),
+    session({ sessionId: "none", title: "无归属会话", projectPath: null }),
+  ]);
+  vi.mocked(api.sessionProviders).mockResolvedValue([provider({ sessionCount: 5 })]);
+
+  render(<SessionsPanel project={project()} />);
+
+  expect(await screen.findByText("项目根会话")).toBeInTheDocument();
+  expect(screen.getByText("子目录会话")).toBeInTheDocument();
+  expect(screen.queryByText("同名兄弟目录会话")).not.toBeInTheDocument();
+  expect(screen.queryByText("别的项目会话")).not.toBeInTheDocument();
+  expect(screen.queryByText("无归属会话")).not.toBeInTheDocument();
+  expect(screen.getByText("App · D:\\repos\\ai\\App")).toBeInTheDocument();
+  expect(screen.getByText("2 个会话")).toBeInTheDocument();
+  // 没有 cwd 的会话被过滤掉了，必须说出来，否则用户以为会话丢了。
+  expect(screen.getByText(/另有 1 个会话没有记录项目目录/)).toBeInTheDocument();
+});
+
+test("project_scope_counts_agents_within_the_project", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agent("claude", "Claude Code"),
+    agent("pi", "Pi"),
+  ]);
+  vi.mocked(api.listSessions).mockResolvedValue([
+    session({ sessionId: "c1", title: "本项目 Claude 会话", projectPath: "D:/repos/ai/App" }),
+    session({
+      sessionId: "p1",
+      agentId: "pi",
+      title: "本项目 Pi 会话",
+      projectPath: "D:/repos/ai/App/web",
+    }),
+    session({ sessionId: "c2", title: "别的项目 Claude 会话", projectPath: "D:/other" }),
+  ]);
+  vi.mocked(api.sessionProviders).mockResolvedValue([
+    provider({ sessionCount: 300 }),
+    provider({ agentId: "pi", displayName: "Pi", sessionCount: 5 }),
+  ]);
+
+  render(<SessionsPanel project={project()} />);
+
+  const select = await screen.findByLabelText("按应用筛选");
+  expect(select).toHaveTextContent("全部应用 (2)");
+  expect(select).toHaveTextContent("Claude Code (1)");
+  expect(select).toHaveTextContent("Pi (1)");
+});
+
+test("project_scope_without_sessions_explains_the_scope_instead_of_offering_a_full_scan", async () => {
+  vi.mocked(api.listSessions).mockResolvedValue([
+    session({ title: "别的项目会话", projectPath: "D:/other" }),
+  ]);
+  vi.mocked(api.sessionProviders).mockResolvedValue([provider({ sessionCount: 1 })]);
+
+  render(<SessionsPanel project={project()} />);
+
+  expect(await screen.findByText("这个项目还没有会话")).toBeInTheDocument();
+  expect(screen.getByText(/D:\\repos\\ai\\App 及其子目录/)).toBeInTheDocument();
+  // 索引本身非空：不能退化成「还没有会话索引」诱导用户跑分钟级全量扫描。
+  expect(screen.queryByRole("button", { name: "扫描本机会话" })).not.toBeInTheDocument();
+});
+
+test("project_scope_search_hits_are_filtered_to_the_project", async () => {
+  const inside = session({ sessionId: "in", title: "项目内命中", projectPath: "D:/repos/ai/App" });
+  const outside = session({ sessionId: "out", title: "项目外命中", projectPath: "D:/other" });
+  vi.mocked(api.listSessions).mockResolvedValue([inside, outside]);
+  vi.mocked(api.sessionProviders).mockResolvedValue([provider({ sessionCount: 2 })]);
+  vi.mocked(api.searchSessions).mockResolvedValue([
+    { session: inside, index: 1, seq: 1, snippet: "项目内片段" },
+    { session: outside, index: 1, seq: 1, snippet: "项目外片段" },
+  ]);
+
+  render(<SessionsPanel project={project()} />);
+
+  const input = await screen.findByLabelText("搜索会话内容");
+  fireEvent.change(input, { target: { value: "命中" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+
+  expect(await screen.findByText("项目内片段")).toBeInTheDocument();
+  expect(screen.queryByText("项目外片段")).not.toBeInTheDocument();
 });
