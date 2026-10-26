@@ -148,10 +148,3 @@ test("an agent without that capability at all does not appear in the row", async
   expect(screen.queryByText(/Gemini CLI/)).not.toBeInTheDocument();
 });
 
-test("an agent with unmeasured restart semantics still warns about restart", async () => {
-  vi.mocked(api.listAgents).mockResolvedValue([
-    agentStatus({ mcpNeedsRestart: null, enabledMcp: ["pw"] }),
-  ]);
-  render(<McpPanel />);
-  expect(await screen.findByText(/需重启或 reload/)).toBeInTheDocument();
-});

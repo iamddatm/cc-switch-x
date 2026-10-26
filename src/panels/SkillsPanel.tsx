@@ -664,7 +664,7 @@ export function SkillsPanel() {
           <EmptyState icon={Sparkles} title="没有匹配的 Skill" description="换个关键词或筛选条件。" />
         ) : (
           <div className="overflow-hidden rounded-panel border border-border bg-surface">
-            <div className="flex h-11 items-center bg-subtle pe-3 ps-4">
+            <div className="flex h-11 items-center bg-subtle ps-4">
               <span className="flex w-6 shrink-0 items-center">
                 <Checkbox
                   aria-label="全选当前列表"

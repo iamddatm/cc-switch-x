@@ -499,15 +499,21 @@ test("filters installed skills by multiple source repos", async () => {
   render(<SkillsPanel />);
   expect(await screen.findByRole("button", { name: "查看 demo" })).toBeInTheDocument();
   expect(screen.getByText("仓库：全部（2）")).toBeInTheDocument();
+  expect(screen.queryByRole("checkbox", { name: "acme/demo" })).not.toBeInTheDocument();
 
+  fireEvent.click(screen.getByRole("button", { name: "仓库：全部（2）" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "acme/demo" }));
   expect(screen.queryByRole("button", { name: "查看 demo" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "查看 other" })).toBeInTheDocument();
   expect(screen.getByText("仓库：1/2")).toBeInTheDocument();
 
+  // 连续勾选不收起，点外部才关闭。
   fireEvent.click(screen.getByRole("checkbox", { name: "全部仓库" }));
   expect(screen.getByRole("button", { name: "查看 demo" })).toBeInTheDocument();
   expect(screen.getByText("仓库：全部（2）")).toBeInTheDocument();
+
+  fireEvent.pointerDown(document.body);
+  expect(screen.queryByRole("checkbox", { name: "acme/demo" })).not.toBeInTheDocument();
 });
 
 test("discovery repo filter includes repos only known from installed skills", async () => {
@@ -543,8 +549,9 @@ test("discovery repo filter includes repos only known from installed skills", as
 
   render(<SkillsPanel />);
   fireEvent.click(await screen.findByRole("tab", { name: /发现/ }));
+  expect(await screen.findByRole("button", { name: "仓库 · 2" })).toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: "仓库：2/2" }));
   expect(await screen.findByRole("checkbox", { name: "iamddatm/skills" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "仓库 · 2" })).toBeInTheDocument();
   // 已安装页仍挂载在隐藏容器里，同名 Skill 会出现两次。
   expect(screen.getAllByText("ask-ui").length).toBeGreaterThan(0);
 });

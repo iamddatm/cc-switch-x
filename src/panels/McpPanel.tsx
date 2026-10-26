@@ -103,13 +103,6 @@ export function McpPanel() {
     ? agents.filter((agent) => agent.enabledMcp.includes(deleting.id))
     : [];
 
-  const restartHint = (id: string) => {
-    const names = enabledAgents
-      .filter((agent) => agent.enabledMcp.includes(id) && agent.mcpNeedsRestart !== false)
-      .map((agent) => agent.displayName);
-    return names.length > 0 ? `${names.join("、")} 需重启或 reload` : null;
-  };
-
   return (
     <div className="relative flex h-full min-h-0 flex-col">
       <PageHeader
@@ -196,7 +189,7 @@ export function McpPanel() {
           <EmptyState icon={Server} title="没有匹配的 MCP" description="换个关键词或筛选条件。" />
         ) : (
           <div className="overflow-hidden rounded-panel border border-border bg-surface">
-            <div className="flex h-11 items-center bg-subtle pe-3 ps-4">
+            <div className="flex h-11 items-center bg-subtle ps-4">
               <span className="flex-1 text-caption font-semibold text-fg-2">名称</span>
               <AgentColumnsHeader assetType="mcp" agents={agentsForType} items={visible} />
               <span className="w-12" />
@@ -222,8 +215,6 @@ export function McpPanel() {
                       }}
                     />
                   }
-                  footer={restartHint(item.id)}
-                  footerTone="warning"
                   actions={
                     <Menu
                       label={`${item.name} 的更多操作`}

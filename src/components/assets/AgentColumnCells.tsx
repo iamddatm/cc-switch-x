@@ -57,10 +57,6 @@ export function AgentColumnCells({
             </span>
           );
         }
-        const restart =
-          on && assetType === "mcp" && agent.mcpNeedsRestart !== false
-            ? "（需重启或 reload）"
-            : "";
         const outcome = outcomes[agent.id];
         return (
           <span key={agent.id} className={cn(AGENT_COLUMN_WIDTH, "flex items-center justify-center")}>
@@ -69,7 +65,7 @@ export function AgentColumnCells({
               role="checkbox"
               aria-checked={on}
               aria-label={`${agent.displayName} 启用 ${id}`}
-              title={`${agent.displayName}${on ? ` 已启用${restart}` : " 未启用"}${
+              title={`${agent.displayName}${on ? " 已启用" : " 未启用"}${
                 outcome ? ` · 实测：${outcome}` : ""
               }${!agent.detected ? " · 配置目录不存在" : ""}${
                 !agent.cliAvailable ? ` · PATH 中未找到 ${agent.cliProgram}` : ""
