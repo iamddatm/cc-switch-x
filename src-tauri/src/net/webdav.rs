@@ -5,8 +5,8 @@
 
 use crate::error::AppError;
 use crate::net::ProxyConfig;
-use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, CONTENT_LENGTH, ETAG, LAST_MODIFIED};
+use reqwest::blocking::{Body, Client};
+use reqwest::header::{HeaderMap, CONTENT_LENGTH, CONTENT_TYPE, ETAG, LAST_MODIFIED};
 use reqwest::{Method, StatusCode, Url};
 use std::fs;
 use std::io::{Read, Write};
@@ -174,6 +174,109 @@ impl WebDavClient {
         Ok(())
     }
 
+    /// 上传到临时对象后 MOVE 覆盖最终对象；MOVE 不支持时回退直接 PUT。
+    pub fn put(&self, source: &Path) -> Result<RemoteObject, AppError> {
+        self.ensure_dir()?;
+        let metadata = fs::metadata(source)?;
+        if !metadata.is_file() {
+            return Err(AppError::InvalidInput("上传源不是文件".into()));
+        }
+        let length = metadata.len();
+        if length > MAX_CLOUD_BYTES {
+            return Err(AppError::Cloud(format!(
+                "备份包超过上传上限（{MAX_CLOUD_BYTES} 字节）"
+            )));
+        }
+
+        let temp_name = format!(
+            "{BACKUP_OBJECT}.tmp-{}",
+            chrono::Utc::now().timestamp_millis()
+        );
+        let temp_url = self.temp_url(&temp_name)?;
+        let final_url = self.object_url()?;
+
+        if let Err(error) = self.put_file(source, length, temp_url.clone()) {
+            let _ = self.delete_url(temp_url.clone());
+            return Err(error);
+        }
+
+        let move_status = self
+            .request(move_method(), temp_url.clone())
+            .header("Destination", final_url.as_str())
+            .header("Overwrite", "T")
+            .send()
+            .map_err(transport_error("MOVE"))?
+            .status();
+        if move_status.as_u16() == 405 || move_status.as_u16() == 501 {
+            let _ = self.delete_url(temp_url);
+            self.put_file(source, length, final_url)?;
+        } else if !move_status.is_success() {
+            let _ = self.delete_url(temp_url);
+            return Err(status_error("MOVE", move_status));
+        }
+
+        match self.head() {
+            Ok(remote) => {
+                if !remote.exists {
+                    return Err(AppError::Cloud("上传后远端对象不存在".into()));
+                }
+                if let Some(size) = remote.size_bytes {
+                    if size != length {
+                        return Err(AppError::Cloud(format!(
+                            "上传后远端大小不一致：本地 {length} 字节，远端 {size} 字节"
+                        )));
+                    }
+                }
+                Ok(remote)
+            }
+            Err(error) => {
+                eprintln!("上传后检查远端大小失败：{error}");
+                Ok(RemoteObject {
+                    exists: true,
+                    size_bytes: Some(length),
+                    modified_at: None,
+                    etag: None,
+                })
+            }
+        }
+    }
+
+    fn put_file(&self, source: &Path, length: u64, url: Url) -> Result<(), AppError> {
+        let file = fs::File::open(source)?;
+        let response = self
+            .request(Method::PUT, url)
+            .header(CONTENT_TYPE, "application/zip")
+            .header(CONTENT_LENGTH, length)
+            .body(Body::sized(file, length))
+            .send()
+            .map_err(transport_error("PUT"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(status_error("PUT", status));
+        }
+        Ok(())
+    }
+
+    fn delete_url(&self, url: Url) -> Result<(), AppError> {
+        let response = self
+            .request(Method::DELETE, url)
+            .send()
+            .map_err(transport_error("DELETE"))?;
+        let status = response.status();
+        if status.is_success() || status.as_u16() == 404 {
+            Ok(())
+        } else {
+            Err(status_error("DELETE", status))
+        }
+    }
+
+    fn temp_url(&self, name: &str) -> Result<Url, AppError> {
+        let segments: Vec<&str> = self.config.remote_dir.split('/').collect();
+        let dir = self.dir_url(&segments)?;
+        dir.join(name)
+            .map_err(|error| AppError::Cloud(format!("拼接临时对象地址失败：{error}")))
+    }
+
     fn request(&self, method: Method, url: Url) -> reqwest::blocking::RequestBuilder {
         self.client
             .request(method, url)
@@ -205,6 +308,10 @@ impl WebDavClient {
 
 fn mkcol_method() -> Method {
     Method::from_bytes(b"MKCOL").expect("MKCOL is a valid method")
+}
+
+fn move_method() -> Method {
+    Method::from_bytes(b"MOVE").expect("MOVE is a valid method")
 }
 
 fn transport_error(operation: &'static str) -> impl Fn(reqwest::Error) -> AppError {
@@ -362,6 +469,7 @@ pub(crate) mod test_support {
         fail_move: bool,
         redirect: bool,
         fail_put: bool,
+        truncate_after_put: bool,
         head_size_override: Option<u64>,
     }
 
@@ -384,6 +492,7 @@ pub(crate) mod test_support {
                 fail_move: false,
                 redirect: false,
                 fail_put: false,
+                truncate_after_put: false,
                 head_size_override: None,
             }));
             let thread_state = state.clone();
@@ -457,6 +566,10 @@ pub(crate) mod test_support {
             self.state.lock().unwrap().fail_put = fail;
         }
 
+        pub(crate) fn set_truncate_after_put(&self, truncate: bool) {
+            self.state.lock().unwrap().truncate_after_put = truncate;
+        }
+
         pub(crate) fn set_head_size_override(&self, size: Option<u64>) {
             self.state.lock().unwrap().head_size_override = size;
         }
@@ -509,6 +622,10 @@ pub(crate) mod test_support {
                 if state.fail_put {
                     respond(&mut stream, "500 Internal Server Error", &[], b"");
                 } else {
+                    let mut body = body;
+                    if state.truncate_after_put {
+                        body.truncate(3);
+                    }
                     state.objects.insert(path, body);
                     respond(&mut stream, "201 Created", &[], b"");
                 }
@@ -698,6 +815,12 @@ mod tests {
         WebDavClient::new(config_for(server), None).unwrap()
     }
 
+    fn temp_file(bytes: &[u8]) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, bytes).unwrap();
+        file
+    }
+
     #[test]
     fn mkcol_is_ok_when_directory_exists() {
         let server = FakeWebDav::start("me", "pw");
@@ -758,5 +881,54 @@ mod tests {
         server.set_redirect(true);
         let client = client_for(&server);
         assert!(client.test().is_err());
+    }
+
+    #[test]
+    fn put_replaces_object_via_move() {
+        let server = FakeWebDav::start("me", "pw");
+        server.put_object("/dav/ccswitchx/ccswitchx-backup.zip", b"old".to_vec());
+        let client = client_for(&server);
+        let file = temp_file(b"new-zip");
+        let remote = client.put(file.path()).unwrap();
+        assert_eq!(
+            server.object("/dav/ccswitchx/ccswitchx-backup.zip").unwrap(),
+            b"new-zip"
+        );
+        assert_eq!(remote.size_bytes, Some(7));
+        assert!(server.paths().iter().all(|path| !path.contains(".tmp-")));
+    }
+
+    #[test]
+    fn move_unsupported_falls_back_to_put() {
+        let server = FakeWebDav::start("me", "pw");
+        server.set_reject_move(true);
+        let client = client_for(&server);
+        let file = temp_file(b"fallback");
+        client.put(file.path()).unwrap();
+        assert_eq!(
+            server.object("/dav/ccswitchx/ccswitchx-backup.zip").unwrap(),
+            b"fallback"
+        );
+        assert!(server.paths().iter().all(|path| !path.contains(".tmp-")));
+    }
+
+    #[test]
+    fn failed_move_cleans_temp_object() {
+        let server = FakeWebDav::start("me", "pw");
+        server.set_fail_move(true);
+        let client = client_for(&server);
+        let file = temp_file(b"data");
+        assert!(client.put(file.path()).is_err());
+        assert!(server.paths().iter().all(|path| !path.contains(".tmp-")));
+    }
+
+    #[test]
+    fn put_verifies_remote_size() {
+        let server = FakeWebDav::start("me", "pw");
+        server.set_truncate_after_put(true);
+        let client = client_for(&server);
+        let file = temp_file(b"0123456789");
+        let error = client.put(file.path()).unwrap_err().to_string();
+        assert!(error.contains("大小不一致"));
     }
 }
