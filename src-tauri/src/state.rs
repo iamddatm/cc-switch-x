@@ -24,6 +24,8 @@ pub struct AppState {
     pub maintenance: Arc<RwLock<()>>,
     /// Git 命令串行；git 自己也会抢 index.lock，应用侧先排好队减少失败。
     pub git_ops: Arc<Mutex<()>>,
+    /// 项目级扫描/同步串行；自动与手动同步共用。
+    pub project_ops: Arc<Mutex<()>>,
     git_tx: Sender<GitEvent>,
     git_rx: Mutex<Option<Receiver<GitEvent>>>,
 }
@@ -122,6 +124,7 @@ impl AppState {
             skill_busy: Arc::new(AtomicBool::new(false)),
             maintenance: Arc::new(RwLock::new(())),
             git_ops: Arc::new(Mutex::new(())),
+            project_ops: Arc::new(Mutex::new(())),
             git_tx,
             git_rx: Mutex::new(Some(git_rx)),
         })

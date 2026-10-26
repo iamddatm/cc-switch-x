@@ -5,6 +5,7 @@ pub mod drift;
 pub mod git;
 pub mod hooks;
 pub mod import;
+pub mod projects;
 pub mod rules;
 pub mod sessions;
 pub mod settings;

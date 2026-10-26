@@ -32,6 +32,8 @@ pub enum AppError {
     Backup(String),
     #[error("Git 操作失败：{0}")]
     Git(String),
+    #[error("项目操作失败：{0}")]
+    Project(String),
     #[error("开机自启设置失败：{0}")]
     Autostart(String),
     #[error("来源无效：{0}")]

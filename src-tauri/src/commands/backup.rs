@@ -153,7 +153,7 @@ pub fn reveal_backup_location(state: State<'_, AppState>, id: String) -> Result<
     open_directory(&path)
 }
 
-fn open_directory(path: &Path) -> Result<(), AppError> {
+pub(crate) fn open_directory(path: &Path) -> Result<(), AppError> {
     #[cfg(target_os = "windows")]
     let mut command = {
         let mut command = Command::new("explorer");

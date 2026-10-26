@@ -215,9 +215,9 @@ fn describe_skill(
             .skills
             .get(id)
             .and_then(|snapshot| snapshot.dirs.get(key.as_str()));
-        let Some(state) = state.filter(|state| state.present) else {
+        if !state.is_some_and(|state| state.present) {
             continue;
-        };
+        }
         let path = project_root
             .join(dir_spec(*key).relative_path)
             .join(id)
@@ -438,5 +438,21 @@ mod tests {
         assert!(skills.skills[0].targets.is_empty());
         assert_eq!(skills.skills[0].dirs["claude"].state, "untracked");
         assert_eq!(skills.skills[0].dirs["qoder"].state, "absent");
+    }
+
+    #[test]
+    fn missing_project_path_returns_empty_skills_instead_of_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let home = dir.path().join("home");
+        let project = home.join("gone");
+        std::fs::create_dir_all(&project).unwrap();
+        let view = add_project(&store, &home, &project, &["claude".into()]).unwrap();
+        std::fs::remove_dir_all(&project).unwrap();
+
+        let skills =
+            list_project_skills(&store, &view.id, &[agent_status("claude", true)]).unwrap();
+        assert!(!skills.project.exists);
+        assert!(skills.skills.is_empty());
     }
 }
