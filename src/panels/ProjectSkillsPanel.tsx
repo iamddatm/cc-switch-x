@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FolderOpen, RefreshCw, Sparkles } from "lucide-react";
 import { useProjectSkills } from "../hooks/useProjectSkills";
 import { api } from "../lib/api";
@@ -95,10 +95,17 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [result, setResult] = useState<ProjectSyncReport | null>(null);
   const [conflicts, setConflicts] = useState<ProjectConflict[]>([]);
+  /** 自动同步发现的冲突只挂在这里，用户点开才是对话框。 */
+  const [pending, setPending] = useState<ProjectConflict[]>([]);
+  const [autoSync, setAutoSync] = useState(project.autoSync);
+  const autoSyncedFor = useRef<string | null>(null);
 
   const current = data?.project ?? project;
   const dirs = data?.dirs ?? [];
   const skills = data?.skills ?? [];
+  const hasTargets = skills.some((skill) => skill.targets.length > 0);
+
+  useEffect(() => setAutoSync(project.autoSync), [project.autoSync]);
 
   const guard = async (task: () => Promise<void>) => {
     setBusy(true);
@@ -118,11 +125,32 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
       await refresh();
     });
 
-  const sync = (resolutions: ProjectConflictResolution[] = []) =>
+  const sync = (resolutions: ProjectConflictResolution[] = [], automatic = false) =>
     guard(async () => {
       const report = await api.syncProjectSkills(project.id, resolutions);
       setResult(report);
-      setConflicts(report.conflicts);
+      if (automatic) {
+        setPending(report.conflicts);
+      } else {
+        setConflicts(report.conflicts);
+        setPending([]);
+      }
+      await refresh();
+    });
+
+  // 自动同步：每个项目一次挂载只跑一次，且没有勾选目标时绝不写盘（首次添加不复制）。
+  useEffect(() => {
+    if (!data || !autoSync || !hasTargets) return;
+    if (autoSyncedFor.current === project.id) return;
+    autoSyncedFor.current = project.id;
+    void sync([], true);
+    // sync 依赖 refresh/data，放进依赖会反复触发；这里只按项目 + 是否可自动同步执行。
+  }, [autoSync, data, hasTargets, project.id]);
+
+  const toggleAutoSync = (enabled: boolean) =>
+    guard(async () => {
+      const updated = await api.setProjectAutoSync(project.id, enabled);
+      setAutoSync(updated.autoSync);
       await refresh();
     });
 
@@ -160,6 +188,16 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
         description={`${project.name} · ${project.path}`}
         actions={
           <>
+            <label className="mr-1 flex items-center gap-1.5 text-caption text-fg-2">
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-action"
+                checked={autoSync}
+                disabled={busy}
+                onChange={(event) => void toggleAutoSync(event.target.checked)}
+              />
+              自动同步
+            </label>
             <Button
               size="sm"
               onClick={() =>
@@ -174,7 +212,14 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
             <Button size="sm" variant="primary" loading={busy} onClick={() => void sync()}>
               立即同步
             </Button>
-            <Button size="sm" loading={loading || busy} onClick={() => void refresh()}>
+            <Button
+              size="sm"
+              loading={loading || busy}
+              // 自动同步开着时，刷新顺带把无歧义的改动推一遍。
+              onClick={() =>
+                void (autoSync && hasTargets ? sync([], true) : refresh())
+              }
+            >
               <RefreshCw size={14} aria-hidden />
               刷新
             </Button>
@@ -191,6 +236,16 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
         {(error || actionError) && (
           <Notice tone="danger" className="mb-3">
             {actionError ?? `读取项目 Skills 失败：${error}`}
+          </Notice>
+        )}
+        {pending.length > 0 && (
+          <Notice tone="warning" className="mb-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span>自动同步发现 {pending.length} 个冲突待处理，未写盘。</span>
+              <Button size="sm" onClick={() => setConflicts(pending)}>
+                查看 {pending.length} 个冲突待处理
+              </Button>
+            </div>
           </Notice>
         )}
         {result && (copies > 0 || deletes > 0 || keeps > 0 || result.warnings.length > 0) && (

@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import { ProjectSkillsPanel } from "../panels/ProjectSkillsPanel";
 import { api } from "../lib/api";
-import type { ProjectSkillsView, ProjectView } from "../types";
+import type { ProjectSkillView, ProjectSkillsView, ProjectView } from "../types";
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -12,10 +12,11 @@ vi.mock("../lib/api", () => ({
     syncProjectSkills: vi.fn(),
     removeProjectSkillCopy: vi.fn(),
     uninstallProjectSkill: vi.fn(),
+    setProjectAutoSync: vi.fn(),
   },
 }));
 
-function projectView(): ProjectView {
+function projectView(overrides: Partial<ProjectView> = {}): ProjectView {
   return {
     id: "p1",
     path: "C:/work/demo",
@@ -24,6 +25,7 @@ function projectView(): ProjectView {
     lastOpenedAt: "2026-10-02T00:00:00Z",
     autoSync: true,
     exists: true,
+    ...overrides,
   };
 }
 
@@ -43,9 +45,12 @@ const QODER_DIR = {
   verified: true,
 } as const;
 
-function viewWithOneSkill(): ProjectSkillsView {
+function viewWithOneSkill(
+  skill: Partial<ProjectSkillView> = {},
+  project: Partial<ProjectView> = {},
+): ProjectSkillsView {
   return {
-    project: projectView(),
+    project: projectView(project),
     dirs: [
       { ...CLAUDE_DIR, agents: ["claude"] },
       { ...QODER_DIR, agents: ["qoder"] },
@@ -62,6 +67,7 @@ function viewWithOneSkill(): ProjectSkillsView {
         },
         source: null,
         lastOp: null,
+        ...skill,
       },
     ],
     conflictCount: 0,
@@ -87,6 +93,7 @@ beforeEach(() => {
     conflicts: [],
     warnings: [],
   });
+  vi.mocked(api.setProjectAutoSync).mockResolvedValue(projectView());
 });
 
 test("renders project skill matrix with per-directory state", async () => {
@@ -235,4 +242,48 @@ test("a failed sync reports the backend reason instead of failing silently", asy
   render(<ProjectSkillsPanel project={projectView()} />);
   fireEvent.click(await screen.findByRole("button", { name: "立即同步" }));
   expect(await screen.findByText(/回滚出现问题/)).toBeInTheDocument();
+});
+
+test("auto sync runs once on mount when enabled and targets exist", async () => {
+  vi.mocked(api.listProjectSkills).mockResolvedValue(
+    viewWithOneSkill({ targets: ["claude"] }, { autoSync: true }),
+  );
+  vi.mocked(api.syncProjectSkills).mockResolvedValue({
+    outcomes: [],
+    conflicts: [],
+    warnings: [],
+  });
+
+  render(<ProjectSkillsPanel project={projectView({ autoSync: true })} />);
+  await screen.findByRole("checkbox", { name: "同步到 Claude Code" });
+  await waitFor(() => expect(api.syncProjectSkills).toHaveBeenCalledTimes(1));
+});
+
+test("auto sync stays silent on first add and reports conflicts as an entry", async () => {
+  vi.mocked(api.listProjectSkills).mockResolvedValue(
+    viewWithOneSkill({ targets: ["claude"] }, { autoSync: true }),
+  );
+  vi.mocked(api.syncProjectSkills).mockResolvedValue({
+    outcomes: [],
+    conflicts: [{ skillId: "a", dirs: ["claude", "qoder"], recommended: "claude" }],
+    warnings: [],
+  });
+
+  render(<ProjectSkillsPanel project={projectView({ autoSync: true })} />);
+  // 自动同步不弹对话框，只留入口；点入口才展开。
+  const entry = await screen.findByRole("button", { name: /1 个冲突待处理/ });
+  expect(screen.queryByText("需要处理冲突")).not.toBeInTheDocument();
+  fireEvent.click(entry);
+  expect(await screen.findByText("需要处理冲突")).toBeInTheDocument();
+});
+
+test("toggling auto sync persists through setProjectAutoSync", async () => {
+  vi.mocked(api.listProjectSkills).mockResolvedValue(
+    viewWithOneSkill({}, { autoSync: false }),
+  );
+  vi.mocked(api.setProjectAutoSync).mockResolvedValue(projectView({ autoSync: true }));
+
+  render(<ProjectSkillsPanel project={projectView({ autoSync: false })} />);
+  fireEvent.click(await screen.findByRole("checkbox", { name: "自动同步" }));
+  await waitFor(() => expect(api.setProjectAutoSync).toHaveBeenCalledWith("p1", true));
 });
