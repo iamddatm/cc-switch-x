@@ -2,6 +2,7 @@ pub mod agents;
 pub mod apply;
 pub mod assets;
 pub mod backup;
+pub mod cloud_backup;
 pub mod drift;
 pub mod git_sync;
 pub mod import;
