@@ -386,6 +386,7 @@ fn render_now(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::AssetType;
     use crate::services::project_registry::selectable_dir_keys;
     use crate::services::agents::AgentStatus;
     use std::path::PathBuf;
@@ -526,6 +527,67 @@ mod tests {
         );
         // 中央库那边照旧带 meta，说明差别只在 sink，不在流程。
         assert!(canonical.join("SKILL.md").is_file());
+    }
+
+    /// 中央库与项目共用同一条安装流水线：算出的 ID 与状态必须一致，
+    /// 差别只允许出现在「写不写 `.meta.json`」和落点目录上。
+    #[test]
+    fn installing_into_a_project_matches_the_central_library_step_for_step() {
+        let fx = fixture();
+        let source = source_dir(&fx, "demo", "---\nname: Demo\n---\n内容\n");
+        let input = SkillSourceInput::Directory { path: source.clone() };
+        let selection = InstallSelection {
+            relative_path: ".".into(),
+            id: "demo".into(),
+        };
+
+        let store_report = skill_source::install(
+            SkillSink::Store {
+                store: &fx.store,
+                home: &fx.root,
+            },
+            &input,
+            None,
+            std::slice::from_ref(&selection),
+            ConflictPolicy::Skip,
+        )
+        .unwrap();
+        assert_eq!(store_report.outcomes[0].status, "installed");
+
+        let project_report = install_dir(&fx, &source, "demo", &["claude"], &fx.allowed).unwrap();
+        assert_eq!(
+            project_report.installed[0].id,
+            store_report.outcomes[0].id,
+            "同一个选择在两侧算出的落点 ID 必须一致"
+        );
+        assert_eq!(project_report.installed[0].status, "installed");
+        assert_eq!(project_report.installed[0].name, store_report.outcomes[0].name);
+
+        assert!(
+            fx.store
+                .asset_dir(AssetType::Skill)
+                .join("demo/.meta.json")
+                .is_file(),
+            "中央库照旧带来源元数据"
+        );
+        assert!(
+            !canonical_skill_dir(&fx.root, "demo")
+                .unwrap()
+                .join(".meta.json")
+                .exists(),
+            "项目真源不写 .meta.json"
+        );
+        let leftovers = std::fs::read_dir(crate::domain::project::canonical_root(&fx.root))
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".staging-")
+            })
+            .count();
+        assert_eq!(leftovers, 0, "项目暂存目录用完要清掉");
     }
 
     #[test]
