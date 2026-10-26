@@ -3,6 +3,8 @@ import { cn } from "../../lib/cn";
 export interface SegmentedItem<T extends string> {
   value: T;
   label: string;
+  /** 置灰且不可点击；用于尚未满足前提条件的选项。 */
+  disabled?: boolean;
 }
 
 export interface SegmentedControlProps<T extends string> {
@@ -34,6 +36,7 @@ export function SegmentedControl<T extends string>({
             key={item.value}
             type="button"
             aria-pressed={active}
+            disabled={item.disabled}
             onClick={() => onValueChange(item.value)}
             className={cn(
               "rounded-[4px] font-medium transition-colors duration-150",
@@ -41,6 +44,7 @@ export function SegmentedControl<T extends string>({
               active
                 ? "bg-surface text-fg-1 shadow-sm"
                 : "text-fg-2 hover:text-fg-1",
+              item.disabled && "cursor-not-allowed opacity-50 hover:text-fg-2",
             )}
           >
             {item.label}

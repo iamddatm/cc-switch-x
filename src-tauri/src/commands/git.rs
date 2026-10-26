@@ -89,12 +89,36 @@ pub async fn git_init(app: AppHandle, branch: Option<String>) -> Result<GitStatu
             git_sync::init(&state.store, &branch)?;
         }
         let updated = save_git_settings(&state, |git| {
-            git.enabled = true;
             git.branch = branch;
         })?;
         Ok(git_sync::status(&state.store, &updated.backup.git))
     })
     .await
+}
+
+/// 保存远端与分支。地址变化会让此前的验证失效并停用自动同步，必须重新验证。
+fn apply_remote(
+    state: &AppState,
+    remote: Option<String>,
+    branch: String,
+) -> Result<AppSettings, AppError> {
+    let remote = remote
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    {
+        let _ops = state
+            .git_ops
+            .lock()
+            .map_err(|_| AppError::InvalidInput("git 锁失败".into()))?;
+        git_sync::set_remote(&state.store, remote.as_deref(), &branch)?;
+    }
+    save_git_settings(state, |git| {
+        if git.remote != remote {
+            git.enabled = false;
+        }
+        git.remote = remote;
+        git.branch = branch;
+    })
 }
 
 #[tauri::command]
@@ -105,19 +129,38 @@ pub async fn git_set_remote(
 ) -> Result<GitStatus, AppError> {
     run_blocking(move || {
         let state = app.state::<AppState>();
+        let updated = apply_remote(&state, remote, branch)?;
+        Ok(git_sync::status(&state.store, &updated.backup.git))
+    })
+    .await
+}
+
+/// 保存表单里的远端并执行 `git ls-remote`；验证通过后才允许开启 Git 备份。
+#[tauri::command]
+pub async fn git_verify_remote(
+    app: AppHandle,
+    remote: Option<String>,
+    branch: String,
+) -> Result<GitStatus, AppError> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let Some(candidate) = remote
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+        else {
+            return Err(AppError::InvalidInput("请先填写远端地址".into()));
+        };
+        // 先保存地址（失败也会保留以便修正），再联网验证；验证结果与地址绑定。
+        let updated = apply_remote(&state, remote, branch.clone())?;
         {
             let _ops = state
                 .git_ops
                 .lock()
                 .map_err(|_| AppError::InvalidInput("git 锁失败".into()))?;
-            git_sync::set_remote(&state.store, remote.as_deref(), &branch)?;
+            git_sync::verify_remote(&state.store, &candidate, &branch)?;
         }
-        let updated = save_git_settings(&state, |git| {
-            git.remote = remote
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty());
-            git.branch = branch;
-        })?;
         Ok(git_sync::status(&state.store, &updated.backup.git))
     })
     .await

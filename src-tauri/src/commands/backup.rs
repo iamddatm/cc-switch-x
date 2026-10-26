@@ -2,6 +2,7 @@
 
 use crate::error::AppError;
 use crate::services::backup::{self, BackupUsage, RestoreBackupReport, SnapshotInfo, SnapshotKind};
+use crate::services::git_sync;
 use crate::services::settings as settings_service;
 use crate::settings::{self as settings_file, AppSettings, BackupSettings};
 use crate::state::AppState;
@@ -102,6 +103,20 @@ pub fn set_backup_settings(
     state: State<'_, AppState>,
     settings: BackupSettings,
 ) -> Result<AppSettings, AppError> {
+    // 只在「从未启用切到启用」时强制验证；旧设置里残留的 enabled 不应阻塞策略保存。
+    let already_enabled = state
+        .settings
+        .lock()
+        .map(|current| current.backup.git.enabled)
+        .unwrap_or(false);
+    if settings.git.enabled
+        && !already_enabled
+        && !git_sync::is_remote_verified(&state.store, settings.git.remote.as_deref())
+    {
+        return Err(AppError::InvalidInput(
+            "启用 Git 备份前，请先在备份面板验证远端仓库".into(),
+        ));
+    }
     let updated = settings_service::set_backup_settings_at(
         &settings_file::settings_path()?,
         settings,

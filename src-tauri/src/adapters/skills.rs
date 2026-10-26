@@ -2,11 +2,11 @@ use crate::adapters::paths::expand_root;
 use crate::domain::agent::AgentDescriptor;
 use crate::domain::AssetType;
 use crate::error::AppError;
+use crate::process::hidden_command;
 use crate::services::agents::save_link_kind;
 use crate::store::{copy_dir, Store};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// 落地方式。`link_kind` 记的是**实测结果**而不是配置意图：Windows 上符号链接
 /// 需要开发者模式或管理员权限，拿不到就得降级，UI 必须显示真正用的那种。
@@ -202,7 +202,7 @@ fn symlink_dir(source: &Path, target: &Path) -> bool {
 fn junction(source: &Path, target: &Path) -> bool {
     let link = target.to_string_lossy().to_string();
     let origin = source.to_string_lossy().to_string();
-    Command::new("cmd")
+    hidden_command("cmd")
         .args(["/C", "mklink", "/J", &link, &origin])
         .output()
         .map(|output| output.status.success() && target.symlink_metadata().is_ok())

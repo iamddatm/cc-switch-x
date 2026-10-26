@@ -50,6 +50,7 @@ export interface AppSettings {
   /** null = 使用内置默认仓库。 */
   skillRepos: SkillRepo[] | null;
   backup: BackupSettings;
+  cloud: CloudBackupSettings;
 }
 
 export interface BackupSettings {
@@ -96,6 +97,50 @@ export interface RestoreBackupReport {
   removedFiles: number;
 }
 
+export interface CloudBackupSettings {
+  autoUpload: boolean;
+  baseUrl: string;
+  username: string;
+  remoteDir: string;
+}
+
+export interface CloudSettingsView extends CloudBackupSettings {
+  hasPassword: boolean;
+}
+
+export type CloudSettingsInput = CloudBackupSettings & {
+  /** null = 保留已保存的密码；空串 = 清除。 */
+  password: string | null;
+};
+
+export type CloudTestInput = Omit<CloudSettingsInput, "autoUpload">;
+
+export interface CloudRemoteStatus {
+  exists: boolean;
+  sizeBytes: number | null;
+  modifiedAt: number | null;
+  etag: string | null;
+}
+
+export interface CloudStatus {
+  configured: boolean;
+  hasPassword: boolean;
+  autoUpload: boolean;
+  remote: CloudRemoteStatus | null;
+  remoteError: string | null;
+  lastUploadAt: number | null;
+  lastError: string | null;
+}
+
+export interface CloudRestoreReport {
+  safetyBackup: string;
+  restoredFiles: number;
+  removedFiles: number;
+  downloadedSnapshot: string;
+  remoteSizeBytes: number;
+  remoteModifiedAt: number | null;
+}
+
 export type GitSyncState =
   | "unavailable"
   | "disabled"
@@ -108,6 +153,8 @@ export interface GitStatus {
   available: boolean;
   initialized: boolean;
   enabled: boolean;
+  /** 当前远端地址是否通过了 ls-remote 验证。 */
+  remoteVerified: boolean;
   branch: string | null;
   remote: string | null;
   dirty: number;

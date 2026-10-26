@@ -1,4 +1,4 @@
-//! Git 备份：把可移植真源变成工作区，自动提交并在配置了远端时同步。
+//! Git 备份：把可移植真源变成工作区，远端验证通过后自动提交并同步。
 //!
 //! 安全边界：
 //! - 所有 git 调用都用参数数组，不经过 shell；
@@ -8,6 +8,7 @@
 
 use crate::error::AppError;
 use crate::index::Index;
+use crate::process::hidden_command;
 use crate::services::backup::{self, SnapshotKind};
 use crate::settings::{validate_git_branch, validate_git_remote, GitBackupSettings};
 use crate::state::AppState;
@@ -16,8 +17,9 @@ use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
@@ -49,6 +51,8 @@ pub struct GitStatus {
     pub available: bool,
     pub initialized: bool,
     pub enabled: bool,
+    /// 当前设置的远端地址是否通过了 `git ls-remote` 验证。
+    pub remote_verified: bool,
     pub branch: Option<String>,
     pub remote: Option<String>,
     pub dirty: u64,
@@ -97,6 +101,9 @@ struct Persisted {
     paused: bool,
     #[serde(default)]
     conflict_files: Vec<String>,
+    /// 上次通过 `git ls-remote` 验证的远端地址；地址一变就作废。
+    #[serde(default)]
+    verified_remote: Option<String>,
 }
 
 impl Persisted {
@@ -139,11 +146,21 @@ fn ensure_layout(store: &Store) -> Result<(), AppError> {
 }
 
 pub fn is_available() -> bool {
-    Command::new("git")
+    // 只缓存成功结果：用户装好 git 后不必重启应用；git 缺失时多探测几次无所谓。
+    static AVAILABLE: Mutex<Option<bool>> = Mutex::new(None);
+    let mut cached = AVAILABLE.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(available) = *cached {
+        return available;
+    }
+    let available = hidden_command("git")
         .arg("--version")
         .output()
         .map(|output| output.status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if available {
+        *cached = Some(true);
+    }
+    available
 }
 
 /// 必须是我们自己 `git init` 出来的工作区，不能只凭父目录是仓库就认。
@@ -158,7 +175,7 @@ fn initialized(store: &Store) -> bool {
 }
 
 fn run_git(root: &Path, args: &[&str]) -> Result<Output, AppError> {
-    Command::new("git")
+    hidden_command("git")
         .arg("-C")
         .arg(root)
         .args(args)
@@ -185,10 +202,6 @@ fn git_ok(root: &Path, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-fn current_branch(root: &Path) -> Option<String> {
-    git_out(root, &["symbolic-ref", "--short", "HEAD"]).ok()
-}
-
 fn has_head(root: &Path) -> bool {
     git_ok(root, &["rev-parse", "--verify", "HEAD"])
 }
@@ -212,6 +225,52 @@ fn dirty_paths(root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// `git status --porcelain=v2 --branch` 里状态卡要用的字段。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct WorktreeState {
+    branch: Option<String>,
+    dirty: u64,
+    has_head: bool,
+}
+
+fn parse_status_v2(text: &str) -> WorktreeState {
+    let mut state = WorktreeState::default();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("# branch.head ") {
+            let value = rest.trim();
+            // detached 时沿用设置里的分支名，与原 symbolic-ref 失败后的回退一致。
+            if value != "(detached)" {
+                state.branch = Some(value.to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("# branch.oid ") {
+            state.has_head = rest.trim() != "(initial)";
+        } else if !line.starts_with('#') && !line.is_empty() {
+            state.dirty += 1;
+        }
+    }
+    state
+}
+
+/// 一次 `git status` 同时拿到分支名、脏文件数与是否有 HEAD。
+fn worktree_state(root: &Path) -> Option<WorktreeState> {
+    git_out(root, &["status", "--porcelain=v2", "--branch"])
+        .ok()
+        .map(|text| parse_status_v2(&text))
+}
+
+fn ahead_behind(root: &Path, branch: &str) -> (u64, u64) {
+    let text = git_out(
+        root,
+        &["rev-list", "--left-right", "--count", &format!("HEAD...origin/{branch}")],
+    )
+    .unwrap_or_default();
+    let mut values = text.split_whitespace();
+    (
+        values.next().and_then(|value| value.parse().ok()).unwrap_or(0),
+        values.next().and_then(|value| value.parse().ok()).unwrap_or(0),
+    )
+}
+
 fn commit_count(root: &Path, range: &str) -> u64 {
     git_out(root, &["rev-list", "--count", range])
         .ok()
@@ -219,51 +278,49 @@ fn commit_count(root: &Path, range: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// 当前设置的远端地址是否通过过 `git ls-remote` 验证。
+pub fn is_remote_verified(store: &Store, remote: Option<&str>) -> bool {
+    let Some(remote) = remote.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    Persisted::load(store).verified_remote.as_deref() == Some(remote)
+}
+
 pub fn status(store: &Store, git: &GitBackupSettings) -> GitStatus {
     let available = is_available();
-    let initialized = available && initialized(store);
-    let persisted = Persisted::load(store);
-    let branch = if initialized {
-        current_branch(store.root()).or_else(|| Some(git.branch.clone()))
-    } else {
-        Some(git.branch.clone())
-    };
-    let remote = git.remote.clone();
-    let dirty = if initialized {
-        dirty_paths(store.root()).len() as u64
-    } else {
-        0
-    };
-    let (ahead, behind) = if initialized {
-        match (&remote, &branch) {
-            (Some(_), Some(branch)) if git_ok(store.root(), &["rev-parse", "--verify", &format!("origin/{branch}")]) => {
-                let text = git_out(
-                    store.root(),
-                    &["rev-list", "--left-right", "--count", &format!("HEAD...origin/{branch}")],
-                )
-                .unwrap_or_default();
-                let mut values = text.split_whitespace();
-                (
-                    values.next().and_then(|value| value.parse().ok()).unwrap_or(0),
-                    values.next().and_then(|value| value.parse().ok()).unwrap_or(0),
-                )
-            }
-            _ => (0, 0),
-        }
-    } else {
-        (0, 0)
-    };
-    let last_commit_at = if initialized {
-        git_out(store.root(), &["log", "-1", "--format=%ct"])
-            .ok()
-            .and_then(|value| value.parse::<i64>().ok())
-            .map(|seconds| seconds * 1000)
+    // 只认 store 自己的 .git：父目录是仓库不算，与原 initialized() 的边界一致。
+    let worktree = if available && store.root().join(".git").is_dir() {
+        worktree_state(store.root())
     } else {
         None
     };
+    let initialized = worktree.is_some();
+    let persisted = Persisted::load(store);
+    let branch = worktree
+        .as_ref()
+        .and_then(|state| state.branch.clone())
+        .or_else(|| Some(git.branch.clone()));
+    let remote = git.remote.clone();
+    let remote_verified = remote
+        .as_deref()
+        .is_some_and(|value| persisted.verified_remote.as_deref() == Some(value.trim()));
+    let dirty = worktree.as_ref().map(|state| state.dirty).unwrap_or(0);
+    let (ahead, behind) = match (&worktree, &remote) {
+        (Some(state), Some(_)) if state.has_head => {
+            ahead_behind(store.root(), branch.as_deref().unwrap_or(git.branch.as_str()))
+        }
+        _ => (0, 0),
+    };
+    let last_commit_at = match &worktree {
+        Some(state) if state.has_head => git_out(store.root(), &["log", "-1", "--format=%ct"])
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .map(|seconds| seconds * 1000),
+        _ => None,
+    };
     let state = if !available {
         GitSyncState::Unavailable
-    } else if !initialized || !git.enabled {
+    } else if !initialized || !git.enabled || !remote_verified {
         GitSyncState::Disabled
     } else if persisted.paused {
         GitSyncState::Paused
@@ -276,6 +333,7 @@ pub fn status(store: &Store, git: &GitBackupSettings) -> GitStatus {
         available,
         initialized,
         enabled: git.enabled,
+        remote_verified,
         branch,
         remote,
         dirty,
@@ -289,7 +347,7 @@ pub fn status(store: &Store, git: &GitBackupSettings) -> GitStatus {
     }
 }
 
-/// 初始化仓库并提交第一版；调用方负责写回 `git.enabled = true`。
+/// 初始化仓库并提交第一版；是否开启自动同步由调用方在远端验证通过后决定。
 pub fn init(store: &Store, branch: &str) -> Result<(), AppError> {
     if !is_available() {
         return Err(AppError::Git("未检测到 git，请先安装 Git 并加入 PATH".into()));
@@ -313,7 +371,8 @@ pub fn set_remote(
         return Err(AppError::Git("请先初始化 Git 备份".into()));
     }
     validate_git_branch(branch).map_err(AppError::InvalidInput)?;
-    match remote.map(str::trim).filter(|value| !value.is_empty()) {
+    let remote = remote.map(str::trim).filter(|value| !value.is_empty());
+    match remote {
         Some(remote) => {
             validate_git_remote(remote).map_err(AppError::InvalidInput)?;
             if git_ok(store.root(), &["remote", "get-url", "origin"]) {
@@ -329,6 +388,40 @@ pub fn set_remote(
         }
     }
     set_branch(store.root(), branch)?;
+    // 地址变了，旧地址的验证结果立即作废；改回旧地址需要重新验证。
+    let mut persisted = Persisted::load(store);
+    if persisted.verified_remote.as_deref() != remote {
+        persisted.verified_remote = None;
+        persisted.save(store)?;
+    }
+    Ok(())
+}
+
+/// 用 `git ls-remote` 检查远端可达且凭据有效；分支尚未创建也算通过。
+///
+/// 验证结果与地址绑定，写入 `state/git.json`；只有通过验证才允许开启自动同步。
+pub fn verify_remote(store: &Store, remote: &str, branch: &str) -> Result<(), AppError> {
+    if !is_available() {
+        return Err(AppError::Git("未检测到 git，请先安装 Git 并加入 PATH".into()));
+    }
+    if !initialized(store) {
+        return Err(AppError::Git("请先初始化 Git 备份".into()));
+    }
+    validate_git_branch(branch).map_err(AppError::InvalidInput)?;
+    validate_git_remote(remote).map_err(AppError::InvalidInput)?;
+    let output = run_git(
+        store.root(),
+        &["ls-remote", remote.trim(), &format!("refs/heads/{branch}")],
+    )?;
+    if !output.status.success() {
+        return Err(AppError::Git(format!(
+            "远端验证失败：{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let mut persisted = Persisted::load(store);
+    persisted.verified_remote = Some(remote.trim().to_string());
+    persisted.save(store)?;
     Ok(())
 }
 
@@ -614,12 +707,13 @@ fn git_snapshot(state: &AppState) -> Option<(GitBackupSettings, u32)> {
     Some((settings.backup.git.clone(), settings.backup.retain_count))
 }
 
-fn auto_commit_allowed(git: &GitBackupSettings) -> bool {
-    git.enabled && git.auto_commit
+/// 自动同步必须同时满足「用户已开启」和「远端已验证」；后者也可能被外部设置改动破坏。
+fn auto_commit_allowed(store: &Store, git: &GitBackupSettings) -> bool {
+    git.enabled && git.auto_commit && is_remote_verified(store, git.remote.as_deref())
 }
 
-fn auto_pull_allowed(git: &GitBackupSettings) -> bool {
-    git.enabled && git.auto_pull && git.remote.is_some()
+fn auto_pull_allowed(store: &Store, git: &GitBackupSettings) -> bool {
+    git.enabled && git.auto_pull && is_remote_verified(store, git.remote.as_deref())
 }
 
 pub fn spawn_worker(app: AppHandle, rx: Receiver<GitEvent>) {
@@ -669,7 +763,7 @@ fn run_auto_commit(app: &AppHandle, message: &str) {
     let Some((git, _retain)) = git_snapshot(&state) else {
         return;
     };
-    if !auto_commit_allowed(&git) || !initialized(&state.store) {
+    if !auto_commit_allowed(&state.store, &git) || !initialized(&state.store) {
         return;
     }
     let changed = {
@@ -705,7 +799,7 @@ fn run_auto_pull(app: &AppHandle) {
     let Some((git, retain)) = git_snapshot(&state) else {
         return;
     };
-    if !auto_pull_allowed(&git) || !initialized(&state.store) {
+    if !auto_pull_allowed(&state.store, &git) || !initialized(&state.store) {
         return;
     }
     if Persisted::load(&state.store).paused {
@@ -734,7 +828,10 @@ pub fn startup_sync(app: &AppHandle) {
     let Some((git, _retain)) = git_snapshot(&state) else {
         return;
     };
-    if !git.enabled || !initialized(&state.store) {
+    if !git.enabled
+        || !is_remote_verified(&state.store, git.remote.as_deref())
+        || !initialized(&state.store)
+    {
         return;
     }
     if !dirty_paths(state.store.root()).is_empty() {
@@ -753,6 +850,7 @@ pub fn startup_sync(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use crate::domain::AssetType;
     use crate::settings::GitBackupSettings;
     use tempfile::tempdir;
@@ -817,6 +915,60 @@ mod tests {
     }
 
     #[test]
+    fn parse_status_v2_reads_branch_dirty_and_head() {
+        let text = concat!(
+            "# branch.oid 1234567\n",
+            "# branch.head main\n",
+            "1 M. N... 100644 100644 100644 aaa bbb file.txt\n",
+            "? new.txt\n",
+        );
+        let state = parse_status_v2(text);
+        assert_eq!(state.branch.as_deref(), Some("main"));
+        assert_eq!(state.dirty, 2);
+        assert!(state.has_head);
+    }
+
+    #[test]
+    fn parse_status_v2_handles_initial_and_detached() {
+        let initial = parse_status_v2("# branch.oid (initial)\n# branch.head main\n");
+        assert_eq!(initial.branch.as_deref(), Some("main"));
+        assert!(!initial.has_head);
+        assert_eq!(initial.dirty, 0);
+
+        let detached = parse_status_v2("# branch.oid abc\n# branch.head (detached)\n");
+        assert!(detached.branch.is_none());
+        assert!(detached.has_head);
+    }
+
+    #[test]
+    fn verification_is_bound_to_the_remote_address() {
+        let Some((_dir, store, _index, remote)) = git_fixture() else {
+            return;
+        };
+        init(&store, "main").unwrap();
+        let url = remote_url(&remote);
+        assert!(!is_remote_verified(&store, Some(&url)));
+
+        verify_remote(&store, &url, "main").unwrap();
+        assert!(is_remote_verified(&store, Some(&url)));
+        assert!(status(&store, &git_settings(url.clone())).remote_verified);
+
+        // 地址一变，旧验证立即作废；未验证时状态退回停用。
+        let other = remote_url(&_dir.path().join("other.git"));
+        set_remote(&store, Some(&other), "main").unwrap();
+        assert!(!is_remote_verified(&store, Some(&other)));
+        assert_eq!(
+            status(&store, &git_settings(other)).state,
+            GitSyncState::Disabled
+        );
+
+        // 不可达的远端验证失败，不留下验证记录。
+        let missing = "file:///definitely/missing.git";
+        assert!(verify_remote(&store, missing, "main").is_err());
+        assert!(!is_remote_verified(&store, Some(missing)));
+    }
+
+    #[test]
     fn init_commit_push_and_pull_roundtrip() {
         let Some((_dir, store, mut index, remote)) = git_fixture() else {
             return;
@@ -824,11 +976,13 @@ mod tests {
         write_mcp(&store, "Playwright");
         init(&store, "main").unwrap();
         set_remote(&store, Some(&remote_url(&remote)), "main").unwrap();
+        verify_remote(&store, &remote_url(&remote), "main").unwrap();
         push(&store, "main").unwrap();
 
         let settings = git_settings(remote_url(&remote));
         let status = status(&store, &settings);
         assert!(status.initialized);
+        assert!(status.remote_verified);
         assert_eq!(status.dirty, 0);
         assert_eq!(status.branch.as_deref(), Some("main"));
         let commits = list_commits(&store, 10).unwrap();
@@ -875,6 +1029,7 @@ mod tests {
         write_mcp(&store, "Playwright");
         init(&store, "main").unwrap();
         set_remote(&store, Some(&remote_url(&remote)), "main").unwrap();
+        verify_remote(&store, &remote_url(&remote), "main").unwrap();
         push(&store, "main").unwrap();
 
         let other = clone_remote(&remote, &_dir.path().join("other"));

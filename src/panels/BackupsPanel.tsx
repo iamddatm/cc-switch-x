@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ArchiveRestore,
+  Cloud,
+  Eye,
+  EyeOff,
   GitBranch,
   HardDrive,
   RefreshCw,
@@ -12,15 +15,21 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { Dialog } from "../components/ui/Dialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Field } from "../components/ui/Field";
+import { IconButton } from "../components/ui/IconButton";
 import { Input } from "../components/ui/Input";
 import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
+import {
+  SegmentedControl,
+  type SegmentedItem,
+} from "../components/ui/SegmentedControl";
 import { Select } from "../components/ui/Select";
 import { useBackups } from "../hooks/useBackups";
 import { api } from "../lib/api";
 import { formatBytes, formatRelativeTime } from "../lib/format";
 import type {
   BackupSettings,
+  CloudStatus,
   GitCommit,
   GitStatus,
   SnapshotKind,
@@ -28,6 +37,9 @@ import type {
 
 const INTERVALS = [0, 6, 12, 24, 48, 168];
 const RETAINS = [3, 5, 10, 15, 20, 30, 50];
+
+/** 远端备份只能启用一种；两种都未开启时只做本机快照。 */
+type BackupMethod = "none" | "git" | "webdav";
 
 const KIND_LABEL: Record<SnapshotKind, string> = {
   manual: "手动",
@@ -79,6 +91,16 @@ function gitStateLabel(git: GitStatus): string {
   }
 }
 
+function cloudState(status: CloudStatus | null): {
+  label: string;
+  tone: "neutral" | "success" | "warning" | "danger";
+} {
+  if (!status?.configured) return { label: "未配置", tone: "neutral" };
+  if (status.remoteError) return { label: "连接失败", tone: "danger" };
+  if (status.remote?.exists) return { label: "云端有备份", tone: "success" };
+  return { label: "已配置", tone: "neutral" };
+}
+
 export function BackupsPanel() {
   const {
     snapshots,
@@ -86,10 +108,13 @@ export function BackupsPanel() {
     settings,
     git,
     commits,
+    cloud,
+    cloudStatus,
     loading,
     busy,
     error,
     refresh,
+    refreshCloudStatus,
     run,
   } = useBackups();
   const [notice, setNotice] = useState<string | null>(null);
@@ -104,7 +129,15 @@ export function BackupsPanel() {
   );
   const [remoteInput, setRemoteInput] = useState("");
   const [branchInput, setBranchInput] = useState("main");
+  const [cloudBaseUrl, setCloudBaseUrl] = useState("");
+  const [cloudUsername, setCloudUsername] = useState("");
+  const [cloudPassword, setCloudPassword] = useState("");
+  const [cloudPasswordDirty, setCloudPasswordDirty] = useState(false);
+  const [showCloudPassword, setShowCloudPassword] = useState(false);
+  const [cloudRemoteDir, setCloudRemoteDir] = useState("ccswitchx");
+  const [cloudRestoreOpen, setCloudRestoreOpen] = useState(false);
   const inputsReady = useRef(false);
+  const cloudInputsReady = useRef(false);
 
   useEffect(() => {
     if (inputsReady.current || !settings) return;
@@ -112,6 +145,14 @@ export function BackupsPanel() {
     setBranchInput(settings.git.branch);
     inputsReady.current = true;
   }, [settings]);
+
+  useEffect(() => {
+    if (cloudInputsReady.current || !cloud) return;
+    setCloudBaseUrl(cloud.baseUrl);
+    setCloudUsername(cloud.username);
+    setCloudRemoteDir(cloud.remoteDir);
+    cloudInputsReady.current = true;
+  }, [cloud]);
 
   const act = async (key: string, action: () => Promise<unknown>, success?: string) => {
     setNotice(null);
@@ -152,6 +193,22 @@ export function BackupsPanel() {
         ),
       "远端设置已保存",
     );
+  };
+
+  const verifyRemote = async () => {
+    setNotice(null);
+    try {
+      await run("git-verify", () =>
+        api.gitVerifyRemote(
+          remoteInput.trim() ? remoteInput.trim() : null,
+          branchInput.trim() || "main",
+        ),
+      );
+      setNotice("远端验证通过，可以启用 Git 备份");
+    } catch {
+      // 错误已展示；验证失败时地址仍已保存，刷新一次让状态同步
+      void refresh();
+    }
   };
 
   const createSnapshot = () => {
@@ -272,8 +329,160 @@ export function BackupsPanel() {
     }
   };
 
+  const cloudPasswordValue = () => (cloudPasswordDirty ? cloudPassword : null);
+
+  const saveCloud = async () => {
+    setNotice(null);
+    try {
+      const saved = await run("cloud-save", () =>
+        api.setCloudSettings({
+          baseUrl: cloudBaseUrl.trim(),
+          username: cloudUsername.trim(),
+          password: cloudPasswordValue(),
+          remoteDir: cloudRemoteDir.trim(),
+          autoUpload: cloud?.autoUpload ?? false,
+        }),
+      );
+      setCloudBaseUrl(saved.baseUrl);
+      setCloudUsername(saved.username);
+      setCloudRemoteDir(saved.remoteDir);
+      setCloudPassword("");
+      setCloudPasswordDirty(false);
+      setShowCloudPassword(false);
+      setNotice("云备份设置已保存");
+    } catch {
+      // 错误已展示
+    }
+  };
+
+  const testCloud = async () => {
+    setNotice(null);
+    try {
+      const latency = await run("cloud-test", () =>
+        api.testCloudConnection({
+          baseUrl: cloudBaseUrl.trim(),
+          username: cloudUsername.trim(),
+          password: cloudPasswordValue(),
+          remoteDir: cloudRemoteDir.trim(),
+        }),
+      );
+      setNotice(`连接成功（${latency} ms）`);
+    } catch {
+      // 错误已展示
+    }
+  };
+
+  const uploadCloud = async () => {
+    setNotice(null);
+    try {
+      const status = await run("cloud-upload", () => api.cloudUploadNow());
+      const size = status.remote?.sizeBytes;
+      setNotice(
+        size != null
+          ? `已上传云端备份（${formatBytes(size)}）`
+          : "已上传云端备份",
+      );
+    } catch {
+      // 错误已展示
+    }
+  };
+
+  const confirmCloudRestore = async () => {
+    setNotice(null);
+    try {
+      const report = await run("cloud-restore", () => api.cloudRestoreLatest());
+      setCloudRestoreOpen(false);
+      setNotice(
+        `已从云端恢复 ${report.restoredFiles} 个文件，删除 ${report.removedFiles} 个；安全快照：${report.safetyBackup}`,
+      );
+    } catch {
+      // 错误已展示
+    }
+  };
+
   const interval = settings?.intervalHours ?? 24;
   const retain = settings?.retainCount ?? 10;
+  const cloudBadge = cloudState(cloudStatus);
+  const cloudRemotePath = cloudBaseUrl.trim()
+    ? `${cloudBaseUrl.trim().replace(/\/+$/, "")}/${cloudRemoteDir
+        .trim()
+        .replace(/^\/+/, "")}/ccswitchx-backup.zip`
+    : "—";
+
+  // 单选值由实际生效的配置推导：Git 必须已验证，否则即使 enabled 也不显示为选中。
+  const method: BackupMethod =
+    settings?.git.enabled && git?.remoteVerified
+      ? "git"
+      : cloud?.autoUpload
+        ? "webdav"
+        : "none";
+  const gitMethodReady =
+    !!git?.initialized && !!settings?.git.remote && !!git?.remoteVerified;
+  const webdavMethodReady =
+    !!cloud?.baseUrl && !!cloud?.username && !!cloud?.hasPassword;
+  const methodItems: SegmentedItem<BackupMethod>[] = [
+    { value: "none", label: "不启用" },
+    { value: "git", label: "Git 备份", disabled: !gitMethodReady },
+    { value: "webdav", label: "WebDAV 云备份", disabled: !webdavMethodReady },
+  ];
+
+  const selectMethod = (value: BackupMethod) => {
+    if (!settings || !cloud) return;
+    if (value === method) {
+      // 未验证的 Git 可能仍残留 enabled；点「不启用」或「WebDAV」时顺带清掉。
+      if (value === "git" || !settings.git.enabled) return;
+    }
+    if (value === "git") {
+      if (!gitMethodReady) return;
+      void act(
+        "method",
+        () =>
+          api.setBackupSettings({
+            ...settings,
+            git: { ...settings.git, enabled: true },
+          }),
+        "已启用 Git 备份",
+      );
+      return;
+    }
+    if (value === "webdav") {
+      if (!webdavMethodReady) return;
+      void act(
+        "method",
+        () =>
+          api.setCloudSettings({
+            baseUrl: cloud.baseUrl,
+            username: cloud.username,
+            password: null,
+            remoteDir: cloud.remoteDir,
+            autoUpload: true,
+          }),
+        "已启用 WebDAV 云备份",
+      );
+      return;
+    }
+    void act(
+      "method",
+      async () => {
+        if (settings.git.enabled) {
+          await api.setBackupSettings({
+            ...settings,
+            git: { ...settings.git, enabled: false },
+          });
+        }
+        if (cloud.autoUpload) {
+          await api.setCloudSettings({
+            baseUrl: cloud.baseUrl,
+            username: cloud.username,
+            password: null,
+            remoteDir: cloud.remoteDir,
+            autoUpload: false,
+          });
+        }
+      },
+      "已关闭远端自动备份",
+    );
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -301,6 +510,23 @@ export function BackupsPanel() {
         <div className="max-w-4xl space-y-6">
           {error && <Notice tone="danger">{error}</Notice>}
           {notice && <Notice tone="success">{notice}</Notice>}
+
+          <section className="rounded-panel border border-border bg-surface px-4 py-3">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <div className="min-w-0 flex-1">
+                <h3 className="text-strong text-fg-1">远端备份方式</h3>
+                <p className="text-caption text-fg-3">
+                  Git 与 WebDAV 只能启用一种；本机快照不受影响。Git 需先初始化并验证远端，WebDAV 需先保存完整连接配置。
+                </p>
+              </div>
+              <SegmentedControl
+                ariaLabel="远端备份方式"
+                value={method}
+                items={methodItems}
+                onValueChange={selectMethod}
+              />
+            </div>
+          </section>
 
           <section className="rounded-panel border border-border bg-surface">
             <div className="flex items-center gap-2 border-b border-border px-4 py-3">
@@ -481,6 +707,11 @@ export function BackupsPanel() {
               <GitBranch size={15} className="text-fg-3" aria-hidden />
               <h3 className="text-strong text-fg-1">Git 备份</h3>
               {git && <Badge tone={gitStateTone(git)}>{gitStateLabel(git)}</Badge>}
+              {git?.initialized && (
+                <Badge tone={git.remoteVerified ? "success" : "warning"}>
+                  {git.remoteVerified ? "远端已验证" : "远端未验证"}
+                </Badge>
+              )}
               <span className="ml-auto flex gap-1.5">
                 <Button
                   size="sm"
@@ -504,7 +735,7 @@ export function BackupsPanel() {
             ) : !git.initialized ? (
               <div className="space-y-3 px-4 py-3">
                 <p className="text-body text-fg-2">
-                  在存储目录初始化 Git 仓库，之后每次写操作自动提交；配置远端后还会推送。
+                  在存储目录初始化 Git 仓库；之后填写并验证远端，才能启用自动同步。
                 </p>
                 <Button
                   variant="primary"
@@ -553,6 +784,14 @@ export function BackupsPanel() {
                   </div>
                 </div>
 
+                {settings?.git.enabled && !git.remoteVerified && (
+                  <div className="px-4 pt-3">
+                    <Notice tone="warning">
+                      远端地址已变更或尚未验证，自动同步已暂停；请重新验证远端后再启用。
+                    </Notice>
+                  </div>
+                )}
+
                 {git.lastError && git.conflictFiles.length === 0 && (
                   <div className="px-4 pt-3">
                     <Notice tone="danger">{git.lastError}</Notice>
@@ -593,14 +832,6 @@ export function BackupsPanel() {
 
                 <div className="space-y-3 border-b border-border px-4 py-3">
                   <div className="flex flex-wrap items-center gap-4">
-                    <Checkbox
-                      id="git-enabled"
-                      label="启用自动同步"
-                      checked={settings?.git.enabled ?? false}
-                      onChange={(event) =>
-                        saveGitToggle({ enabled: event.target.checked })
-                      }
-                    />
                     <Checkbox
                       id="git-auto-commit"
                       label="写操作后自动提交"
@@ -643,9 +874,17 @@ export function BackupsPanel() {
                     >
                       保存远端
                     </Button>
+                    <Button
+                      className="mb-0.5"
+                      loading={busy === "git-verify"}
+                      disabled={!remoteInput.trim() || !git.initialized}
+                      onClick={() => void verifyRemote()}
+                    >
+                      验证远端
+                    </Button>
                   </div>
                   <p className="text-caption text-fg-3">
-                    凭据交给系统 Git（credential helper / SSH agent），应用不会保存 token。
+                    凭据交给系统 Git（credential helper / SSH agent），应用不会保存 token；验证远端后才能在上方启用 Git 备份。
                   </p>
                   <div className="flex flex-wrap gap-2">
                     <Button
@@ -703,6 +942,182 @@ export function BackupsPanel() {
               </>
             )}
           </section>
+
+          <section className="rounded-panel border border-border bg-surface">
+            <div className="flex items-center gap-2 border-b border-border px-4 py-3">
+              <Cloud size={15} className="text-fg-3" aria-hidden />
+              <h3 className="text-strong text-fg-1">云备份（WebDAV）</h3>
+              <Badge tone={cloudBadge.tone}>{cloudBadge.label}</Badge>
+              <span className="ml-auto flex gap-1.5">
+                <IconButton
+                  label="刷新云状态"
+                  disabled={loading}
+                  onClick={() => void refreshCloudStatus()}
+                >
+                  <RefreshCw size={13} aria-hidden />
+                </IconButton>
+              </span>
+            </div>
+
+            {!cloud ? (
+              <p className="px-4 py-3 text-caption text-fg-3">正在读取云备份设置…</p>
+            ) : (
+              <>
+                <div className="space-y-3 border-b border-border px-4 py-3">
+                  {cloudBaseUrl.startsWith("http://") && (
+                    <Notice tone="warning">
+                      HTTP 会明文传输凭据，仅建议在内网使用。
+                    </Notice>
+                  )}
+                  <div className="flex flex-wrap items-end gap-2">
+                    <Field
+                      label="WebDAV 地址"
+                      htmlFor="cloud-base-url"
+                      className="min-w-[280px] flex-1"
+                    >
+                      <Input
+                        id="cloud-base-url"
+                        className="font-mono"
+                        placeholder="https://dav.example.com/dav"
+                        value={cloudBaseUrl}
+                        onChange={(event) => setCloudBaseUrl(event.target.value)}
+                      />
+                    </Field>
+                    <Field label="用户名" htmlFor="cloud-username" className="w-40">
+                      <Input
+                        id="cloud-username"
+                        value={cloudUsername}
+                        onChange={(event) => setCloudUsername(event.target.value)}
+                      />
+                    </Field>
+                  </div>
+                  <div className="flex flex-wrap items-end gap-2">
+                    <Field label="密码" htmlFor="cloud-password" className="w-56">
+                      <div className="flex items-center gap-1">
+                        <Input
+                          id="cloud-password"
+                          type={showCloudPassword ? "text" : "password"}
+                          placeholder={
+                            cloud.hasPassword && !cloudPasswordDirty
+                              ? "已保存，留空保持不变"
+                              : ""
+                          }
+                          value={cloudPassword}
+                          onChange={(event) => {
+                            setCloudPassword(event.target.value);
+                            setCloudPasswordDirty(true);
+                          }}
+                        />
+                        <IconButton
+                          label={showCloudPassword ? "隐藏密码" : "显示密码"}
+                          onClick={() => setShowCloudPassword((value) => !value)}
+                        >
+                          {showCloudPassword ? (
+                            <EyeOff size={14} aria-hidden />
+                          ) : (
+                            <Eye size={14} aria-hidden />
+                          )}
+                        </IconButton>
+                      </div>
+                    </Field>
+                    <Field label="远端目录" htmlFor="cloud-remote-dir" className="w-40">
+                      <Input
+                        id="cloud-remote-dir"
+                        className="font-mono"
+                        value={cloudRemoteDir}
+                        onChange={(event) => setCloudRemoteDir(event.target.value)}
+                      />
+                    </Field>
+                  </div>
+                  <p className="text-caption text-fg-3">
+                    在页面顶部选择「WebDAV 云备份」后，每次自动快照都会上传；与 Git 备份互斥。
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      onClick={() => void testCloud()}
+                      loading={busy === "cloud-test"}
+                      disabled={!cloudBaseUrl.trim() || (!!busy && busy !== "cloud-test")}
+                    >
+                      测试连接
+                    </Button>
+                    <Button
+                      onClick={() => void saveCloud()}
+                      loading={busy === "cloud-save"}
+                      disabled={!!busy && busy !== "cloud-save"}
+                    >
+                      保存云备份
+                    </Button>
+                    <Button
+                      onClick={() => void uploadCloud()}
+                      loading={busy === "cloud-upload"}
+                      disabled={!cloudStatus?.configured || (!!busy && busy !== "cloud-upload")}
+                    >
+                      立即上传
+                    </Button>
+                    <Button
+                      variant="danger"
+                      disabled={!cloudStatus?.configured || !!busy}
+                      onClick={() => setCloudRestoreOpen(true)}
+                    >
+                      从云端恢复
+                    </Button>
+                  </div>
+                  <p className="text-caption text-fg-3">
+                    上传会把当前真源打包并覆盖云端唯一一份备份；恢复前会自动创建本地安全快照。
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 px-4 py-3 sm:grid-cols-3">
+                  <div className="min-w-0">
+                    <p className="text-caption text-fg-3">远端对象</p>
+                    <p
+                      className="truncate font-mono text-caption text-fg-1"
+                      title={cloudRemotePath}
+                    >
+                      {cloudRemotePath}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-caption text-fg-3">远端大小</p>
+                    <p className="text-body text-fg-1">
+                      {cloudStatus?.remote?.sizeBytes != null
+                        ? formatBytes(cloudStatus.remote.sizeBytes)
+                        : "—"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-caption text-fg-3">远端修改时间</p>
+                    <p className="text-body text-fg-1">
+                      {cloudStatus?.remote?.modifiedAt
+                        ? formatRelativeTime(cloudStatus.remote.modifiedAt)
+                        : "—"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-caption text-fg-3">上次上传</p>
+                    <p className="text-body text-fg-1">
+                      {cloudStatus?.lastUploadAt
+                        ? formatRelativeTime(cloudStatus.lastUploadAt)
+                        : "—"}
+                    </p>
+                  </div>
+                </div>
+
+                {cloudStatus?.remoteError && (
+                  <div className="px-4 pb-3">
+                    <Notice tone="danger">{cloudStatus.remoteError}</Notice>
+                  </div>
+                )}
+                {cloudStatus?.lastError && (
+                  <div className="px-4 pb-3">
+                    <Notice tone="warning">
+                      上次上传失败：{cloudStatus.lastError}
+                    </Notice>
+                  </div>
+                )}
+              </>
+            )}
+          </section>
         </div>
       </div>
 
@@ -736,6 +1151,22 @@ export function BackupsPanel() {
           />
         </Field>
       </Dialog>
+
+      <ConfirmDialog
+        open={cloudRestoreOpen}
+        title="从云端恢复？"
+        body={
+          <>
+            将下载云端最新包并覆盖 <code>assets/</code> 与 <code>agents/</code>，
+            删除包中不存在的资产。恢复前会自动创建安全快照；本机{" "}
+            <code>local/</code>、密钥与索引不会被动。
+          </>
+        }
+        confirmLabel="恢复"
+        pending={busy === "cloud-restore"}
+        onConfirm={() => void confirmCloudRestore()}
+        onCancel={() => setCloudRestoreOpen(false)}
+      />
 
       <ConfirmDialog
         open={!!deleteTarget}

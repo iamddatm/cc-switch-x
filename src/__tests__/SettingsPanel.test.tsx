@@ -25,6 +25,7 @@ beforeEach(() => {
     proxy: { url: null, username: null },
     skillRepos: null,
       backup: { intervalHours: 24, retainCount: 10, git: { enabled: false, autoCommit: true, autoPull: true, remote: null, branch: "main" } },
+      cloud: { autoUpload: false, baseUrl: "", username: "", remoteDir: "ccswitchx" },
   });
   vi.mocked(api.setTheme).mockResolvedValue({
     storeRoot: "C:/Users/me/.ccswitchx",
@@ -34,6 +35,7 @@ beforeEach(() => {
     proxy: { url: null, username: null },
     skillRepos: null,
       backup: { intervalHours: 24, retainCount: 10, git: { enabled: false, autoCommit: true, autoPull: true, remote: null, branch: "main" } },
+      cloud: { autoUpload: false, baseUrl: "", username: "", remoteDir: "ccswitchx" },
   });
   vi.mocked(api.setStoreRoot).mockResolvedValue(true);
   vi.mocked(api.getAutostart).mockResolvedValue(false);

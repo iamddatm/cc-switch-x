@@ -7,6 +7,7 @@
 //!    （项目级），漏写就等于把用户级资产写进别人的项目目录；`mcp get` 不带 scope 会在
 //!    任意 scope 里找到就算数，回读会骗人。
 
+use crate::process::hidden_command;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -249,7 +250,7 @@ fn collect_fnm_dirs(data_dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// 真正的执行：`Command` + 参数数组，捕获 stdout；失败时带上 stderr。
 fn spawn(program: &Path, args: &[String]) -> Result<String, CliError> {
-    let output = std::process::Command::new(program)
+    let output = hidden_command(program)
         .args(args)
         // 绝不给非交互进程留一个等输入的提示
         .stdin(std::process::Stdio::null())

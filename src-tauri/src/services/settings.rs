@@ -1,7 +1,7 @@
 use crate::domain::agent::builtin_agents;
 use crate::domain::secret::SecretRef;
 use crate::error::AppError;
-use crate::net::{parse_github_input, ProxyConfig};
+use crate::net::{parse_github_input, webdav, ProxyConfig};
 use crate::settings::{self, AppSettings, BackupSettings, SkillRepo, Theme};
 use crate::store::secrets::Secrets;
 use serde::Serialize;
@@ -10,6 +10,8 @@ use std::collections::HashSet;
 /// 代理密码与 MCP 等资产用同一套本地密钥文件分开存放。
 pub const PROXY_SECRET_SCOPE: &str = "proxy";
 pub const PROXY_SECRET_KEY: &str = "password";
+pub const CLOUD_SECRET_SCOPE: &str = "cloud.webdav";
+pub const CLOUD_SECRET_KEY: &str = "password";
 pub const MAX_SKILL_REPOS: usize = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -119,6 +121,88 @@ pub fn set_proxy_at(
     Ok((current, secrets))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudSettingsView {
+    pub auto_upload: bool,
+    pub base_url: String,
+    pub username: String,
+    pub remote_dir: String,
+    pub has_password: bool,
+}
+
+pub fn cloud_secret_ref() -> SecretRef {
+    SecretRef {
+        scope: CLOUD_SECRET_SCOPE.into(),
+        key: CLOUD_SECRET_KEY.into(),
+    }
+}
+
+pub fn cloud_view(settings: &AppSettings, secrets: &Secrets) -> CloudSettingsView {
+    CloudSettingsView {
+        auto_upload: settings.cloud.auto_upload,
+        base_url: settings.cloud.base_url.clone(),
+        username: settings.cloud.username.clone(),
+        remote_dir: settings.cloud.remote_dir.clone(),
+        has_password: secrets
+            .get(&cloud_secret_ref())
+            .is_some_and(|value| !value.is_empty()),
+    }
+}
+
+/// 密码语义：None = 保留旧密码，Some("") = 清除，Some(v) = 覆盖。
+pub fn set_cloud_settings_at(
+    config_path: &std::path::Path,
+    secrets_path: &std::path::Path,
+    base_url: String,
+    username: String,
+    password: Option<String>,
+    remote_dir: String,
+    auto_upload: bool,
+) -> Result<(AppSettings, Secrets), AppError> {
+    let mut current = settings::load_from(config_path)?;
+    let mut secrets = Secrets::load(secrets_path)?;
+    let base_url = webdav::normalize_base_url(&base_url)?;
+    let username = username.trim().to_string();
+    let remote_dir = webdav::validate_remote_dir(&remote_dir)?;
+
+    if base_url.is_empty() {
+        current.cloud.base_url.clear();
+        current.cloud.username.clear();
+        current.cloud.remote_dir = remote_dir;
+        current.cloud.auto_upload = false;
+        secrets.remove(&cloud_secret_ref());
+    } else {
+        if username.is_empty() {
+            return Err(AppError::InvalidInput("请填写 WebDAV 用户名".into()));
+        }
+        let next_password = match password {
+            Some(value) if value.is_empty() => {
+                secrets.remove(&cloud_secret_ref());
+                None
+            }
+            Some(value) => Some(value),
+            None => secrets.get(&cloud_secret_ref()).map(str::to_string),
+        };
+        let Some(next_password) = next_password else {
+            return Err(AppError::InvalidInput("请填写 WebDAV 密码".into()));
+        };
+        current.cloud.base_url = base_url;
+        current.cloud.username = username;
+        current.cloud.remote_dir = remote_dir;
+        current.cloud.auto_upload = auto_upload;
+        secrets.insert(&cloud_secret_ref(), &next_password);
+    }
+    if current.cloud.auto_upload {
+        // 远端备份只能选一种：开启 WebDAV 自动上传时停用 Git 自动同步。
+        current.backup.git.enabled = false;
+    }
+
+    secrets.save(secrets_path)?;
+    settings::save_to(config_path, &current)?;
+    Ok((current, secrets))
+}
+
 pub fn set_close_to_tray_at(
     config_path: &std::path::Path,
     enabled: bool,
@@ -203,8 +287,16 @@ pub fn set_backup_settings_at(
     if let Some(remote) = &backup.git.remote {
         settings::validate_git_remote(remote).map_err(AppError::InvalidInput)?;
     }
+    // 没有远端就无法验证；开启状态只会误导，直接纠正为停用，避免阻塞其他设置保存。
+    if backup.git.enabled && backup.git.remote.is_none() {
+        backup.git.enabled = false;
+    }
     let mut current = settings::load_from(config_path)?;
     current.backup = backup;
+    if current.backup.git.enabled {
+        // 远端备份只能选一种：开启 Git 自动同步时停用 WebDAV 自动上传。
+        current.cloud.auto_upload = false;
+    }
     settings::save_to(config_path, &current)?;
     Ok(current)
 }
@@ -264,6 +356,7 @@ pub fn set_store_root_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::webdav::{normalize_base_url, remote_url, validate_remote_dir};
     use tempfile::tempdir;
 
     #[test]
@@ -312,6 +405,78 @@ mod tests {
             ..updated.backup.clone()
         };
         assert!(set_backup_settings_at(&config, invalid).is_err());
+    }
+
+    #[test]
+    fn git_and_webdav_auto_backup_are_mutually_exclusive() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let secrets_path = dir.path().join("secrets.local.json");
+
+        let (with_cloud, _) = set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            "https://dav.example.com/dav".into(),
+            "me".into(),
+            Some("pw".into()),
+            "ccswitchx".into(),
+            true,
+        )
+        .unwrap();
+        assert!(with_cloud.cloud.auto_upload);
+
+        let with_git = set_backup_settings_at(
+            &config,
+            BackupSettings {
+                git: crate::settings::GitBackupSettings {
+                    enabled: true,
+                    remote: Some("https://example.com/assets.git".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(with_git.backup.git.enabled);
+        assert!(
+            !with_git.cloud.auto_upload,
+            "启用 Git 自动同步时应停用 WebDAV 自动上传"
+        );
+
+        let (with_cloud_again, _) = set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            "https://dav.example.com/dav".into(),
+            "me".into(),
+            None,
+            "ccswitchx".into(),
+            true,
+        )
+        .unwrap();
+        assert!(with_cloud_again.cloud.auto_upload);
+        assert!(
+            !with_cloud_again.backup.git.enabled,
+            "启用 WebDAV 自动上传时应停用 Git 自动同步"
+        );
+    }
+
+    #[test]
+    fn git_backup_without_remote_is_forced_off() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let backup = BackupSettings {
+            git: crate::settings::GitBackupSettings {
+                enabled: true,
+                remote: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let updated = set_backup_settings_at(&config, backup).unwrap();
+        assert!(
+            !updated.backup.git.enabled,
+            "没有远端就无法验证，开启状态应被纠正"
+        );
     }
 
     #[test]
@@ -478,5 +643,103 @@ mod tests {
             },
         ])
         .is_err());
+    }
+
+    #[test]
+    fn cloud_password_semantics() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let secrets_path = dir.path().join("secrets.local.json");
+
+        let (saved, secrets) = set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            "https://dav.example.com/dav".into(),
+            "me".into(),
+            Some("app-password".into()),
+            "ccswitchx".into(),
+            true,
+        )
+        .unwrap();
+        assert!(saved.cloud.auto_upload);
+        assert_eq!(secrets.get(&cloud_secret_ref()), Some("app-password"));
+        assert!(!std::fs::read_to_string(&config)
+            .unwrap()
+            .contains("app-password"));
+        assert!(cloud_view(&saved, &secrets).has_password);
+
+        let (kept, kept_secrets) = set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            "https://dav.example.com/dav".into(),
+            "me".into(),
+            None,
+            "ccswitchx".into(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(kept_secrets.get(&cloud_secret_ref()), Some("app-password"));
+        assert!(!kept.cloud.auto_upload);
+
+        let cleared = set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            String::new(),
+            String::new(),
+            None,
+            "ccswitchx".into(),
+            true,
+        )
+        .unwrap();
+        assert!(cleared.1.get(&cloud_secret_ref()).is_none());
+        assert!(!cleared.0.cloud.auto_upload);
+
+        assert!(set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            "https://dav.example.com/dav".into(),
+            "me".into(),
+            Some(String::new()),
+            "ccswitchx".into(),
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn cloud_url_and_remote_dir_validation() {
+        assert_eq!(
+            normalize_base_url(" https://dav.example.com/dav/ ").unwrap(),
+            "https://dav.example.com/dav"
+        );
+        assert_eq!(
+            normalize_base_url("http://127.0.0.1:8099/dav").unwrap(),
+            "http://127.0.0.1:8099/dav"
+        );
+        for bad in [
+            "ftp://example.com/dav",
+            "https://user:pass@example.com/dav",
+            "https://example.com/dav?x=1",
+        ] {
+            assert!(normalize_base_url(bad).is_err(), "{bad}");
+        }
+        assert_eq!(validate_remote_dir("").unwrap(), "ccswitchx");
+        assert_eq!(
+            validate_remote_dir("backups/ccswitchx").unwrap(),
+            "backups/ccswitchx"
+        );
+        for bad in ["../x", "/abs", "a\\b", "a//b", "a/../b", "a b"] {
+            assert!(validate_remote_dir(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn remote_url_joins_base_path() {
+        let url =
+            remote_url("https://dav.example.com/dav", "ccswitchx", "ccswitchx-backup.zip").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://dav.example.com/dav/ccswitchx/ccswitchx-backup.zip"
+        );
     }
 }

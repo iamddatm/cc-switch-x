@@ -8,6 +8,11 @@ import type {
   BackupSettings,
   BackupSnapshot,
   BackupUsage,
+  CloudRestoreReport,
+  CloudSettingsInput,
+  CloudSettingsView,
+  CloudStatus,
+  CloudTestInput,
   ConflictPolicy,
   DetectedProxy,
   DiscoveredSkillInstallInput,
@@ -119,11 +124,23 @@ export const api = {
   revealBackupLocation: (id: string) =>
     invoke<void>("reveal_backup_location", { id }),
 
+  getCloudSettings: () => invoke<CloudSettingsView>("get_cloud_settings"),
+  setCloudSettings: (input: CloudSettingsInput) =>
+    invoke<CloudSettingsView>("set_cloud_settings", { ...input }),
+  testCloudConnection: (input: CloudTestInput) =>
+    invoke<number>("test_cloud_connection", { ...input }),
+  getCloudStatus: () => invoke<CloudStatus>("get_cloud_status"),
+  cloudUploadNow: () => invoke<CloudStatus>("cloud_upload_now"),
+  cloudRestoreLatest: () =>
+    invoke<CloudRestoreReport>("cloud_restore_latest"),
+
   getGitStatus: () => invoke<GitStatus>("get_git_status"),
   gitInit: (branch?: string) =>
     invoke<GitStatus>("git_init", { branch: branch ?? null }),
   gitSetRemote: (remote: string | null, branch: string) =>
     invoke<GitStatus>("git_set_remote", { remote, branch }),
+  gitVerifyRemote: (remote: string | null, branch: string) =>
+    invoke<GitStatus>("git_verify_remote", { remote, branch }),
   gitCommitNow: (message?: string) =>
     invoke<GitStatus>("git_commit_now", { message: message ?? null }),
   gitPushNow: () => invoke<GitStatus>("git_push_now"),

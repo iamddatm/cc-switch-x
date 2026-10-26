@@ -11,6 +11,7 @@ use crate::domain::AssetType;
 use crate::error::AppError;
 use crate::index::Index;
 use crate::net::archive::{extract_archive, ArchiveLimits};
+use crate::services::git_sync;
 use crate::store::atomic::write_atomic;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,20 @@ pub struct RestoreBackupReport {
     pub safety_backup: String,
     pub restored_files: u64,
     pub removed_files: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveBuild {
+    pub created_at: i64,
+    pub files: u64,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveSummary {
+    pub files: u64,
+    pub total_bytes: u64,
+    pub max_depth: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,6 +204,35 @@ pub fn create(
         }
     };
 
+    let tmp = dir.join(format!(".tmp-{}-{}.zip", std::process::id(), chrono::Utc::now().timestamp_millis()));
+    let build = match write_archive_to(store, &tmp, kind) {
+        Ok(build) => build,
+        Err(error) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(error);
+        }
+    };
+    if let Err(error) = fs::rename(&tmp, &target) {
+        let _ = fs::remove_file(&tmp);
+        return Err(AppError::Backup(format!("发布快照失败：{error}")));
+    }
+
+    let info = SnapshotInfo {
+        name,
+        kind,
+        created_at: build.created_at,
+        size_bytes: build.size_bytes,
+        files: build.files,
+    };
+    Ok(info)
+}
+
+/// 把当前可移植真源写成快照包；调用方负责临时文件与最终发布。
+pub fn write_archive_to(
+    store: &Store,
+    target: &Path,
+    kind: SnapshotKind,
+) -> Result<ArchiveBuild, AppError> {
     let files = collect_files(store)?;
     let mut manifest_files = Vec::with_capacity(files.len());
     for (absolute, relative) in &files {
@@ -204,27 +248,58 @@ pub fn create(
         files: manifest_files,
     };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
-
-    let tmp = dir.join(format!(".tmp-{}-{}.zip", std::process::id(), chrono::Utc::now().timestamp_millis()));
-    let write_result = write_zip(&tmp, &manifest_bytes, &files);
-    if let Err(error) = write_result {
-        let _ = fs::remove_file(&tmp);
-        return Err(error);
-    }
-    if let Err(error) = fs::rename(&tmp, &target) {
-        let _ = fs::remove_file(&tmp);
-        return Err(AppError::Backup(format!("发布快照失败：{error}")));
-    }
-
-    let size_bytes = fs::metadata(&target).map(|meta| meta.len()).unwrap_or(0);
-    let info = SnapshotInfo {
-        name,
-        kind,
+    write_zip(target, &manifest_bytes, &files)?;
+    Ok(ArchiveBuild {
         created_at: manifest.created_at,
-        size_bytes,
         files: manifest.files.len() as u64,
-    };
-    Ok(info)
+        size_bytes: fs::metadata(target).map(|meta| meta.len()).unwrap_or(0),
+    })
+}
+
+/// 上传前的本地预检：确保包能通过恢复端的同一条上限校验。
+pub fn validate_archive_for_restore(path: &Path) -> Result<ArchiveSummary, AppError> {
+    let manifest = read_manifest(path)?;
+    if !manifest.files.iter().any(|file| file.path != ".gitignore") {
+        return Err(AppError::Cloud(
+            "本地没有可备份的资产，已拒绝上传".into(),
+        ));
+    }
+    let limits = ArchiveLimits::default();
+    let entries = manifest.files.len() + 1;
+    if entries > limits.max_entries {
+        return Err(AppError::Cloud(format!(
+            "备份包超过可恢复上限：条目数 {entries} 超过 {}",
+            limits.max_entries
+        )));
+    }
+    let total_bytes = manifest
+        .files
+        .iter()
+        .map(|file| file.size.max(limits.min_entry_bytes))
+        .fold(limits.min_entry_bytes, u64::saturating_add);
+    if total_bytes > limits.max_total_bytes {
+        return Err(AppError::Cloud(format!(
+            "备份包超过可恢复上限：解压后约 {total_bytes} 字节，上限 {} 字节",
+            limits.max_total_bytes
+        )));
+    }
+    let max_depth = manifest
+        .files
+        .iter()
+        .map(|file| file.path.split('/').filter(|segment| !segment.is_empty()).count())
+        .max()
+        .unwrap_or(0);
+    if max_depth > limits.max_depth {
+        return Err(AppError::Cloud(format!(
+            "备份包超过可恢复上限：路径深度 {max_depth} 超过 {}",
+            limits.max_depth
+        )));
+    }
+    Ok(ArchiveSummary {
+        files: manifest.files.len() as u64,
+        total_bytes,
+        max_depth,
+    })
 }
 
 fn write_zip(
@@ -378,6 +453,12 @@ fn read_manifest(path: &Path) -> Result<Manifest, AppError> {
         return Err(AppError::Backup(format!(
             "不是 CC Switch X 快照：{}",
             manifest.format
+        )));
+    }
+    if manifest.schema != SCHEMA {
+        return Err(AppError::Backup(format!(
+            "快照格式版本不支持：{}",
+            manifest.schema
         )));
     }
     Ok(manifest)
@@ -1011,7 +1092,7 @@ pub fn spawn_periodic(app: tauri::AppHandle) {
         });
 }
 
-fn periodic_once(state: &crate::state::AppState) {
+pub(crate) fn periodic_once(state: &crate::state::AppState) {
     let (interval_hours, retain) = match state.settings.lock() {
         Ok(settings) => (
             settings.backup.interval_hours as i64,
@@ -1030,14 +1111,45 @@ fn periodic_once(state: &crate::state::AppState) {
     if chrono::Utc::now().timestamp_millis() < due {
         return;
     }
-    let Ok(_guard) = state.maintenance.write() else {
+    let created = {
+        let Ok(_guard) = state.maintenance.write() else {
+            return;
+        };
+        match create(&state.store, None, SnapshotKind::Auto) {
+            Ok(info) => {
+                let _ = prune(&state.store, retain);
+                Some(info)
+            }
+            Err(error) => {
+                eprintln!("自动备份失败：{error}");
+                None
+            }
+        }
+    };
+    let Some(info) = created else {
         return;
     };
-    match create(&state.store, None, SnapshotKind::Auto) {
-        Ok(_) => {
-            let _ = prune(&state.store, retain);
-        }
-        Err(error) => eprintln!("自动备份失败：{error}"),
+
+    // 远端备份只能选一种：Git 自动同步生效时不再上传 WebDAV。
+    // 历史设置可能同时开启两者；以「Git 已验证且已开启」为生效条件，避免两边都跑。
+    let auto_upload = state
+        .settings
+        .lock()
+        .map(|settings| {
+            let git_active = settings.backup.git.enabled
+                && git_sync::is_remote_verified(
+                    &state.store,
+                    settings.backup.git.remote.as_deref(),
+                );
+            settings.cloud.auto_upload && !git_active
+        })
+        .unwrap_or(false);
+    if !auto_upload {
+        return;
+    }
+    let snapshot = snapshots_dir(&state.store).join(format!("{}.zip", info.name));
+    if let Err(error) = crate::services::cloud_backup::upload_archive(state, &snapshot) {
+        eprintln!("自动上传云备份失败：{error}");
     }
 }
 
@@ -1046,7 +1158,42 @@ mod tests {
     use super::*;
     use crate::domain::AssetType;
     use crate::index::Index;
+    use crate::net::webdav::test_support::FakeWebDav;
+    use crate::services::cloud_backup::load_runtime_status;
+    use crate::services::settings::cloud_secret_ref;
+    use crate::settings::{AppSettings, CloudBackupSettings};
+    use crate::state::AppState;
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    static CLOUD_TEST_DIRS: Mutex<Vec<tempfile::TempDir>> = Mutex::new(Vec::new());
+
+    fn state_with_asset_and_cloud(
+        auto_upload: bool,
+        base_url: String,
+        password: &str,
+    ) -> AppState {
+        let dir = tempdir().unwrap();
+        let settings = AppSettings {
+            store_root: dir.path().join("store"),
+            cloud: CloudBackupSettings {
+                auto_upload,
+                base_url,
+                username: "me".into(),
+                remote_dir: "ccswitchx".into(),
+            },
+            ..AppSettings::default()
+        };
+        let state = AppState::init(settings).unwrap();
+        state
+            .secrets
+            .lock()
+            .unwrap()
+            .insert(&cloud_secret_ref(), password);
+        write_mcp(&state.store, "pw", "Playwright");
+        CLOUD_TEST_DIRS.lock().unwrap().push(dir);
+        state
+    }
 
     fn fixture() -> (tempfile::TempDir, Store, Index) {
         let dir = tempdir().unwrap();
@@ -1066,6 +1213,36 @@ mod tests {
                 .as_bytes(),
             )
             .unwrap();
+    }
+
+    fn write_manifest_only_zip(
+        path: &Path,
+        file_count: usize,
+        file_size: u64,
+        path_components: &[&str],
+    ) {
+        let files = (0..file_count)
+            .map(|index| ManifestFile {
+                path: format!("{}/{}", path_components.join("/"), index),
+                size: file_size,
+                sha256: "00".into(),
+            })
+            .collect();
+        let manifest = Manifest {
+            format: FORMAT.into(),
+            schema: SCHEMA,
+            created_at: 1,
+            kind: SnapshotKind::Manual,
+            app_version: "test".into(),
+            files,
+        };
+        let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        let file = fs::File::create(path).unwrap();
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        writer.start_file(MANIFEST_NAME, options).unwrap();
+        writer.write_all(&bytes).unwrap();
+        writer.finish().unwrap();
     }
 
     #[test]
@@ -1264,5 +1441,121 @@ mod tests {
 
         let error = apply_snapshot(&store, &zip).unwrap_err().to_string();
         assert!(error.contains("不允许的路径") || error.contains("校验失败"), "{error}");
+    }
+
+    #[test]
+    fn validate_archive_rejects_empty_package() {
+        let (_dir, store, _index) = fixture();
+        let info = create(&store, Some("empty"), SnapshotKind::Manual).unwrap();
+        let path = snapshots_dir(&store).join(format!("{}.zip", info.name));
+        let error = validate_archive_for_restore(&path).unwrap_err().to_string();
+        assert!(error.contains("没有可备份的资产"));
+    }
+
+    #[test]
+    fn validate_archive_rejects_too_many_entries() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("too-many.zip");
+        write_manifest_only_zip(&path, 30_001, 1, &["a"]);
+        assert!(validate_archive_for_restore(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("超过可恢复上限"));
+    }
+
+    #[test]
+    fn validate_archive_rejects_oversize_charge() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("oversize.zip");
+        write_manifest_only_zip(&path, 1, 600 * 1024 * 1024, &["a"]);
+        assert!(validate_archive_for_restore(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("超过可恢复上限"));
+    }
+
+    #[test]
+    fn validate_archive_accepts_normal_package() {
+        let (_dir, store, _index) = fixture();
+        write_mcp(&store, "pw", "Playwright");
+        let info = create(&store, Some("ok"), SnapshotKind::Manual).unwrap();
+        let path = snapshots_dir(&store).join(format!("{}.zip", info.name));
+        let summary = validate_archive_for_restore(&path).unwrap();
+        assert!(summary.files >= 2);
+        assert!(summary.total_bytes > 0);
+    }
+
+    #[test]
+    fn periodic_once_auto_uploads_when_enabled() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
+        state.settings.lock().unwrap().backup.interval_hours = 1;
+
+        periodic_once(&state);
+
+        assert_eq!(list(&state.store).unwrap().len(), 1);
+        assert!(server
+            .object("/dav/ccswitchx/ccswitchx-backup.zip")
+            .is_some());
+    }
+
+    #[test]
+    fn periodic_once_skips_upload_when_disabled() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = state_with_asset_and_cloud(false, server.base_url(), "pw");
+        state.settings.lock().unwrap().backup.interval_hours = 1;
+
+        periodic_once(&state);
+
+        assert!(server
+            .object("/dav/ccswitchx/ccswitchx-backup.zip")
+            .is_none());
+    }
+
+    #[test]
+    fn periodic_once_skips_upload_when_git_backup_is_active() {
+        if !crate::services::git_sync::is_available() {
+            return;
+        }
+        let server = FakeWebDav::start("me", "pw");
+        let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
+        state.settings.lock().unwrap().backup.interval_hours = 1;
+
+        let bare = state.store.root().parent().unwrap().join("remote.git");
+        let output = std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let url = format!("file:///{}", bare.to_string_lossy().replace('\\', "/"));
+        crate::services::git_sync::init(&state.store, "main").unwrap();
+        crate::services::git_sync::verify_remote(&state.store, &url, "main").unwrap();
+        {
+            let mut settings = state.settings.lock().unwrap();
+            settings.backup.git.enabled = true;
+            settings.backup.git.remote = Some(url);
+        }
+
+        periodic_once(&state);
+
+        assert!(
+            server
+                .object("/dav/ccswitchx/ccswitchx-backup.zip")
+                .is_none(),
+            "Git 自动同步生效时不应再上传 WebDAV"
+        );
+    }
+
+    #[test]
+    fn auto_upload_failure_is_recorded() {
+        let server = FakeWebDav::start("me", "pw");
+        server.set_fail_put(true);
+        let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
+        state.settings.lock().unwrap().backup.interval_hours = 1;
+
+        periodic_once(&state);
+
+        assert!(load_runtime_status(&state.store).last_error.is_some());
     }
 }
