@@ -43,8 +43,8 @@ test("renders all sidebar entries and switches panes", () => {
   expect(within(nav).getByText("工具")).toBeInTheDocument();
   expect(within(nav).getByText("管理")).toBeInTheDocument();
   expect(within(nav).getAllByRole("button").map((item) => item.textContent)).toEqual([
-    "MCP",
     "Skills",
+    "MCP",
     "提示词",
     "Rules",
     "Subagents",

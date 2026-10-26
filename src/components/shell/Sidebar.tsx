@@ -22,8 +22,8 @@ interface SidebarItem {
 
 /** 常用资产放最上面，会话是日常入口，Agents / 网络 / 备份 / 设置沉到底部。 */
 const ASSET_ITEMS: SidebarItem[] = [
-  { pane: "mcp", label: "MCP", icon: Server },
   { pane: "skill", label: "Skills", icon: Sparkles },
+  { pane: "mcp", label: "MCP", icon: Server },
   { pane: "prompt", label: "提示词", icon: BookOpen },
   { pane: "rule", label: "Rules", icon: ScrollText },
   { pane: "subagent", label: "Subagents", icon: Bot },
