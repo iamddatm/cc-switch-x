@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { FolderPlus, Sparkles } from "lucide-react";
-import type { Pane, ProjectScope, ProjectView, Theme } from "../../types";
+import type { Pane, ProjectScope, Theme } from "../../types";
 import { api } from "../../lib/api";
 import { useProjects } from "../../hooks/useProjects";
 import { useTheme } from "../../hooks/useTheme";
 import { useUpdate } from "../../hooks/useUpdate";
-import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { EmptyState } from "../ui/EmptyState";
 import { PageHeader } from "../ui/PageHeader";
@@ -16,6 +15,7 @@ import { BackupsPanel } from "../../panels/BackupsPanel";
 import { HooksPanel } from "../../panels/HooksPanel";
 import { McpPanel } from "../../panels/McpPanel";
 import { NetworkPanel } from "../../panels/NetworkPanel";
+import { ProjectSkillsPanel } from "../../panels/ProjectSkillsPanel";
 import { PromptsPanel } from "../../panels/PromptsPanel";
 import { RulesPanel } from "../../panels/RulesPanel";
 import { SessionsPanel } from "../../panels/SessionsPanel";
@@ -39,22 +39,6 @@ function ProjectEmptyState({ onAdd }: { onAdd: () => void }) {
           description="添加一个项目后，就能查看并同步它里面各 agent 的 .claude / .qoder / .agents skills。"
           actions={<Button onClick={onAdd}>添加项目…</Button>}
         />
-      </div>
-    </div>
-  );
-}
-
-function ProjectSkillsPlaceholder({ project }: { project: ProjectView }) {
-  return (
-    <div className="flex h-full flex-col">
-      <PageHeader
-        icon={Sparkles}
-        title="Skills"
-        description={project.path}
-        actions={<Badge tone="brand">项目</Badge>}
-      />
-      <div className="flex min-h-0 flex-1 items-center justify-center">
-        <div className="text-caption text-fg-2">项目 Skills 面板（Task 7 接入）</div>
       </div>
     </div>
   );
@@ -97,7 +81,7 @@ export function AppShell() {
     skill:
       scope === "project" ? (
         projects.active ? (
-          <ProjectSkillsPlaceholder project={projects.active} />
+          <ProjectSkillsPanel project={projects.active} />
         ) : (
           <ProjectEmptyState onAdd={() => void projects.add()} />
         )
