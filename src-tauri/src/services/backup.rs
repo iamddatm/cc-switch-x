@@ -73,6 +73,20 @@ pub struct RestoreBackupReport {
     pub removed_files: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveBuild {
+    pub created_at: i64,
+    pub files: u64,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveSummary {
+    pub files: u64,
+    pub total_bytes: u64,
+    pub max_depth: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Manifest {
@@ -189,6 +203,35 @@ pub fn create(
         }
     };
 
+    let tmp = dir.join(format!(".tmp-{}-{}.zip", std::process::id(), chrono::Utc::now().timestamp_millis()));
+    let build = match write_archive_to(store, &tmp, kind) {
+        Ok(build) => build,
+        Err(error) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(error);
+        }
+    };
+    if let Err(error) = fs::rename(&tmp, &target) {
+        let _ = fs::remove_file(&tmp);
+        return Err(AppError::Backup(format!("发布快照失败：{error}")));
+    }
+
+    let info = SnapshotInfo {
+        name,
+        kind,
+        created_at: build.created_at,
+        size_bytes: build.size_bytes,
+        files: build.files,
+    };
+    Ok(info)
+}
+
+/// 把当前可移植真源写成快照包；调用方负责临时文件与最终发布。
+pub fn write_archive_to(
+    store: &Store,
+    target: &Path,
+    kind: SnapshotKind,
+) -> Result<ArchiveBuild, AppError> {
     let files = collect_files(store)?;
     let mut manifest_files = Vec::with_capacity(files.len());
     for (absolute, relative) in &files {
@@ -204,27 +247,58 @@ pub fn create(
         files: manifest_files,
     };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
-
-    let tmp = dir.join(format!(".tmp-{}-{}.zip", std::process::id(), chrono::Utc::now().timestamp_millis()));
-    let write_result = write_zip(&tmp, &manifest_bytes, &files);
-    if let Err(error) = write_result {
-        let _ = fs::remove_file(&tmp);
-        return Err(error);
-    }
-    if let Err(error) = fs::rename(&tmp, &target) {
-        let _ = fs::remove_file(&tmp);
-        return Err(AppError::Backup(format!("发布快照失败：{error}")));
-    }
-
-    let size_bytes = fs::metadata(&target).map(|meta| meta.len()).unwrap_or(0);
-    let info = SnapshotInfo {
-        name,
-        kind,
+    write_zip(target, &manifest_bytes, &files)?;
+    Ok(ArchiveBuild {
         created_at: manifest.created_at,
-        size_bytes,
         files: manifest.files.len() as u64,
-    };
-    Ok(info)
+        size_bytes: fs::metadata(target).map(|meta| meta.len()).unwrap_or(0),
+    })
+}
+
+/// 上传前的本地预检：确保包能通过恢复端的同一条上限校验。
+pub fn validate_archive_for_restore(path: &Path) -> Result<ArchiveSummary, AppError> {
+    let manifest = read_manifest(path)?;
+    if !manifest.files.iter().any(|file| file.path != ".gitignore") {
+        return Err(AppError::Cloud(
+            "本地没有可备份的资产，已拒绝上传".into(),
+        ));
+    }
+    let limits = ArchiveLimits::default();
+    let entries = manifest.files.len() + 1;
+    if entries > limits.max_entries {
+        return Err(AppError::Cloud(format!(
+            "备份包超过可恢复上限：条目数 {entries} 超过 {}",
+            limits.max_entries
+        )));
+    }
+    let total_bytes = manifest
+        .files
+        .iter()
+        .map(|file| file.size.max(limits.min_entry_bytes))
+        .fold(limits.min_entry_bytes, u64::saturating_add);
+    if total_bytes > limits.max_total_bytes {
+        return Err(AppError::Cloud(format!(
+            "备份包超过可恢复上限：解压后约 {total_bytes} 字节，上限 {} 字节",
+            limits.max_total_bytes
+        )));
+    }
+    let max_depth = manifest
+        .files
+        .iter()
+        .map(|file| file.path.split('/').filter(|segment| !segment.is_empty()).count())
+        .max()
+        .unwrap_or(0);
+    if max_depth > limits.max_depth {
+        return Err(AppError::Cloud(format!(
+            "备份包超过可恢复上限：路径深度 {max_depth} 超过 {}",
+            limits.max_depth
+        )));
+    }
+    Ok(ArchiveSummary {
+        files: manifest.files.len() as u64,
+        total_bytes,
+        max_depth,
+    })
 }
 
 fn write_zip(
@@ -378,6 +452,12 @@ fn read_manifest(path: &Path) -> Result<Manifest, AppError> {
         return Err(AppError::Backup(format!(
             "不是 CC Switch X 快照：{}",
             manifest.format
+        )));
+    }
+    if manifest.schema != SCHEMA {
+        return Err(AppError::Backup(format!(
+            "快照格式版本不支持：{}",
+            manifest.schema
         )));
     }
     Ok(manifest)
@@ -1068,6 +1148,36 @@ mod tests {
             .unwrap();
     }
 
+    fn write_manifest_only_zip(
+        path: &Path,
+        file_count: usize,
+        file_size: u64,
+        path_components: &[&str],
+    ) {
+        let files = (0..file_count)
+            .map(|index| ManifestFile {
+                path: format!("{}/{}", path_components.join("/"), index),
+                size: file_size,
+                sha256: "00".into(),
+            })
+            .collect();
+        let manifest = Manifest {
+            format: FORMAT.into(),
+            schema: SCHEMA,
+            created_at: 1,
+            kind: SnapshotKind::Manual,
+            app_version: "test".into(),
+            files,
+        };
+        let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        let file = fs::File::create(path).unwrap();
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        writer.start_file(MANIFEST_NAME, options).unwrap();
+        writer.write_all(&bytes).unwrap();
+        writer.finish().unwrap();
+    }
+
     #[test]
     fn snapshot_contains_only_portable_truth() {
         let (_dir, store, _index) = fixture();
@@ -1264,5 +1374,47 @@ mod tests {
 
         let error = apply_snapshot(&store, &zip).unwrap_err().to_string();
         assert!(error.contains("不允许的路径") || error.contains("校验失败"), "{error}");
+    }
+
+    #[test]
+    fn validate_archive_rejects_empty_package() {
+        let (_dir, store, _index) = fixture();
+        let info = create(&store, Some("empty"), SnapshotKind::Manual).unwrap();
+        let path = snapshots_dir(&store).join(format!("{}.zip", info.name));
+        let error = validate_archive_for_restore(&path).unwrap_err().to_string();
+        assert!(error.contains("没有可备份的资产"));
+    }
+
+    #[test]
+    fn validate_archive_rejects_too_many_entries() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("too-many.zip");
+        write_manifest_only_zip(&path, 30_001, 1, &["a"]);
+        assert!(validate_archive_for_restore(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("超过可恢复上限"));
+    }
+
+    #[test]
+    fn validate_archive_rejects_oversize_charge() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("oversize.zip");
+        write_manifest_only_zip(&path, 1, 600 * 1024 * 1024, &["a"]);
+        assert!(validate_archive_for_restore(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("超过可恢复上限"));
+    }
+
+    #[test]
+    fn validate_archive_accepts_normal_package() {
+        let (_dir, store, _index) = fixture();
+        write_mcp(&store, "pw", "Playwright");
+        let info = create(&store, Some("ok"), SnapshotKind::Manual).unwrap();
+        let path = snapshots_dir(&store).join(format!("{}.zip", info.name));
+        let summary = validate_archive_for_restore(&path).unwrap();
+        assert!(summary.files >= 2);
+        assert!(summary.total_bytes > 0);
     }
 }
