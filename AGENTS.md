@@ -57,6 +57,8 @@ node scripts/check-release-version.mjs
 
 canonical 格式：MCP 为 JSON；Prompt / Rule 为 Markdown + YAML frontmatter；Subagent / Hook 为 YAML；Skill 为目录 + `SKILL.md`（来源信息在 `.meta.json`）。
 
+项目级 Skills 另有一套真源（设计文档 §4 方案 B）：`<project>/.ccswitchx/skills/<id>/` 是项目真源、唯一可编辑副本；`<project>/.ccswitchx/skills.json` 是随仓库提交的台账（version 2，记 `targets` / `canonical` / `dirs` 渲染基线 / `source` 来源）；`.claude|.qoder|.agents/skills/` 只是渲染产物，可随时删除重生成。易变的检查状态（`updateAvailable` / `lastCheckedAt` 等）只存 `<storeRoot>/local/project-skill-checks/<projectId>.json`，不进仓库；项目真源**不写** `.meta.json` 或任何归属标记文件。
+
 ## 必须保持的约束
 
 - **文本优先**：真源是可读文本；`index.db` 只是缓存，任何只存在于索引里的数据都是设计错误。
@@ -64,6 +66,7 @@ canonical 格式：MCP 为 JSON；Prompt / Rule 为 Markdown + YAML frontmatter�
 - **不碰外来内容**：共享 JSON/TOML 只改自己管辖的子树；TOML 用 `toml_edit` 保留注释与格式，JSON 用 `preserve_order` 保留键序（但无法保留原始排版）。整文件资产按台账记录的路径 + 哈希判定归属（Rules/Subagents 还认当前/历史渲染的等价字节）；Hooks 用 `description` 标记，Skills 用链接或 `.ccswitchx` 标记。无法确认归属时返回 `Foreign`，宁可不动。
 - **Prompts 整文件接管**：目标文件已有非我方内容时，必须先让用户选择「另存为 prompt」或「确认覆盖」；激活后任何外部修改都算漂移，不得静默覆盖。
 - **漂移纪律**：启动与手动 rescan 只报告；对受台账管理的整文件资产（Prompt / Rule / Subagent），启用或换激活遇到未解决漂移时返回 `DriftUnresolved`。处置只有「采纳磁盘」（改真源、不动盘）或「重刷真源」（走写入流水线）两种。
+- **项目级渲染纪律**：渲染目标被外部修改即 `edited`，只报告不覆盖，必须人工裁决；`untracked`（不在 `targets`）的副本永不删除或覆盖；真源消失只能由显式 `purge` 处置，自动同步永不产 purge；v1→v2 迁移只新建文件、不改任何 agent 目录的字节，冲突未裁决就整体拒写；能力闸在勾选侧与写入侧双重校验，未实测落点（`.agents/skills`）不可写。
 - **写入流水线**：任何落盘先备份；原子写后回读校验；任一项失败整批回滚。CLI 路径必须在调用 CLI 前 snapshot，读回确认后才算 `effective`，否则只能报 `written` 并在 `note` 说明原因。
 - **CLI 安全**：参数一律用数组传给 `Command`，不拼 shell 字符串；`qoderclicn` 的 MCP 命令必须显式 `--scope user`，回读也钉在 user scope。`[features].hooks` 这类用户级开关只提示、不代写。
 - **检测门禁**：写文件前经 `ensure_agent_detected` 检查配置根；不存在就拒绝，不替用户创建工具目录。
