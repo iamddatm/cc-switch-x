@@ -3,7 +3,7 @@
 //! 网络请求统一持有 `cloud_ops` 串行锁；请求期间不持有 settings / secrets 锁。
 
 use crate::error::AppError;
-use crate::net::webdav::{RemoteObject, WebDavClient, WebDavConfig};
+use crate::net::webdav::{RemoteObject, WebDavClient, WebDavConfig, MAX_CLOUD_BYTES};
 use crate::net::ProxyConfig;
 use crate::services::backup::{self, SnapshotKind};
 use crate::services::settings::cloud_secret_ref;
@@ -143,6 +143,17 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
         last_upload_at: runtime.last_upload_at,
         last_error: runtime.last_error,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudRestoreReport {
+    pub safety_backup: String,
+    pub restored_files: u64,
+    pub removed_files: u64,
+    pub downloaded_snapshot: String,
+    pub remote_size_bytes: u64,
+    pub remote_modified_at: Option<i64>,
 }
 
 /// 用表单里的候选连接参数测一次远端；密码 `None` 时沿用已保存的密钥。
@@ -335,6 +346,98 @@ fn upload_archive_locked(
     }
 }
 
+fn unique_restore_name(store: &Store) -> String {
+    let base = format!(
+        "cloud_restore_{}",
+        chrono::Local::now().format("%Y%m%d_%H%M%S")
+    );
+    let dir = backup::snapshots_dir(store);
+    let mut candidate = base.clone();
+    let mut suffix = 1;
+    while dir.join(format!("{candidate}.zip")).exists() {
+        suffix += 1;
+        candidate = format!("{base}_{suffix}");
+    }
+    candidate
+}
+
+/// 下载云端最新包，走与本地快照相同的安全恢复流水线；不做自动保留清理。
+pub fn restore_latest(state: &AppState) -> Result<CloudRestoreReport, AppError> {
+    let connection = read_connection(state)?;
+    let proxy = state.proxy_config()?;
+    let _guard = state
+        .cloud_ops
+        .lock()
+        .map_err(|_| AppError::Cloud("云备份任务锁失败".into()))?;
+    let client = client_for(&connection, &proxy)?;
+
+    let remote = client.head()?;
+    if !remote.exists {
+        return Err(AppError::Cloud("云端还没有备份，请先上传".into()));
+    }
+    if remote
+        .size_bytes
+        .is_some_and(|size| size > MAX_CLOUD_BYTES)
+    {
+        return Err(AppError::Cloud(format!(
+            "云端备份超过下载上限（{MAX_CLOUD_BYTES} 字节）"
+        )));
+    }
+
+    let staging = state.store.staging_dir();
+    fs::create_dir_all(&staging)?;
+    let temp = staging.join(format!(
+        "cloud-{}.zip",
+        chrono::Utc::now().timestamp_millis()
+    ));
+    let downloaded = match client.get_to_file(&temp, MAX_CLOUD_BYTES) {
+        Ok(downloaded) => downloaded,
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            return Err(error);
+        }
+    };
+    if let Err(error) = backup::validate_archive_for_restore(&temp) {
+        let _ = fs::remove_file(&temp);
+        return Err(AppError::Cloud(format!("云端备份无效：{error}")));
+    }
+
+    let name = unique_restore_name(&state.store);
+    let target = backup::snapshots_dir(&state.store).join(format!("{name}.zip"));
+    fs::create_dir_all(backup::snapshots_dir(&state.store))?;
+
+    let restored = {
+        let _maintenance = state.enter_maintenance()?;
+        let mut index = state
+            .index
+            .lock()
+            .map_err(|_| AppError::Cloud("索引锁失败".into()))?;
+        if let Err(error) = fs::rename(&temp, &target) {
+            let _ = fs::remove_file(&temp);
+            return Err(AppError::Cloud(format!("保存云端备份失败：{error}")));
+        }
+        let result = backup::restore(&state.store, &mut index, &name);
+        state.notify_git("restore: cloud");
+        result
+    };
+    let _ = fs::remove_file(&temp);
+
+    match restored {
+        Ok(report) => Ok(CloudRestoreReport {
+            safety_backup: report.safety_backup,
+            restored_files: report.restored_files,
+            removed_files: report.removed_files,
+            downloaded_snapshot: name,
+            remote_size_bytes: downloaded
+                .size_bytes
+                .or(remote.size_bytes)
+                .unwrap_or(0),
+            remote_modified_at: remote.modified_at,
+        }),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,6 +487,11 @@ mod tests {
             )
             .unwrap();
         state
+    }
+
+    fn build_named_snapshot(state: &AppState, name: &str) -> std::path::PathBuf {
+        backup::create(&state.store, Some(name), SnapshotKind::Manual).unwrap();
+        backup::snapshots_dir(&state.store).join(format!("{name}.zip"))
     }
 
     #[test]
@@ -498,5 +606,64 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().starts_with("cloud-"))
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn restore_latest_restores_assets_and_creates_safety_snapshot() {
+        let server = FakeWebDav::start("me", "pw");
+        let source = test_state_with_asset(config_for(&server), Some("pw"));
+        let snapshot = build_named_snapshot(&source, "cloud-source");
+        server.put_object(
+            "/dav/ccswitchx/ccswitchx-backup.zip",
+            std::fs::read(snapshot).unwrap(),
+        );
+
+        let target = test_state(config_for(&server), Some("pw"));
+        std::fs::write(
+            target.store.root().join("local/agents/sentinel.json"),
+            "keep",
+        )
+        .unwrap();
+        let report = restore_latest(&target).unwrap();
+
+        assert!(target
+            .store
+            .asset_dir(crate::domain::AssetType::Mcp)
+            .join("pw.json")
+            .is_file());
+        assert!(!report.safety_backup.is_empty());
+        assert!(report.downloaded_snapshot.starts_with("cloud_restore_"));
+        assert_eq!(
+            std::fs::read_to_string(target.store.root().join("local/agents/sentinel.json")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn restore_missing_remote_is_friendly_error() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = test_state(config_for(&server), Some("pw"));
+        let error = restore_latest(&state).unwrap_err().to_string();
+        assert!(error.contains("云端还没有备份"));
+    }
+
+    #[test]
+    fn restore_rejects_foreign_archive() {
+        let server = FakeWebDav::start("me", "pw");
+        server.put_object("/dav/ccswitchx/ccswitchx-backup.zip", b"not a zip".to_vec());
+        let state = test_state(config_for(&server), Some("pw"));
+        assert!(restore_latest(&state).is_err());
+        assert!(!state.store.root().join("agents").join("claude.json").exists());
+    }
+
+    #[test]
+    fn restore_rejects_oversize_remote_without_downloading() {
+        let server = FakeWebDav::start("me", "pw");
+        server.put_object("/dav/ccswitchx/ccswitchx-backup.zip", b"x".to_vec());
+        server.set_head_size_override(Some(MAX_CLOUD_BYTES + 1));
+        let state = test_state(config_for(&server), Some("pw"));
+        let before = server.request_count("GET");
+        assert!(restore_latest(&state).is_err());
+        assert_eq!(server.request_count("GET"), before);
     }
 }
