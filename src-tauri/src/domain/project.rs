@@ -97,13 +97,45 @@ pub fn dir_spec(key: ProjectSkillDirKey) -> &'static ProjectSkillDirSpec {
         .expect("PROJECT_SKILL_DIRS 必须覆盖所有 ProjectSkillDirKey")
 }
 
+/// 项目台账格式版本。v1 是「对等副本」模型（agent 目录互为副本），v2 起
+/// `.ccswitchx/skills/<id>/` 是项目真源、agent 目录只是渲染产物。
+pub const PROJECT_LEDGER_VERSION: u32 = 2;
+/// 能读懂的最低版本；低于它的文件按损坏处理，高于它的必须要求升级。
+pub const PROJECT_LEDGER_MIN_READABLE: u32 = 1;
+
+/// 项目真源目录（相对项目根）。与台账 `skills.json` 是兄弟，都在 `.ccswitchx/` 下。
+pub const PROJECT_CANONICAL_RELATIVE: &str = ".ccswitchx/skills";
+
+pub fn canonical_root(project_root: &Path) -> PathBuf {
+    project_root.join(".ccswitchx").join("skills")
+}
+
+/// 某个 skill 的项目真源目录。ID 直接参与目录名，必须先过 ID 安全；
+/// 再确认结果仍在项目根内，防 `..` 之类的构造逃逸到项目外。
+pub fn canonical_skill_dir(project_root: &Path, id: &str) -> Result<PathBuf, AppError> {
+    if !crate::store::is_safe_id(id) {
+        return Err(AppError::InvalidInput(format!(
+            "Skill ID 不能用作目录名：{id}"
+        )));
+    }
+    let path = canonical_root(project_root).join(id);
+    if !path.starts_with(project_root) {
+        return Err(AppError::InvalidInput(format!(
+            "路径越出项目根：{}",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectDirState {
     pub present: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree_hash: Option<String>,
-    #[serde(default)]
+    /// 空清单不序列化：台账随仓库提交，多余的 `"files": {}` 只会制造 diff 噪音。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub files: BTreeMap<String, String>,
     /// 目录内文件的最大 mtime（毫秒）。只在冲突时用于推荐“最新一侧”，不写进账本。
     #[serde(skip, default)]
@@ -135,10 +167,16 @@ pub struct ProjectSkillOp {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSkillEntry {
+    /// 渲染目标（物理目录 key）。v2 起语义从「对等副本」变为「真源的部署目标」。
     #[serde(default)]
     pub targets: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<ProjectSkillSource>,
+    /// 项目真源（`.ccswitchx/skills/<id>/`）的上次已知状态。
+    /// `present: false` 表示真源尚未落地 —— 未迁移或未被「收进真源」。
+    #[serde(default)]
+    pub canonical: ProjectDirState,
+    /// 上次成功渲染进各目标的字节基线。
     #[serde(default)]
     pub dirs: BTreeMap<String, ProjectDirState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -226,6 +264,22 @@ pub fn validate_project_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 真源目录名直接参与文件系统路径，非法 ID 必须在拼接前挡下。
+    #[test]
+    fn canonical_skill_dir_rejects_unsafe_ids() {
+        let root = Path::new("D:/repos/app");
+        assert_eq!(
+            canonical_skill_dir(root, "code-review").unwrap(),
+            canonical_root(root).join("code-review")
+        );
+        for bad in ["..", "../escape", "a b", "", &"x".repeat(129)] {
+            assert!(
+                canonical_skill_dir(root, bad).is_err(),
+                "非法 ID 必须被拒绝：{bad:?}"
+            );
+        }
+    }
 
     #[test]
     fn project_skill_dirs_are_stable() {

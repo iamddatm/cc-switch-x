@@ -231,12 +231,27 @@ fn dir_meta(key: ProjectSkillDirKey, agents: &[AgentStatus]) -> ProjectDirMeta {
     }
 }
 
+/// 列表展示的名称与描述：优先读项目真源，其次按启用目录的顺序读渲染产物。
+/// 真源是唯一可编辑副本，所以它一旦存在就以它为准；未迁移/未采纳时才回落到副本。
 fn describe_skill(
     project_root: &Path,
     id: &str,
     scan: &ProjectScan,
     keys: &[ProjectSkillDirKey],
 ) -> (String, Option<String>) {
+    if scan
+        .canonical
+        .get(id)
+        .is_some_and(|state| state.present && !scan.blocks_canonical(id))
+    {
+        let path = crate::domain::project::canonical_root(project_root)
+            .join(id)
+            .join("SKILL.md");
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let meta = crate::domain::skill::parse_metadata(&text);
+            return (meta.name.unwrap_or_else(|| id.to_string()), meta.description);
+        }
+    }
     for key in keys {
         let state = scan
             .skills
@@ -520,6 +535,32 @@ mod tests {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')));
         assert_eq!(id, project_id(dir.path()));
+    }
+
+    /// 真源是唯一可编辑副本，一旦存在，列表的名称/描述必须以它为准。
+    #[test]
+    fn describe_skill_prefers_the_canonical_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let write_skill = |path: std::path::PathBuf, name: &str| {
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(
+                path.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {name} 的描述\n---\n"),
+            )
+            .unwrap();
+        };
+        write_skill(root.join(".claude/skills/a"), "副本名");
+        let keys = [ProjectSkillDirKey::Claude];
+
+        let scan = project_scan::scan(root, &keys).unwrap();
+        assert_eq!(describe_skill(root, "a", &scan, &keys).0, "副本名");
+
+        write_skill(crate::domain::project::canonical_skill_dir(root, "a").unwrap(), "真源名");
+        let scan = project_scan::scan(root, &keys).unwrap();
+        let (name, description) = describe_skill(root, "a", &scan, &keys);
+        assert_eq!(name, "真源名");
+        assert_eq!(description.as_deref(), Some("真源名 的描述"));
     }
 
     #[test]

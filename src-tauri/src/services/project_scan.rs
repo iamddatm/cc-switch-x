@@ -1,6 +1,6 @@
 use crate::domain::project::{
     dir_spec, ProjectDirState, ProjectLedger, ProjectSkillDirKey, ProjectSkillEntry,
-    PROJECT_SKILL_DIRS,
+    PROJECT_LEDGER_VERSION, PROJECT_SKILL_DIRS,
 };
 use crate::error::AppError;
 use crate::index::sha256_hex;
@@ -18,6 +18,8 @@ pub struct ProjectSkillSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectScan {
     pub skills: BTreeMap<String, ProjectSkillSnapshot>,
+    /// 项目真源 `.ccswitchx/skills/<id>/` 的当前状态；真源不是落点，不进 dirs key 空间。
+    pub canonical: BTreeMap<String, ProjectDirState>,
     pub dirs: Vec<ProjectSkillDirKey>,
     pub warnings: Vec<String>,
     /// 基目录本身是链接/junction 而被跳过的目录 key：该 key 下所有 skill 状态都未知。
@@ -25,6 +27,8 @@ pub struct ProjectScan {
     /// 因链接被跳过的 (目录 key, skill id)：这些格子状态未知，
     /// 绝不能按「不存在」参与差异判定，否则会把别的健康副本判成删除。
     pub unresolved_skills: Vec<(String, String)>,
+    /// 因链接或非法 ID 而无法取到状态的真源 skill id：同样不得按「不存在」判定。
+    pub unresolved_canonical: Vec<String>,
 }
 
 impl ProjectScan {
@@ -35,6 +39,13 @@ impl ProjectScan {
                 .unresolved_skills
                 .iter()
                 .any(|(key, id)| key == dir && id == skill_id)
+    }
+
+    /// 真源状态是否不可解析：不可解析时禁止渲染，也禁止据此判定「真源已删除」。
+    pub fn blocks_canonical(&self, skill_id: &str) -> bool {
+        self.unresolved_canonical
+            .iter()
+            .any(|id| id == skill_id)
     }
 }
 
@@ -135,6 +146,7 @@ pub fn scan(project_root: &Path, keys: &[ProjectSkillDirKey]) -> Result<ProjectS
     let mut warnings = Vec::new();
     let mut unresolved_dirs: Vec<String> = Vec::new();
     let mut unresolved_skills: Vec<(String, String)> = Vec::new();
+    let mut unresolved_canonical: Vec<String> = Vec::new();
 
     for key in keys {
         let base = project_root.join(dir_spec(*key).relative_path);
@@ -188,12 +200,18 @@ pub fn scan(project_root: &Path, keys: &[ProjectSkillDirKey]) -> Result<ProjectS
         }
     }
 
+    let canonical = scan_canonical(project_root)?;
+    warnings.extend(canonical.warnings);
+    unresolved_canonical.extend(canonical.unresolved);
+
     Ok(ProjectScan {
         skills,
+        canonical: canonical.states,
         dirs: keys.to_vec(),
         warnings,
         unresolved_dirs,
         unresolved_skills,
+        unresolved_canonical,
     })
 }
 
@@ -208,13 +226,87 @@ pub fn ledger_path(project_root: &Path) -> PathBuf {
     project_root.join(".ccswitchx").join("skills.json")
 }
 
+/// 真源目录的扫描结果。真源不是落点，所以单独扫，不进 `dirs` 的 key 空间。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CanonicalScan {
+    pub states: BTreeMap<String, ProjectDirState>,
+    pub warnings: Vec<String>,
+    /// 状态取不到（链接、或目录名不是合法 ID）的 skill id：不得按「不存在」判定。
+    pub unresolved: Vec<String>,
+}
+
+/// 扫 `<project>/.ccswitchx/skills/`：含 `SKILL.md` 的子目录才算一个 skill。
+/// 目录名直接参与文件系统路径，非法 ID 只告警跳过，不 panic 也不当空表。
+pub fn scan_canonical(project_root: &Path) -> Result<CanonicalScan, AppError> {
+    let mut result = CanonicalScan::default();
+    let base = crate::domain::project::canonical_root(project_root);
+    let entries = match std::fs::read_dir(&base) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(result),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+        if is_link(&path) {
+            result
+                .warnings
+                .push(format!("跳过符号链接：{}", path.display()));
+            result.unresolved.push(name);
+            continue;
+        }
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        if !crate::store::is_safe_id(&name) {
+            result
+                .warnings
+                .push(format!("真源里的目录名不能用作 skill ID：{name}"));
+            result.unresolved.push(name);
+            continue;
+        }
+        if !path.join("SKILL.md").is_file() {
+            continue;
+        }
+        match tree_state(&path) {
+            Ok(state) => {
+                result.states.insert(name, state);
+            }
+            Err(error) => {
+                result
+                    .warnings
+                    .push(format!("跳过包含符号链接的真源 skill {name}：{error}"));
+                result.unresolved.push(name);
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// 账本缺失按空表处理；存在但解析不了必须报错，避免把归属当空表覆盖。
+/// 版本高于本程序支持的版本也必须报错：按旧模型解释会把渲染产物当成对等副本互相覆盖。
 pub fn load_ledger(project_root: &Path) -> Result<ProjectLedger, AppError> {
     let path = ledger_path(project_root);
     if !path.exists() {
         return Ok(ProjectLedger::default());
     }
-    Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+    let ledger: ProjectLedger = serde_json::from_slice(&std::fs::read(&path)?)?;
+    if ledger.version > PROJECT_LEDGER_VERSION {
+        return Err(AppError::InvalidInput(format!(
+            "该项目的台账 {} 由更新版本的 CC Switch X 写入（版本 {}，本程序最高支持 {}），请升级后再打开",
+            path.display(),
+            ledger.version,
+            PROJECT_LEDGER_VERSION
+        )));
+    }
+    Ok(ledger)
+}
+
+/// v1 是「对等副本」模型，必须经显式迁移才能按真源模型渲染。
+/// 迁移不在读路径里做：读命令不持写锁，且「空跑不改仓库文件」是既有不变量。
+pub fn ledger_needs_migration(ledger: &ProjectLedger) -> bool {
+    ledger.version < PROJECT_LEDGER_VERSION
 }
 
 pub fn save_ledger(project_root: &Path, ledger: &ProjectLedger) -> Result<(), AppError> {
@@ -226,8 +318,9 @@ pub fn save_ledger(project_root: &Path, ledger: &ProjectLedger) -> Result<(), Ap
     Ok(())
 }
 
-/// 添加项目时立即写基线：targets 为空，只记录各目录当前状态，不复制任何内容。
-/// 账本已存在时不覆盖，按现有基线继续。
+/// 添加项目时立即写基线：targets 为空，只记录各目录与真源的当前状态，不复制任何内容。
+/// 新项目直接落 v2 —— 真源此刻还不存在（canonical.present=false），矩阵显示「未跟踪」，
+/// 由用户逐项「收进真源」。账本已存在时不覆盖，按现有基线继续。
 pub fn ensure_baseline(
     project_root: &Path,
     scan: &ProjectScan,
@@ -236,7 +329,7 @@ pub fn ensure_baseline(
         return load_ledger(project_root);
     }
     let mut ledger = ProjectLedger {
-        version: 1,
+        version: PROJECT_LEDGER_VERSION,
         updated_at: chrono::Utc::now().to_rfc3339(),
         skills: BTreeMap::new(),
     };
@@ -246,6 +339,7 @@ pub fn ensure_baseline(
             ProjectSkillEntry {
                 targets: Vec::new(),
                 source: None,
+                canonical: scan.canonical.get(id).cloned().unwrap_or_default(),
                 dirs: snapshot.dirs.clone(),
                 last_op: None,
             },
@@ -296,6 +390,113 @@ mod tests {
         assert!(ledger.skills["a"].dirs["claude"].present);
         assert!(!dir.path().join(".qoder/skills/a").exists());
         assert!(ledger_path(dir.path()).is_file());
+    }
+
+    #[test]
+    fn scan_canonical_reads_the_project_source_of_truth() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_skill(&dir.path().join(".ccswitchx/skills"), "mine");
+        seed_skill(&dir.path().join(".claude/skills"), "only-copy");
+
+        let scan = scan(dir.path(), &ProjectSkillDirKey::ALL).unwrap();
+        assert!(scan.canonical["mine"].present);
+        assert_eq!(
+            scan.canonical.get("only-copy"),
+            None,
+            "真源扫描只看 .ccswitchx/skills，不把渲染产物当真实源"
+        );
+        assert!(
+            !scan.skills.contains_key("mine") || scan.skills["mine"].dirs["claude"].present == false,
+            "真源目录不能占用落点 key 空间"
+        );
+        assert!(scan.canonical["mine"].tree_hash.is_some());
+    }
+
+    #[test]
+    fn scan_canonical_skips_non_skills_and_flags_unsafe_dir_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".ccswitchx/skills");
+        std::fs::create_dir_all(root.join("plain")).unwrap();
+        std::fs::write(root.join("plain/README.md"), "没有 SKILL.md").unwrap();
+        std::fs::create_dir_all(root.join("bad name")).unwrap();
+        std::fs::write(root.join("bad name/SKILL.md"), "---\nname: x\n---\n").unwrap();
+
+        let scan = scan(dir.path(), &ProjectSkillDirKey::ALL).unwrap();
+        assert!(
+            !scan.canonical.contains_key("plain"),
+            "没有 SKILL.md 的目录不是一个 skill"
+        );
+        assert!(
+            scan.blocks_canonical("bad name"),
+            "目录名不能当 ID 时必须报出来，不能静默当成不存在"
+        );
+        assert!(scan.warnings.iter().any(|w| w.contains("bad name")));
+    }
+
+    #[test]
+    fn load_ledger_rejects_a_newer_version_but_reads_v1_and_v2() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = ledger_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        std::fs::write(
+            &path,
+            r#"{"version":3,"updatedAt":"","skills":{}}"#,
+        )
+        .unwrap();
+        let error = load_ledger(dir.path()).unwrap_err();
+        assert!(
+            matches!(error, AppError::InvalidInput(_)),
+            "更高版本的台账不能按旧模型解释：{error:?}"
+        );
+
+        for version in [1, 2] {
+            std::fs::write(
+                &path,
+                format!(r#"{{"version":{version},"updatedAt":"","skills":{{}}}}"#),
+            )
+            .unwrap();
+            let ledger = load_ledger(dir.path()).unwrap();
+            assert_eq!(ledger.version, version);
+            assert_eq!(ledger_needs_migration(&ledger), version == 1);
+        }
+    }
+
+    #[test]
+    fn baseline_is_version_two_and_records_an_absent_canonical() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_skill(&dir.path().join(".claude/skills"), "a");
+        let without_canonical = scan(dir.path(), &ProjectSkillDirKey::ALL).unwrap();
+        let ledger = ensure_baseline(dir.path(), &without_canonical).unwrap();
+
+        assert_eq!(ledger.version, PROJECT_LEDGER_VERSION);
+        assert!(
+            !ledger.skills["a"].canonical.present,
+            "新项目的真源还没落地，矩阵要显示未跟踪而不是已同步"
+        );
+        assert!(ledger.skills["a"].targets.is_empty());
+
+        // 真源已在磁盘上（例如另一台机器迁移过）时，基线要记下它的状态。
+        std::fs::remove_file(ledger_path(dir.path())).unwrap();
+        seed_skill(&dir.path().join(".ccswitchx/skills"), "a");
+        let with_canonical = scan(dir.path(), &ProjectSkillDirKey::ALL).unwrap();
+        let ledger = ensure_baseline(dir.path(), &with_canonical).unwrap();
+        assert!(ledger.skills["a"].canonical.present);
+    }
+
+    #[test]
+    fn empty_file_map_is_not_serialized() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_skill(&root.join(".claude/skills"), "a");
+        let scan = scan(root, &ProjectSkillDirKey::ALL).unwrap();
+        ensure_baseline(root, &scan).unwrap();
+
+        let text = std::fs::read_to_string(ledger_path(root)).unwrap();
+        assert!(
+            !text.contains(r#""files": {}"#),
+            "台账随仓库提交，空清单只会制造 diff 噪音：{text}"
+        );
     }
 
     #[test]

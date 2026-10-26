@@ -1151,10 +1151,12 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            canonical: BTreeMap::new(),
             dirs: Vec::new(),
             warnings: Vec::new(),
             unresolved_dirs: Vec::new(),
             unresolved_skills: Vec::new(),
+            unresolved_canonical: Vec::new(),
         }
     }
 
