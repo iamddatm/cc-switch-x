@@ -771,6 +771,286 @@ pub fn sync_project(
     Ok(report)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Reference {
+    dir: String,
+    state: ProjectDirState,
+}
+
+fn reference_of(
+    dirs: &[String],
+    current: &BTreeMap<String, ProjectDirState>,
+    baseline: &BTreeMap<String, ProjectDirState>,
+) -> Option<Reference> {
+    let present: Vec<&String> = dirs
+        .iter()
+        .filter(|dir| current.get(*dir).is_some_and(|state| state.present))
+        .collect();
+    let chosen = present
+        .iter()
+        .copied()
+        .find(|dir| {
+            baseline
+                .get(*dir)
+                .is_some_and(|state| state.present && same_state(state, &current[*dir]))
+        })
+        .or_else(|| present.first().copied())?;
+    Some(Reference {
+        dir: chosen.clone(),
+        state: current[chosen].clone(),
+    })
+}
+
+/// 勾选 / 取消同步目标。新增的缺失目录立刻从已有目标复制；取消勾选只留文件和基线。
+pub fn set_targets(
+    store: &Store,
+    project_id: &str,
+    project_root: &Path,
+    skill_id: &str,
+    targets: &[String],
+    allowed_dirs: &[String],
+) -> Result<(), AppError> {
+    let mut wanted: Vec<String> = Vec::new();
+    for dir in targets {
+        if spec_relative_path(dir).is_none() {
+            return Err(AppError::Project(format!("未知的项目目录：{dir}")));
+        }
+        if !allowed_dirs.contains(dir) {
+            return Err(AppError::Project(format!(
+                "该目录尚未实测，不能作为同步目标：{dir}"
+            )));
+        }
+        if !wanted.contains(dir) {
+            wanted.push(dir.clone());
+        }
+    }
+
+    let mut ledger = project_scan::load_ledger(project_root)?;
+    let entry = ledger.skills.entry(skill_id.to_string()).or_default();
+    let previous = entry.targets.clone();
+    let baseline = entry.dirs.clone();
+    let added: Vec<String> = wanted
+        .iter()
+        .filter(|dir| !previous.contains(dir))
+        .cloned()
+        .collect();
+
+    let mut current: BTreeMap<String, ProjectDirState> = BTreeMap::new();
+    for dir in &wanted {
+        let path = skill_dir(project_root, dir, skill_id)?;
+        current.insert(dir.clone(), project_scan::tree_state(&path)?);
+    }
+
+    // 源优先取保留下来、内容与基线一致的目标；一个都没有时，新目录自己就是首个内容来源。
+    let stable: Vec<String> = wanted
+        .iter()
+        .filter(|dir| previous.contains(dir))
+        .cloned()
+        .collect();
+    let mut reference = reference_of(&stable, &current, &baseline);
+    let mut copies: Vec<(String, String)> = Vec::new();
+    for dir in &added {
+        let state = &current[dir];
+        match &reference {
+            Some(source) => {
+                if state.present {
+                    if !same_state(&source.state, state) {
+                        return Err(AppError::Project(
+                            "目标目录已有不同内容，请先处理冲突".to_string(),
+                        ));
+                    }
+                } else {
+                    copies.push((dir.clone(), source.dir.clone()));
+                }
+            }
+            None => {
+                if state.present {
+                    reference = Some(Reference {
+                        dir: dir.clone(),
+                        state: state.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    let timestamp = chrono::Utc::now().timestamp_millis();
+    let mut applied: Vec<Applied> = Vec::new();
+    let mut source_dir: Option<String> = None;
+    for (dir, from) in &copies {
+        let action = SyncAction {
+            skill_id: skill_id.to_string(),
+            action: "copy".into(),
+            dir: dir.clone(),
+            source_dir: Some(from.clone()),
+        };
+        match apply_copy(store, project_id, timestamp, project_root, &action) {
+            Ok((_, record)) => {
+                applied.push(record);
+                source_dir = Some(from.clone());
+            }
+            Err(error) => {
+                let mut rollback_errors: Vec<String> = Vec::new();
+                for record in applied.iter().rev() {
+                    if let Err(e) = rollback(record) {
+                        rollback_errors.push(format!("{e}"));
+                    }
+                }
+                if rollback_errors.is_empty() {
+                    return Err(error);
+                }
+                return Err(AppError::Project(format!(
+                    "同步失败，回滚出现问题：{}",
+                    rollback_errors.join("；")
+                )));
+            }
+        }
+    }
+
+    // 复制成功后重新扫描，基线记的是磁盘现状。
+    let mut refreshed: BTreeMap<String, ProjectDirState> = BTreeMap::new();
+    for dir in &wanted {
+        let path = skill_dir(project_root, dir, skill_id)?;
+        refreshed.insert(dir.clone(), project_scan::tree_state(&path)?);
+    }
+    let entry = ledger.skills.get_mut(skill_id).expect("条目已创建");
+    entry.targets = wanted.clone();
+    for (dir, state) in &refreshed {
+        entry.dirs.insert(dir.clone(), state.clone());
+    }
+    entry.last_op = Some(ProjectSkillOp {
+        dir: source_dir.unwrap_or_else(|| {
+            reference
+                .as_ref()
+                .map(|item| item.dir.clone())
+                .or_else(|| wanted.first().cloned())
+                .unwrap_or_default()
+        }),
+        action: if copies.is_empty() {
+            "targets".into()
+        } else {
+            "copy".into()
+        },
+        at: chrono::Utc::now().to_rfc3339(),
+    });
+    ledger.updated_at = chrono::Utc::now().to_rfc3339();
+    project_scan::save_ledger(project_root, &ledger)
+}
+
+/// 移除单个副本：先备份再删，从 targets 移除并把基线置为不存在；只动账本确认过的目录。
+pub fn remove_copy(
+    store: &Store,
+    project_id: &str,
+    project_root: &Path,
+    skill_id: &str,
+    dir: &str,
+) -> Result<SyncReport, AppError> {
+    let mut ledger = project_scan::load_ledger(project_root)?;
+    let entry = ledger
+        .skills
+        .get_mut(skill_id)
+        .ok_or_else(|| AppError::NotFound(format!("项目里没有跟踪该 skill：{skill_id}")))?;
+    if !entry.dirs.get(dir).is_some_and(|state| state.present) {
+        return Err(AppError::Project(format!(
+            "该副本不是本项目写入的，不能删除：{dir}"
+        )));
+    }
+    entry.targets.retain(|target| target != dir);
+
+    let timestamp = chrono::Utc::now().timestamp_millis();
+    let action = SyncAction {
+        skill_id: skill_id.to_string(),
+        action: "delete".into(),
+        dir: dir.to_string(),
+        source_dir: None,
+    };
+    let (outcome, _record) = apply_delete(store, project_id, timestamp, project_root, &action)?;
+
+    let path = skill_dir(project_root, dir, skill_id)?;
+    let entry = ledger
+        .skills
+        .get_mut(skill_id)
+        .expect("条目存在，删除未成功前不会移除");
+    entry.dirs.insert(dir.to_string(), project_scan::tree_state(&path)?);
+    entry.last_op = Some(ProjectSkillOp {
+        dir: dir.to_string(),
+        action: "delete".into(),
+        at: chrono::Utc::now().to_rfc3339(),
+    });
+    if entry.targets.is_empty() && entry.dirs.values().all(|state| !state.present) {
+        ledger.skills.remove(skill_id);
+    }
+    ledger.updated_at = chrono::Utc::now().to_rfc3339();
+    project_scan::save_ledger(project_root, &ledger)?;
+
+    Ok(SyncReport {
+        outcomes: vec![outcome],
+        conflicts: Vec::new(),
+        warnings: Vec::new(),
+    })
+}
+
+/// 卸载：从所有已跟踪副本删除（先备份），并移除账本条目。
+pub fn uninstall(
+    store: &Store,
+    project_id: &str,
+    project_root: &Path,
+    skill_id: &str,
+) -> Result<SyncReport, AppError> {
+    let mut ledger = project_scan::load_ledger(project_root)?;
+    let entry = ledger
+        .skills
+        .get(skill_id)
+        .ok_or_else(|| AppError::NotFound(format!("项目里没有跟踪该 skill：{skill_id}")))?;
+    let targets = entry.targets.clone();
+
+    let timestamp = chrono::Utc::now().timestamp_millis();
+    let mut outcomes: Vec<SyncOutcome> = Vec::new();
+    let mut applied: Vec<Applied> = Vec::new();
+    for dir in &targets {
+        if !entry.dirs.get(dir).is_some_and(|state| state.present) {
+            continue;
+        }
+        let action = SyncAction {
+            skill_id: skill_id.to_string(),
+            action: "delete".into(),
+            dir: dir.clone(),
+            source_dir: None,
+        };
+        match apply_delete(store, project_id, timestamp, project_root, &action) {
+            Ok((outcome, record)) => {
+                outcomes.push(outcome);
+                applied.push(record);
+            }
+            Err(error) => {
+                let mut rollback_errors: Vec<String> = Vec::new();
+                for record in applied.iter().rev() {
+                    if let Err(e) = rollback(record) {
+                        rollback_errors.push(format!("{e}"));
+                    }
+                }
+                if rollback_errors.is_empty() {
+                    return Err(error);
+                }
+                return Err(AppError::Project(format!(
+                    "卸载失败，回滚出现问题：{}",
+                    rollback_errors.join("；")
+                )));
+            }
+        }
+    }
+
+    ledger.skills.remove(skill_id);
+    ledger.updated_at = chrono::Utc::now().to_rfc3339();
+    project_scan::save_ledger(project_root, &ledger)?;
+
+    Ok(SyncReport {
+        outcomes,
+        conflicts: Vec::new(),
+        warnings: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -809,11 +1089,42 @@ mod tests {
             project_registry::add_project(&self.store, &self.home, &self.root, agents).unwrap()
         }
 
-        fn set_targets(&self, skill_id: &str, dirs: &[&str]) {
+        /// 直接改账本，只用于铺测试数据；走正式入口请用 `set_targets`。
+        fn mark_targets(&self, skill_id: &str, dirs: &[&str]) {
             let mut ledger = project_scan::load_ledger(&self.root).unwrap();
             let entry = ledger.skills.entry(skill_id.to_string()).or_default();
             entry.targets = dirs.iter().map(|dir| dir.to_string()).collect();
             project_scan::save_ledger(&self.root, &ledger).unwrap();
+        }
+
+        fn set_targets(&self, project_id: &str, skill_id: &str, dirs: &[&str]) {
+            self.set_targets_allowed(project_id, skill_id, dirs, &["claude", "qoder"])
+                .unwrap();
+        }
+
+        fn set_targets_allowed(
+            &self,
+            project_id: &str,
+            skill_id: &str,
+            dirs: &[&str],
+            allowed: &[&str],
+        ) -> Result<(), AppError> {
+            set_targets(
+                &self.store,
+                project_id,
+                &self.root,
+                skill_id,
+                &dirs.iter().map(|dir| dir.to_string()).collect::<Vec<_>>(),
+                &allowed.iter().map(|dir| dir.to_string()).collect::<Vec<_>>(),
+            )
+        }
+
+        fn remove_copy(&self, project_id: &str, skill_id: &str, dir: &str) {
+            remove_copy(&self.store, project_id, &self.root, skill_id, dir).unwrap();
+        }
+
+        fn uninstall(&self, project_id: &str, skill_id: &str) {
+            uninstall(&self.store, project_id, &self.root, skill_id).unwrap();
         }
 
         fn sync(&self, project_id: &str, resolutions: &[Resolution]) -> Result<SyncReport, AppError> {
@@ -943,7 +1254,7 @@ mod tests {
         let fixture = project_fixture();
         seed_skill(&fixture.root.join(".claude/skills"), "a");
         let view = fixture.add_project(&["claude".into(), "qoder".into()]);
-        fixture.set_targets("a", &["claude", "qoder"]);
+        fixture.mark_targets("a", &["claude", "qoder"]);
 
         let report = fixture.sync(&view.id, &[]).unwrap();
         assert!(report.conflicts.is_empty());
@@ -962,7 +1273,7 @@ mod tests {
         seed_skill(&fixture.root.join(".claude/skills"), "a");
         seed_skill(&fixture.root.join(".qoder/skills"), "a");
         let view = fixture.add_project(&["claude".into(), "qoder".into()]);
-        fixture.set_targets("a", &["claude", "qoder"]);
+        fixture.mark_targets("a", &["claude", "qoder"]);
         std::fs::write(fixture.root.join(".claude/skills/a/SKILL.md"), "claude v2").unwrap();
         std::fs::write(fixture.root.join(".qoder/skills/a/SKILL.md"), "qoder v2").unwrap();
 
@@ -975,5 +1286,64 @@ mod tests {
             before_claude
         );
         assert!(report.outcomes.is_empty());
+    }
+
+    #[test]
+    fn adding_a_second_target_copies_from_existing_target() {
+        let fixture = project_fixture();
+        seed_skill(&fixture.root.join(".claude/skills"), "a");
+        let view = fixture.add_project(&["claude".into(), "qoder".into()]);
+        fixture.set_targets(&view.id, "a", &["claude"]);
+        fixture.sync(&view.id, &[]).unwrap();
+
+        fixture.set_targets(&view.id, "a", &["claude", "qoder"]);
+        assert!(fixture.root.join(".qoder/skills/a/SKILL.md").is_file());
+    }
+
+    #[test]
+    fn untracking_keeps_files_but_removing_copy_deletes_them() {
+        let fixture = project_fixture();
+        seed_skill(&fixture.root.join(".claude/skills"), "a");
+        let view = fixture.add_project(&["claude".into(), "qoder".into()]);
+        fixture.set_targets(&view.id, "a", &["claude", "qoder"]);
+        fixture.sync(&view.id, &[]).unwrap();
+
+        fixture.set_targets(&view.id, "a", &["claude"]);
+        assert!(
+            fixture.root.join(".qoder/skills/a").is_dir(),
+            "取消勾选保留文件"
+        );
+
+        fixture.remove_copy(&view.id, "a", "qoder");
+        assert!(!fixture.root.join(".qoder/skills/a").exists());
+        assert!(fixture.root.join(".claude/skills/a").is_dir());
+    }
+
+    #[test]
+    fn uninstall_removes_all_copies_and_ledger_entry() {
+        let fixture = project_fixture();
+        seed_skill(&fixture.root.join(".claude/skills"), "a");
+        let view = fixture.add_project(&["claude".into(), "qoder".into()]);
+        fixture.set_targets(&view.id, "a", &["claude", "qoder"]);
+        fixture.sync(&view.id, &[]).unwrap();
+        fixture.uninstall(&view.id, "a");
+
+        assert!(!fixture.root.join(".claude/skills/a").exists());
+        assert!(!fixture.root.join(".qoder/skills/a").exists());
+        let ledger = project_scan::load_ledger(&fixture.root).unwrap();
+        assert!(!ledger.skills.contains_key("a"));
+    }
+
+    #[test]
+    fn set_targets_rejects_dirs_that_are_not_selectable() {
+        let fixture = project_fixture();
+        seed_skill(&fixture.root.join(".claude/skills"), "a");
+        let view = fixture.add_project(&["claude".into(), "qoder".into()]);
+
+        let error = fixture
+            .set_targets_allowed(&view.id, "a", &["qoder"], &["claude"])
+            .unwrap_err();
+        assert!(matches!(error, AppError::Project(_)));
+        assert!(!fixture.root.join(".qoder/skills/a").exists());
     }
 }

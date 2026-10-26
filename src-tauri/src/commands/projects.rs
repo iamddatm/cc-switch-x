@@ -1,10 +1,12 @@
 use crate::commands::backup::open_directory;
 use crate::error::AppError;
 use crate::services::agents::{detect_all, AgentStatus};
-use crate::services::project_registry::{self, ProjectSkillsView, ProjectView};
+use crate::services::project_registry::{
+    self, ProjectSkillsView, ProjectSkillView, ProjectView,
+};
 use crate::services::project_sync::{self, Resolution, SyncReport};
 use crate::state::AppState;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, State};
 
 async fn run_blocking<T, F>(task: F) -> Result<T, AppError>
@@ -137,6 +139,23 @@ pub fn reveal_project_folder(
     open_directory(&entry.path)
 }
 
+/// 项目必须在注册表里且路径真实存在；所有写命令都先过这一关。
+fn registered_project_root(state: &AppState, project_id: &str) -> Result<PathBuf, AppError> {
+    let registry = crate::store::projects::load(&state.store)?;
+    let entry = registry
+        .projects
+        .iter()
+        .find(|entry| entry.id == project_id)
+        .ok_or_else(|| AppError::NotFound(format!("项目不存在：{project_id}")))?;
+    if !entry.path.is_dir() {
+        return Err(AppError::NotFound(format!(
+            "项目路径不存在：{}",
+            entry.path.display()
+        )));
+    }
+    Ok(entry.path.clone())
+}
+
 #[tauri::command]
 pub async fn sync_project_skills(
     app: AppHandle,
@@ -151,25 +170,80 @@ pub async fn sync_project_skills(
             .map_err(|_| AppError::Project("项目锁失败".into()))?;
         let _write = state.enter_write()?;
         let enabled = enabled_agent_ids(&enabled_agents(state.inner())?);
-        let registry = crate::store::projects::load(&state.store)?;
-        let entry = registry
-            .projects
-            .iter()
-            .find(|entry| entry.id == project_id)
-            .ok_or_else(|| AppError::NotFound(format!("项目不存在：{project_id}")))?;
-        if !entry.path.is_dir() {
-            return Err(AppError::NotFound(format!(
-                "项目路径不存在：{}",
-                entry.path.display()
-            )));
-        }
-        project_sync::sync_project(
+        let root = registered_project_root(state.inner(), &project_id)?;
+        project_sync::sync_project(&state.store, &project_id, &root, &enabled, &resolutions)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_project_skill_targets(
+    app: AppHandle,
+    project_id: String,
+    skill_id: String,
+    targets: Vec<String>,
+) -> Result<ProjectSkillView, AppError> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let _project_guard = state
+            .project_ops
+            .lock()
+            .map_err(|_| AppError::Project("项目锁失败".into()))?;
+        let _write = state.enter_write()?;
+        let agents = enabled_agents(state.inner())?;
+        let root = registered_project_root(state.inner(), &project_id)?;
+        project_sync::set_targets(
             &state.store,
             &project_id,
-            &entry.path,
-            &enabled,
-            &resolutions,
-        )
+            &root,
+            &skill_id,
+            &targets,
+            &project_registry::selectable_dir_keys(&agents),
+        )?;
+        let view = project_registry::list_project_skills(&state.store, &project_id, &agents)?;
+        view.skills
+            .into_iter()
+            .find(|skill| skill.id == skill_id)
+            .ok_or_else(|| AppError::Project(format!("项目里没有该 skill：{skill_id}")))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn remove_project_skill_copy(
+    app: AppHandle,
+    project_id: String,
+    skill_id: String,
+    dir: String,
+) -> Result<SyncReport, AppError> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let _project_guard = state
+            .project_ops
+            .lock()
+            .map_err(|_| AppError::Project("项目锁失败".into()))?;
+        let _write = state.enter_write()?;
+        let root = registered_project_root(state.inner(), &project_id)?;
+        project_sync::remove_copy(&state.store, &project_id, &root, &skill_id, &dir)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn uninstall_project_skill(
+    app: AppHandle,
+    project_id: String,
+    skill_id: String,
+) -> Result<SyncReport, AppError> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let _project_guard = state
+            .project_ops
+            .lock()
+            .map_err(|_| AppError::Project("项目锁失败".into()))?;
+        let _write = state.enter_write()?;
+        let root = registered_project_root(state.inner(), &project_id)?;
+        project_sync::uninstall(&state.store, &project_id, &root, &skill_id)
     })
     .await
 }

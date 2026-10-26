@@ -187,6 +187,31 @@ fn key_from_str(value: &str) -> Option<ProjectSkillDirKey> {
         .map(|spec| spec.key)
 }
 
+/// 该物理目录能否作为同步目标（能力闸）：项目级落点自己已实测，
+/// 且映射到它并启用的每个 agent 都已实测过 skill 落点。未通过的列 UI 显示「待实测」，
+/// `set_project_skill_targets` 也会直接拒绝。
+pub fn selectable_dir_keys(agents: &[AgentStatus]) -> Vec<String> {
+    PROJECT_SKILL_DIRS
+        .iter()
+        .filter(|spec| spec.verified)
+        .filter(|spec| {
+            let mapped: Vec<&AgentStatus> = agents
+                .iter()
+                .filter(|agent| agent.enabled && spec.agent_ids.contains(&agent.id.as_str()))
+                .collect();
+            !mapped.is_empty()
+                && mapped.iter().all(|agent| {
+                    agent.capabilities.iter().any(|capability| {
+                        capability.kind == crate::domain::AssetKind::Skill
+                            && capability.supported
+                            && capability.verified
+                    })
+                })
+        })
+        .map(|spec| spec.key.as_str().to_string())
+        .collect()
+}
+
 fn dir_meta(key: ProjectSkillDirKey, agents: &[AgentStatus]) -> ProjectDirMeta {
     let spec = dir_spec(key);
     let names: Vec<String> = spec
@@ -200,7 +225,7 @@ fn dir_meta(key: ProjectSkillDirKey, agents: &[AgentStatus]) -> ProjectDirMeta {
         label: names.join(" / "),
         relative_path: spec.relative_path.to_string(),
         agents: names,
-        verified: spec.verified,
+        verified: selectable_dir_keys(agents).iter().any(|k| k == spec.key.as_str()),
     }
 }
 
