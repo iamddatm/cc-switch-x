@@ -16,6 +16,12 @@ vi.mock("../lib/api", () => ({
     setBackupSettings: vi.fn(),
     deleteBackupCategory: vi.fn(),
     revealBackupLocation: vi.fn(),
+    getCloudSettings: vi.fn(),
+    getCloudStatus: vi.fn(),
+    setCloudSettings: vi.fn(),
+    testCloudConnection: vi.fn(),
+    cloudUploadNow: vi.fn(),
+    cloudRestoreLatest: vi.fn(),
     getGitStatus: vi.fn(),
     gitInit: vi.fn(),
     gitSetRemote: vi.fn(),
@@ -83,6 +89,22 @@ function mockBase(git: GitStatus = healthyGit) {
     totalBytes: 3584,
   });
   vi.mocked(api.getBackupSettings).mockResolvedValue(settings);
+  vi.mocked(api.getCloudSettings).mockResolvedValue({
+    autoUpload: false,
+    baseUrl: "",
+    username: "",
+    remoteDir: "ccswitchx",
+    hasPassword: false,
+  });
+  vi.mocked(api.getCloudStatus).mockResolvedValue({
+    configured: false,
+    hasPassword: false,
+    autoUpload: false,
+    remote: null,
+    remoteError: null,
+    lastUploadAt: null,
+    lastError: null,
+  });
   vi.mocked(api.getGitStatus).mockResolvedValue(git);
   vi.mocked(api.gitListCommits).mockResolvedValue([commit]);
   vi.mocked(api.createBackupSnapshot).mockResolvedValue(snapshot);
@@ -101,6 +123,7 @@ function mockBase(git: GitStatus = healthyGit) {
     proxy: { url: null, username: null },
     skillRepos: null,
     backup: settings,
+    cloud: { autoUpload: false, baseUrl: "", username: "", remoteDir: "ccswitchx" },
   });
   vi.mocked(api.deleteBackupCategory).mockResolvedValue(1024);
   vi.mocked(api.revealBackupLocation).mockResolvedValue(undefined);

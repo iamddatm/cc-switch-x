@@ -4,6 +4,8 @@ import type {
   BackupSettings,
   BackupSnapshot,
   BackupUsage,
+  CloudSettingsView,
+  CloudStatus,
   GitCommit,
   GitStatus,
 } from "../types";
@@ -15,6 +17,8 @@ export function useBackups() {
   const [settings, setSettings] = useState<BackupSettings | null>(null);
   const [git, setGit] = useState<GitStatus | null>(null);
   const [commits, setCommits] = useState<GitCommit[]>([]);
+  const [cloud, setCloud] = useState<CloudSettingsView | null>(null);
+  const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -27,19 +31,34 @@ export function useBackups() {
     };
   }, []);
 
+  const refreshCloudStatus = useCallback(async () => {
+    try {
+      const status = await api.getCloudStatus();
+      if (alive.current) setCloudStatus(status);
+    } catch (reason) {
+      if (alive.current) {
+        setCloudStatus(null);
+        setError(String(reason));
+      }
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
-      const [snapshotList, usageView, backupSettings, status] = await Promise.all([
-        api.listBackupSnapshots(),
-        api.getBackupUsage(),
-        api.getBackupSettings(),
-        api.getGitStatus(),
-      ]);
+      const [snapshotList, usageView, backupSettings, status, cloudSettings] =
+        await Promise.all([
+          api.listBackupSnapshots(),
+          api.getBackupUsage(),
+          api.getBackupSettings(),
+          api.getGitStatus(),
+          api.getCloudSettings(),
+        ]);
       if (!alive.current) return;
       setSnapshots(snapshotList);
       setUsage(usageView);
       setSettings(backupSettings);
       setGit(status);
+      setCloud(cloudSettings);
       if (status.initialized) {
         const history = await api.gitListCommits(50);
         if (alive.current) setCommits(history);
@@ -47,12 +66,13 @@ export function useBackups() {
         setCommits([]);
       }
       setError(null);
+      void refreshCloudStatus();
     } catch (reason) {
       if (alive.current) setError(String(reason));
     } finally {
       if (alive.current) setLoading(false);
     }
-  }, []);
+  }, [refreshCloudStatus]);
 
   const refreshGit = useCallback(async () => {
     try {
@@ -105,10 +125,13 @@ export function useBackups() {
     settings,
     git,
     commits,
+    cloud,
+    cloudStatus,
     loading,
     busy,
     error,
     refresh,
+    refreshCloudStatus,
     run,
   };
 }

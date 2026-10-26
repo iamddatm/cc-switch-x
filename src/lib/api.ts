@@ -8,6 +8,11 @@ import type {
   BackupSettings,
   BackupSnapshot,
   BackupUsage,
+  CloudRestoreReport,
+  CloudSettingsInput,
+  CloudSettingsView,
+  CloudStatus,
+  CloudTestInput,
   ConflictPolicy,
   DetectedProxy,
   DiscoveredSkillInstallInput,
@@ -113,6 +118,16 @@ export const api = {
     invoke<number>("delete_backup_category", { id }),
   revealBackupLocation: (id: string) =>
     invoke<void>("reveal_backup_location", { id }),
+
+  getCloudSettings: () => invoke<CloudSettingsView>("get_cloud_settings"),
+  setCloudSettings: (input: CloudSettingsInput) =>
+    invoke<CloudSettingsView>("set_cloud_settings", { ...input }),
+  testCloudConnection: (input: CloudTestInput) =>
+    invoke<number>("test_cloud_connection", { ...input }),
+  getCloudStatus: () => invoke<CloudStatus>("get_cloud_status"),
+  cloudUploadNow: () => invoke<CloudStatus>("cloud_upload_now"),
+  cloudRestoreLatest: () =>
+    invoke<CloudRestoreReport>("cloud_restore_latest"),
 
   getGitStatus: () => invoke<GitStatus>("get_git_status"),
   gitInit: (branch?: string) =>
