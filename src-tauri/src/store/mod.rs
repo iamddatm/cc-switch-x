@@ -1,4 +1,5 @@
 pub mod atomic;
+pub mod project_checks;
 pub mod projects;
 pub mod secrets;
 

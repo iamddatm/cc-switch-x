@@ -71,8 +71,10 @@ pub async fn install_skill(
             .read()
             .map_err(|_| AppError::InvalidInput("maintenance 锁失败".into()))?;
         skill_source::install(
-            &store,
-            &home,
+            skill_source::SkillSink::Store {
+                store: &store,
+                home: &home,
+            },
             &input,
             staging_id.as_deref(),
             &selections,
@@ -254,8 +256,10 @@ pub async fn install_discovered_skill(
             .read()
             .map_err(|_| AppError::InvalidInput("maintenance 锁失败".into()))?;
         skill_source::install_discovered(
-            &store,
-            &home,
+            skill_source::SkillSink::Store {
+                store: &store,
+                home: &home,
+            },
             &fetcher,
             &input.repo,
             input.branch.clone(),

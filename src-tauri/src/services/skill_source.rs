@@ -68,7 +68,7 @@ pub struct InstallSelection {
     pub id: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillInstallOutcome {
     pub id: String,
@@ -497,8 +497,7 @@ fn resolve_context(
 
 /// 发现页直接安装：重新拉一次仓库（不信任前端路径），定位候选后复用预览暂存安装。
 pub fn install_discovered<F: RepoFetcher>(
-    store: &Store,
-    home: &Path,
+    sink: SkillSink<'_>,
     fetcher: &F,
     repo: &str,
     branch: Option<String>,
@@ -507,6 +506,7 @@ pub fn install_discovered<F: RepoFetcher>(
     name: Option<&str>,
     policy: ConflictPolicy,
 ) -> Result<SkillInstallOutcome, AppError> {
+    let store = sink.store();
     let input = SkillSourceInput::Github {
         repo: repo.to_string(),
         branch,
@@ -525,7 +525,7 @@ pub fn install_discovered<F: RepoFetcher>(
             relative_path: candidate.relative_path.clone(),
             id: candidate.suggested_id.clone(),
         };
-        let report = install(store, home, &input, Some(staging_id), &[selection], policy)?;
+        let report = install(sink, &input, Some(staging_id), &[selection], policy)?;
         report
             .outcomes
             .into_iter()
@@ -543,9 +543,128 @@ pub fn install_discovered<F: RepoFetcher>(
     result
 }
 
+/// 安装目的：中央库（用户级真源）或某个项目的真源。
+///
+/// 两者只差四件事，其余流程（预览、下载、校验、暂存、换目录）完全共用：
+/// 1. 目录怎么算：`assets/skills/<id>` vs `<project>/.ccswitchx/skills/<id>`。
+/// 2. 备份放哪：`backups/<ms>/skills/…` vs `backups/projects/<pid>/<ms>/canonical/<id>`。
+/// 3. 提交用的暂存目录必须**与目的同卷**（`replace_dir` 靠 rename）：项目在另一块盘时
+///    用 store 的 staging 会直接失败，所以项目分支把暂存放进真源目录内部。
+/// 4. 写不写 `.meta.json`：项目真源**不写**。它随仓库提交，既污染仓库，又会让每次
+///    检查更新都改变目录指纹、把全部渲染目标刷成「待更新」。检查状态只存本机缓存。
+pub enum SkillSink<'a> {
+    Store {
+        store: &'a Store,
+        home: &'a Path,
+    },
+    Project {
+        store: &'a Store,
+        project_root: &'a Path,
+        project_id: &'a str,
+        timestamp: i64,
+    },
+}
+
+impl<'a> SkillSink<'a> {
+    /// 返回的 `&'a Store` 只绑在 sink 携带的生命周期上，不绑在 `&self` 上：
+    /// 这样调用方可以先取 store 用着，再把 sink 本身移动给 `install`。
+    pub fn store(&self) -> &'a Store {
+        match self {
+            SkillSink::Store { store, .. } | SkillSink::Project { store, .. } => store,
+        }
+    }
+
+    /// 某个 skill id 在目的端的目录；ID 不合法时报错（两侧同一套 ID 安全规则）。
+    pub fn entry_dir(&self, id: &str) -> Result<PathBuf, AppError> {
+        match self {
+            SkillSink::Store { store, .. } => Ok(store.entry_path(AssetType::Skill, id)?),
+            SkillSink::Project { project_root, .. } => {
+                crate::domain::project::canonical_skill_dir(project_root, id)
+            }
+        }
+    }
+
+    /// 提交用的暂存目录：必须与 `entry_dir` 同卷。
+    pub fn install_staging(&self, index: usize) -> Result<PathBuf, AppError> {
+        match self {
+            SkillSink::Store { store, .. } => {
+                new_staging_dir(store, &format!("install-{index}"))
+            }
+            SkillSink::Project { project_root, .. } => {
+                let root = crate::domain::project::canonical_root(project_root);
+                let path = root.join(format!(
+                    ".staging-install-{index}-{}-{}",
+                    self.timestamp_of(project_root),
+                    std::process::id()
+                ));
+                fs::create_dir_all(&path)?;
+                Ok(path)
+            }
+        }
+    }
+
+    fn timestamp_of(&self, _project_root: &Path) -> i64 {
+        match self {
+            SkillSink::Store { .. } => 0,
+            SkillSink::Project { timestamp, .. } => *timestamp,
+        }
+    }
+
+    /// 覆盖前的备份；返回实际落地的备份路径（没有可备份的内容时为 None）。
+    pub fn backup(&self, id: &str) -> Result<Option<PathBuf>, AppError> {
+        match self {
+            SkillSink::Store { store, .. } => Ok(store.backup_skill(id)?),
+            SkillSink::Project {
+                store,
+                project_root,
+                project_id,
+                timestamp,
+            } => {
+                let source = crate::domain::project::canonical_skill_dir(project_root, id)?;
+                if !source.is_dir() {
+                    return Ok(None);
+                }
+                let target = store
+                    .root()
+                    .join("backups")
+                    .join("projects")
+                    .join(*project_id)
+                    .join(timestamp.to_string())
+                    .join("canonical")
+                    .join(id);
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                copy_dir(&source, &target)?;
+                Ok(Some(target))
+            }
+        }
+    }
+
+    /// KeepBoth 时另起一个不冲突的 ID。
+    pub fn next_unique_id(&self, base: &str) -> Option<String> {
+        (2..=99)
+            .map(|suffix| format!("{base}-{suffix}"))
+            .find(|candidate| self.entry_dir(candidate).map(|path| !path.exists()).unwrap_or(false))
+    }
+
+    /// 是否要在 skill 目录里写 `.meta.json`（见类型文档第 4 点）。
+    pub fn writes_meta(&self) -> bool {
+        matches!(self, SkillSink::Store { .. })
+    }
+
+    /// 安装成功后要做的事：中央库要刷新各 agent 的部署副本，
+    /// 项目真源则把渲染留给同步引擎（唯一入口永远是 sync_project）。
+    pub fn after_install(&self, id: &str) -> Vec<String> {
+        match self {
+            SkillSink::Store { store, home } => refresh_deployed(store, home, id),
+            SkillSink::Project { .. } => Vec::new(),
+        }
+    }
+}
+
 pub fn install(
-    store: &Store,
-    home: &Path,
+    sink: SkillSink<'_>,
     input: &SkillSourceInput,
     staging_id: Option<&str>,
     selections: &[InstallSelection],
@@ -554,10 +673,10 @@ pub fn install(
     if selections.is_empty() {
         return Err(AppError::InvalidInput("没有选择要安装的 Skill".into()));
     }
-    let context = resolve_context(input, staging_id, store)?;
+    let context = resolve_context(input, staging_id, sink.store())?;
     let mut outcomes = Vec::with_capacity(selections.len());
     for (index, selection) in selections.iter().enumerate() {
-        outcomes.push(install_one(store, home, &context, selection, policy, index));
+        outcomes.push(install_one(&sink, &context, selection, policy, index));
     }
     if let Some(staging) = &context.staging {
         let _ = fs::remove_dir_all(staging);
@@ -566,8 +685,7 @@ pub fn install(
 }
 
 fn install_one(
-    store: &Store,
-    home: &Path,
+    sink: &SkillSink<'_>,
     context: &SourceContext,
     selection: &InstallSelection,
     policy: ConflictPolicy,
@@ -588,7 +706,7 @@ fn install_one(
     };
 
     let id = selection.id.trim().to_string();
-    if store.entry_path(AssetType::Skill, &id).is_err() {
+    if sink.entry_dir(&id).is_err() {
         return outcome(
             "failed",
             id,
@@ -603,7 +721,7 @@ fn install_one(
         Err(error) => return outcome("failed", id, None, Some(error.to_string()), Vec::new()),
     };
 
-    let target = match store.entry_path(AssetType::Skill, &id) {
+    let target = match sink.entry_dir(&id) {
         Ok(path) => path,
         Err(error) => return outcome("failed", id, None, Some(error.to_string()), Vec::new()),
     };
@@ -612,7 +730,7 @@ fn install_one(
         (true, ConflictPolicy::Skip) => {
             return outcome("skipped", id, None, None, Vec::new());
         }
-        (true, ConflictPolicy::KeepBoth) => match unique_skill_id(store, &id) {
+        (true, ConflictPolicy::KeepBoth) => match sink.next_unique_id(&id) {
             Some(unique) => unique,
             None => {
                 return outcome(
@@ -626,7 +744,7 @@ fn install_one(
         },
         _ => id.clone(),
     };
-    let target = match store.entry_path(AssetType::Skill, &final_id) {
+    let target = match sink.entry_dir(&final_id) {
         Ok(path) => path,
         Err(error) => {
             return outcome(
@@ -641,9 +759,8 @@ fn install_one(
     let overwriting = target.exists();
 
     let backup = if overwriting {
-        match store.backup_skill(&final_id) {
-            Ok(Some(path)) => Some(path),
-            Ok(None) => None,
+        match sink.backup(&final_id) {
+            Ok(path) => path,
             Err(error) => {
                 return outcome(
                     "failed",
@@ -658,7 +775,7 @@ fn install_one(
         None
     };
 
-    let staging_root = match make_install_staging(store, index) {
+    let staging_root = match sink.install_staging(index) {
         Ok(path) => path,
         Err(error) => {
             return outcome(
@@ -673,17 +790,19 @@ fn install_one(
     let prepared = staging_root.join("prepared");
     let result = (|| -> Result<(), AppError> {
         copy_dir(&source_dir, &prepared)?;
-        let old_meta = read_meta(&target);
-        let mut meta = build_meta(context, selection, old_meta.as_ref(), &prepared)?;
-        meta.updated_at = Some(now_ms());
-        write_meta(&prepared, &meta)?;
+        if sink.writes_meta() {
+            let old_meta = read_meta(&target);
+            let mut meta = build_meta(context, selection, old_meta.as_ref(), &prepared)?;
+            meta.updated_at = Some(now_ms());
+            write_meta(&prepared, &meta)?;
+        }
         replace_dir(&target, &prepared, &staging_root)?;
         Ok(())
     })();
 
     match result {
         Ok(()) => {
-            let warnings = refresh_deployed(store, home, &final_id);
+            let warnings = sink.after_install(&final_id);
             let _ = fs::remove_dir_all(&staging_root);
             outcome(
                 if overwriting {
@@ -802,10 +921,6 @@ pub(crate) fn new_staging_dir(store: &Store, prefix: &str) -> Result<PathBuf, Ap
     Ok(path)
 }
 
-fn make_install_staging(store: &Store, index: usize) -> Result<PathBuf, AppError> {
-    new_staging_dir(store, &format!("install-{index}"))
-}
-
 pub(crate) fn replace_dir(
     target: &Path,
     prepared: &Path,
@@ -831,20 +946,6 @@ pub(crate) fn replace_dir(
             Err(error.into())
         }
     }
-}
-
-fn unique_skill_id(store: &Store, base: &str) -> Option<String> {
-    for suffix in 2..=99 {
-        let candidate = format!("{base}-{suffix}");
-        if store
-            .entry_path(AssetType::Skill, &candidate)
-            .map(|path| !path.exists())
-            .unwrap_or(false)
-        {
-            return Some(candidate);
-        }
-    }
-    None
 }
 
 /// 更新/覆盖后刷新已部署的副本；刷新失败只报告，不回滚已经成功的真源更新。
@@ -1105,8 +1206,10 @@ mod tests {
         assert_eq!(preview.candidates[0].suggested_id, "demo");
 
         let report = install(
-            &store,
-            &home,
+            SkillSink::Store {
+                store: &store,
+                home: &home,
+            },
             &input,
             None,
             &[InstallSelection {
@@ -1142,8 +1245,10 @@ mod tests {
             id: "demo".into(),
         };
         install(
-            &store,
-            &home,
+            SkillSink::Store {
+                store: &store,
+                home: &home,
+            },
             &input,
             None,
             std::slice::from_ref(&selection),
@@ -1153,8 +1258,10 @@ mod tests {
         std::fs::write(source.join("SKILL.md"), "---\nname: Demo\n---\nv2\n").unwrap();
 
         let skipped = install(
-            &store,
-            &home,
+            SkillSink::Store {
+                store: &store,
+                home: &home,
+            },
             &input,
             None,
             std::slice::from_ref(&selection),
@@ -1164,8 +1271,10 @@ mod tests {
         assert_eq!(skipped.outcomes[0].status, "skipped");
 
         let overwritten = install(
-            &store,
-            &home,
+            SkillSink::Store {
+                store: &store,
+                home: &home,
+            },
             &input,
             None,
             std::slice::from_ref(&selection),
@@ -1181,8 +1290,10 @@ mod tests {
         );
 
         let both = install(
-            &store,
-            &home,
+            SkillSink::Store {
+                store: &store,
+                home: &home,
+            },
             &input,
             None,
             std::slice::from_ref(&selection),
@@ -1201,8 +1312,10 @@ mod tests {
             path: source.clone(),
         };
         let report = install(
-            &store,
-            &home,
+            SkillSink::Store {
+                store: &store,
+                home: &home,
+            },
             &input,
             None,
             &[InstallSelection {
@@ -1222,8 +1335,10 @@ mod tests {
         let source = local_source(&dir.path().join("incoming"));
         let input = SkillSourceInput::Directory { path: source };
         install(
-            &store,
-            &home,
+            SkillSink::Store {
+                store: &store,
+                home: &home,
+            },
             &input,
             None,
             &[InstallSelection {
@@ -1270,8 +1385,10 @@ mod tests {
         let source = local_source(&dir.path().join("incoming"));
         let input = SkillSourceInput::Directory { path: source };
         install(
-            &store,
-            &home,
+            SkillSink::Store {
+                store: &store,
+                home: &home,
+            },
             &input,
             None,
             &[InstallSelection {
@@ -1355,8 +1472,10 @@ mod tests {
         assert!(store.staging_dir().join(&staging_id).is_dir());
 
         let report = install(
-            &store,
-            &home,
+            SkillSink::Store {
+                store: &store,
+                home: &home,
+            },
             &input,
             Some(&staging_id),
             &[InstallSelection {
@@ -1391,8 +1510,10 @@ mod tests {
         let (dir, store, home) = fixture();
         let fetcher = FakeFetcher::new(github_fixture(&dir.path().join("remote")));
         let outcome = install_discovered(
-            &store,
-            &home,
+            SkillSink::Store {
+                store: &store,
+                home: &home,
+            },
             &fetcher,
             "acme/demo",
             None,
@@ -1459,8 +1580,10 @@ mod tests {
         assert_eq!(preview.candidates[1].suggested_id, "beta");
 
         let report = install(
-            &store,
-            &home,
+            SkillSink::Store {
+                store: &store,
+                home: &home,
+            },
             &input,
             preview.staging_id.as_deref(),
             &[InstallSelection {

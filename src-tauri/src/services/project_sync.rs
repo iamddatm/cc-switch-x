@@ -1320,10 +1320,6 @@ mod tests {
         }
     }
 
-    fn absent() -> ProjectDirState {
-        ProjectDirState::default()
-    }
-
     fn states(pairs: &[(&str, &str)]) -> BTreeMap<String, ProjectDirState> {
         pairs
             .iter()

@@ -1,13 +1,16 @@
 use crate::commands::backup::open_directory;
 use crate::domain::project::ProjectSkillDirKey;
 use crate::error::AppError;
+use crate::import::mcp::ConflictPolicy;
 use crate::services::agents::{detect_all, AgentStatus};
+use crate::services::project_install::{self, ProjectInstallReport};
 use crate::services::project_migrate::{self, MigrationDecision, ProjectMigrationReport};
 use crate::services::project_registry::{
     self, ProjectSkillsView, ProjectSkillView, ProjectView,
 };
 use crate::services::project_scan;
 use crate::services::project_sync::{self, Resolution, SyncReport};
+use crate::services::skill_source::{InstallSelection, SkillSourceInput};
 use crate::state::AppState;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, State};
@@ -340,6 +343,119 @@ pub async fn migrate_project_skills(
             &ledger,
             &scan,
             &decisions,
+        )
+    })
+    .await
+}
+
+/// 从来源安装到项目真源。预览（下载/解压/列候选）复用全局的 `preview_skill_source`：
+/// 它只读中央库的暂存区，与目的端无关，没必要再做一条项目版。
+#[tauri::command]
+pub async fn install_project_skill(
+    app: AppHandle,
+    project_id: String,
+    input: SkillSourceInput,
+    staging_id: Option<String>,
+    selections: Vec<InstallSelection>,
+    policy: ConflictPolicy,
+    targets: Vec<String>,
+) -> Result<ProjectInstallReport, AppError> {
+    let state = app.state::<AppState>();
+    let project_ops = state.project_ops.clone();
+    let store = state.store.clone();
+    let _job = state.begin_skill_job()?;
+    drop(state);
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let _project_guard = project_ops
+            .lock()
+            .map_err(|_| AppError::Project("项目锁失败".into()))?;
+        let _write = state.enter_write()?;
+        let agents = enabled_agents(state.inner())?;
+        let enabled = enabled_agent_ids(&agents);
+        let root = registered_project_root(state.inner(), &project_id)?;
+        project_install::install_project_skill(
+            &store,
+            &project_id,
+            &root,
+            &input,
+            staging_id.as_deref(),
+            &selections,
+            policy,
+            &targets,
+            &project_registry::selectable_dir_keys(&agents),
+            &enabled,
+            &[],
+        )
+    })
+    .await
+}
+
+/// 从本地文件夹导入一个 skill 目录到项目真源。
+#[tauri::command]
+pub async fn import_project_skill_dir(
+    app: AppHandle,
+    project_id: String,
+    source: PathBuf,
+    targets: Vec<String>,
+) -> Result<ProjectInstallReport, AppError> {
+    let state = app.state::<AppState>();
+    let project_ops = state.project_ops.clone();
+    let store = state.store.clone();
+    drop(state);
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let _project_guard = project_ops
+            .lock()
+            .map_err(|_| AppError::Project("项目锁失败".into()))?;
+        let _write = state.enter_write()?;
+        let agents = enabled_agents(state.inner())?;
+        let enabled = enabled_agent_ids(&agents);
+        let root = registered_project_root(state.inner(), &project_id)?;
+        project_install::import_project_skill_dir(
+            &store,
+            &project_id,
+            &root,
+            &source,
+            &targets,
+            &project_registry::selectable_dir_keys(&agents),
+            &enabled,
+        )
+    })
+    .await
+}
+
+/// 在项目真源里新建一个 skill（正文由界面渲染好传来）。
+#[tauri::command]
+pub async fn create_project_skill(
+    app: AppHandle,
+    project_id: String,
+    skill_id: String,
+    content: String,
+    targets: Vec<String>,
+) -> Result<ProjectInstallReport, AppError> {
+    let state = app.state::<AppState>();
+    let project_ops = state.project_ops.clone();
+    let store = state.store.clone();
+    drop(state);
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let _project_guard = project_ops
+            .lock()
+            .map_err(|_| AppError::Project("项目锁失败".into()))?;
+        let _write = state.enter_write()?;
+        let agents = enabled_agents(state.inner())?;
+        let enabled = enabled_agent_ids(&agents);
+        let root = registered_project_root(state.inner(), &project_id)?;
+        project_install::create_project_skill(
+            &store,
+            &project_id,
+            &root,
+            &skill_id,
+            &content,
+            &targets,
+            &project_registry::selectable_dir_keys(&agents),
+            &enabled,
         )
     })
     .await
