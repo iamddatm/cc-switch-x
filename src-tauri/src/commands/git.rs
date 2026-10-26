@@ -7,7 +7,7 @@ use crate::services::git_sync::{
 use crate::services::settings as settings_service;
 use crate::settings::{self as settings_file, AppSettings, GitBackupSettings};
 use crate::state::AppState;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager};
 
 fn git_settings(state: &AppState) -> Result<GitBackupSettings, AppError> {
     let settings = state
@@ -50,17 +50,25 @@ where
 }
 
 #[tauri::command]
-pub fn get_git_status(state: State<'_, AppState>) -> Result<GitStatus, AppError> {
-    let git = git_settings(&state)?;
-    Ok(git_sync::status(&state.store, &git))
+pub async fn get_git_status(app: AppHandle) -> Result<GitStatus, AppError> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let git = git_settings(&state)?;
+        Ok(git_sync::status(&state.store, &git))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn git_list_commits(
-    state: State<'_, AppState>,
+pub async fn git_list_commits(
+    app: AppHandle,
     limit: Option<u32>,
 ) -> Result<Vec<GitCommit>, AppError> {
-    git_sync::list_commits(&state.store, limit.unwrap_or(50) as usize)
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        git_sync::list_commits(&state.store, limit.unwrap_or(50) as usize)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -90,25 +98,29 @@ pub async fn git_init(app: AppHandle, branch: Option<String>) -> Result<GitStatu
 }
 
 #[tauri::command]
-pub fn git_set_remote(
-    state: State<'_, AppState>,
+pub async fn git_set_remote(
+    app: AppHandle,
     remote: Option<String>,
     branch: String,
 ) -> Result<GitStatus, AppError> {
-    {
-        let _ops = state
-            .git_ops
-            .lock()
-            .map_err(|_| AppError::InvalidInput("git 锁失败".into()))?;
-        git_sync::set_remote(&state.store, remote.as_deref(), &branch)?;
-    }
-    let updated = save_git_settings(&state, |git| {
-        git.remote = remote
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        git.branch = branch;
-    })?;
-    Ok(git_sync::status(&state.store, &updated.backup.git))
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        {
+            let _ops = state
+                .git_ops
+                .lock()
+                .map_err(|_| AppError::InvalidInput("git 锁失败".into()))?;
+            git_sync::set_remote(&state.store, remote.as_deref(), &branch)?;
+        }
+        let updated = save_git_settings(&state, |git| {
+            git.remote = remote
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            git.branch = branch;
+        })?;
+        Ok(git_sync::status(&state.store, &updated.backup.git))
+    })
+    .await
 }
 
 /// 立即提交当前真源；不自动推送，推送走「立即推送」或自动同步。

@@ -31,8 +31,12 @@ fn backup_policy(state: &AppState) -> Result<(u32, u32), AppError> {
 }
 
 #[tauri::command]
-pub fn list_backup_snapshots(state: State<'_, AppState>) -> Result<Vec<SnapshotInfo>, AppError> {
-    backup::list(&state.store)
+pub async fn list_backup_snapshots(app: AppHandle) -> Result<Vec<SnapshotInfo>, AppError> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        backup::list(&state.store)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -52,24 +56,36 @@ pub async fn create_backup_snapshot(
 }
 
 #[tauri::command]
-pub fn rename_backup_snapshot(
-    state: State<'_, AppState>,
+pub async fn rename_backup_snapshot(
+    app: AppHandle,
     old_name: String,
     new_name: String,
 ) -> Result<SnapshotInfo, AppError> {
-    let _guard = state.enter_write()?;
-    backup::rename(&state.store, &old_name, &new_name)
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let _guard = state.enter_write()?;
+        backup::rename(&state.store, &old_name, &new_name)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn delete_backup_snapshot(state: State<'_, AppState>, name: String) -> Result<(), AppError> {
-    let _guard = state.enter_write()?;
-    backup::delete(&state.store, &name)
+pub async fn delete_backup_snapshot(app: AppHandle, name: String) -> Result<(), AppError> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let _guard = state.enter_write()?;
+        backup::delete(&state.store, &name)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn get_backup_usage(state: State<'_, AppState>) -> Result<BackupUsage, AppError> {
-    backup::usage(&state.store)
+pub async fn get_backup_usage(app: AppHandle) -> Result<BackupUsage, AppError> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        backup::usage(&state.store)
+    })
+    .await
 }
 
 #[tauri::command]
