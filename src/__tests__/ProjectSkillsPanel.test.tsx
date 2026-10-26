@@ -1,19 +1,23 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import { ProjectSkillsPanel } from "../panels/ProjectSkillsPanel";
 import { api } from "../lib/api";
-import type { ProjectView } from "../types";
+import type { ProjectSkillsView, ProjectView } from "../types";
 
 vi.mock("../lib/api", () => ({
   api: {
     listProjectSkills: vi.fn(),
     revealProjectFolder: vi.fn(),
+    setProjectSkillTargets: vi.fn(),
+    syncProjectSkills: vi.fn(),
+    removeProjectSkillCopy: vi.fn(),
+    uninstallProjectSkill: vi.fn(),
   },
 }));
 
 function projectView(): ProjectView {
   return {
-    id: "demo-abc123",
+    id: "p1",
     path: "C:/work/demo",
     name: "demo",
     addedAt: "2026-10-01T00:00:00Z",
@@ -23,8 +27,66 @@ function projectView(): ProjectView {
   };
 }
 
+const CLAUDE_DIR = {
+  key: "claude",
+  label: "Claude Code",
+  relativePath: ".claude/skills",
+  agents: ["claude"],
+  verified: true,
+} as const;
+
+const QODER_DIR = {
+  key: "qoder",
+  label: "Qoder",
+  relativePath: ".qoder/skills",
+  agents: ["qoder"],
+  verified: true,
+} as const;
+
+function viewWithOneSkill(): ProjectSkillsView {
+  return {
+    project: projectView(),
+    dirs: [
+      { ...CLAUDE_DIR, agents: ["claude"] },
+      { ...QODER_DIR, agents: ["qoder"] },
+    ],
+    skills: [
+      {
+        id: "a",
+        name: "a",
+        description: null,
+        targets: [],
+        dirs: {
+          claude: { ...CLAUDE_DIR, agents: ["claude"], state: "present" },
+          qoder: { ...QODER_DIR, agents: ["qoder"], state: "absent" },
+        },
+        source: null,
+        lastOp: null,
+      },
+    ],
+    conflictCount: 0,
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(api.listProjectSkills).mockResolvedValue(viewWithOneSkill());
+  vi.mocked(api.setProjectSkillTargets).mockResolvedValue(viewWithOneSkill().skills[0]);
+  vi.mocked(api.syncProjectSkills).mockResolvedValue({
+    outcomes: [],
+    conflicts: [],
+    warnings: [],
+  });
+  vi.mocked(api.removeProjectSkillCopy).mockResolvedValue({
+    outcomes: [],
+    conflicts: [],
+    warnings: [],
+  });
+  vi.mocked(api.uninstallProjectSkill).mockResolvedValue({
+    outcomes: [],
+    conflicts: [],
+    warnings: [],
+  });
 });
 
 test("renders project skill matrix with per-directory state", async () => {
@@ -93,4 +155,84 @@ test("shows empty state when project has no skills", async () => {
 
   render(<ProjectSkillsPanel project={projectView()} />);
   expect(await screen.findByText("项目里还没有 Skills")).toBeInTheDocument();
+});
+
+test("checking a target calls setProjectSkillTargets and sync sends resolutions", async () => {
+  render(<ProjectSkillsPanel project={projectView()} />);
+  const qoder = await screen.findByRole("checkbox", { name: /Qoder/ });
+  fireEvent.click(qoder);
+  await waitFor(() =>
+    expect(api.setProjectSkillTargets).toHaveBeenCalledWith("p1", "a", ["qoder"]),
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "立即同步" }));
+  await waitFor(() => expect(api.syncProjectSkills).toHaveBeenCalledWith("p1", []));
+});
+
+test("sync conflict opens dialog and resolves with chosen directory", async () => {
+  vi.mocked(api.syncProjectSkills)
+    .mockResolvedValueOnce({
+      outcomes: [],
+      conflicts: [{ skillId: "a", dirs: ["claude", "qoder"], recommended: "claude" }],
+      warnings: [],
+    })
+    .mockResolvedValueOnce({ outcomes: [], conflicts: [], warnings: [] });
+
+  render(<ProjectSkillsPanel project={projectView()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "立即同步" }));
+  expect(await screen.findByText("需要处理冲突")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "保留 Claude Code" }));
+  await waitFor(() =>
+    expect(api.syncProjectSkills).toHaveBeenLastCalledWith("p1", [
+      { skillId: "a", dir: "claude", action: "use" },
+    ]),
+  );
+});
+
+test("both-kept resolution asks the backend to preserve the losing copy", async () => {
+  vi.mocked(api.syncProjectSkills)
+    .mockResolvedValueOnce({
+      outcomes: [],
+      conflicts: [{ skillId: "a", dirs: ["claude", "qoder"], recommended: "claude" }],
+      warnings: [],
+    })
+    .mockResolvedValueOnce({ outcomes: [], conflicts: [], warnings: [] });
+
+  render(<ProjectSkillsPanel project={projectView()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "立即同步" }));
+  fireEvent.click(await screen.findByRole("button", { name: "两边都保留" }));
+  await waitFor(() =>
+    expect(api.syncProjectSkills).toHaveBeenLastCalledWith("p1", [
+      { skillId: "a", dir: "claude", action: "keepBoth" },
+    ]),
+  );
+});
+
+test("row menu removes a single copy without touching the other target", async () => {
+  vi.mocked(api.listProjectSkills).mockResolvedValue({
+    ...viewWithOneSkill(),
+    skills: [
+      {
+        ...viewWithOneSkill().skills[0],
+        targets: ["claude", "qoder"],
+        dirs: {
+          claude: { ...CLAUDE_DIR, agents: ["claude"], state: "present" },
+          qoder: { ...QODER_DIR, agents: ["qoder"], state: "present" },
+        },
+      },
+    ],
+  });
+
+  render(<ProjectSkillsPanel project={projectView()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "a 更多操作" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "移除 Qoder 副本" }));
+  await waitFor(() => expect(api.removeProjectSkillCopy).toHaveBeenCalledWith("p1", "a", "qoder"));
+});
+
+test("a failed sync reports the backend reason instead of failing silently", async () => {
+  vi.mocked(api.syncProjectSkills).mockRejectedValue("同步失败，回滚出现问题：permission denied");
+
+  render(<ProjectSkillsPanel project={projectView()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "立即同步" }));
+  expect(await screen.findByText(/回滚出现问题/)).toBeInTheDocument();
 });

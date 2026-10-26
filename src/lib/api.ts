@@ -25,7 +25,10 @@ import type {
   ProxySettingsView,
   ProxyTestResult,
   PullOutcome,
+  ProjectConflictResolution,
+  ProjectSkillView,
   ProjectSkillsView,
+  ProjectSyncReport,
   ProjectView,
   RestoreBackupReport,
   ScanReport,
@@ -214,6 +217,14 @@ export const api = {
     invoke<ProjectSkillsView>("list_project_skills", { projectId }),
   revealProjectFolder: (projectId: string) =>
     invoke<void>("reveal_project_folder", { projectId }),
+  setProjectSkillTargets: (projectId: string, skillId: string, targets: string[]) =>
+    invoke<ProjectSkillView>("set_project_skill_targets", { projectId, skillId, targets }),
+  syncProjectSkills: (projectId: string, resolutions: ProjectConflictResolution[] = []) =>
+    invoke<ProjectSyncReport>("sync_project_skills", { projectId, resolutions }),
+  removeProjectSkillCopy: (projectId: string, skillId: string, dir: string) =>
+    invoke<ProjectSyncReport>("remove_project_skill_copy", { projectId, skillId, dir }),
+  uninstallProjectSkill: (projectId: string, skillId: string) =>
+    invoke<ProjectSyncReport>("uninstall_project_skill", { projectId, skillId }),
 };
 
 export interface ApplyReport {

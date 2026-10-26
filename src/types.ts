@@ -548,6 +548,34 @@ export interface ProjectSkillsView {
   conflictCount: number;
 }
 
+export interface ProjectConflict {
+  skillId: string;
+  dirs: string[];
+  recommended: string | null;
+}
+
+/** 冲突处置：dir 是胜出目录，action 为 use（覆盖其余）或 keepBoth（落败方另存副本）。 */
+export interface ProjectConflictResolution {
+  skillId: string;
+  dir: string;
+  action: "use" | "keepBoth";
+}
+
+export interface ProjectSyncOutcome {
+  skillId: string;
+  dir: string;
+  action: "copy" | "delete" | "keepBoth" | string;
+  status: "ok" | "failed" | string;
+  backupPath?: string | null;
+  error?: string | null;
+}
+
+export interface ProjectSyncReport {
+  outcomes: ProjectSyncOutcome[];
+  conflicts: ProjectConflict[];
+  warnings: string[];
+}
+
 export type ActivateOutcome =
   | { kind: "activated"; path: string }
   | { kind: "alreadyActive"; path: string }

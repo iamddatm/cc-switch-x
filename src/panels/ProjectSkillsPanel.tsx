@@ -1,13 +1,23 @@
+import { useState } from "react";
 import { FolderOpen, RefreshCw, Sparkles } from "lucide-react";
 import { useProjectSkills } from "../hooks/useProjectSkills";
 import { api } from "../lib/api";
+import { ProjectConflictDialog } from "../components/projects/ProjectConflictDialog";
 import type { BadgeTone } from "../components/ui/Badge";
-import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Menu, type MenuItem } from "../components/ui/Menu";
 import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
-import type { ProjectDirMeta, ProjectDirState, ProjectSkillView, ProjectView } from "../types";
+import type {
+  ProjectConflict,
+  ProjectConflictResolution,
+  ProjectDirMeta,
+  ProjectDirState,
+  ProjectSkillView,
+  ProjectSyncReport,
+  ProjectView,
+} from "../types";
 
 const STATE_LABEL: Record<ProjectDirState, { label: string; tone: BadgeTone }> = {
   present: { label: "有", tone: "success" },
@@ -17,26 +27,130 @@ const STATE_LABEL: Record<ProjectDirState, { label: string; tone: BadgeTone }> =
   unavailable: { label: "不可用", tone: "neutral" },
 };
 
-/** 未在真机验证的目录不展示「有 / 无」，避免用户把它当成可信的同步依据。 */
-const UNVERIFIED = { label: "待实测", tone: "neutral" as BadgeTone };
+/** 未在真机验证的目录不给开关：状态列只显示「待实测」。 */
+const UNVERIFIED = "待实测";
 
 const FALLBACK_DIRS = [".claude/skills", ".qoder/skills", ".agents/skills"];
 
-function dirBadge(meta: ProjectDirMeta, skill: ProjectSkillView) {
+function stateOf(skill: ProjectSkillView, key: string): ProjectDirState {
+  return skill.dirs[key]?.state ?? "absent";
+}
+
+function DirCell({
+  meta,
+  skill,
+  busy,
+  onToggle,
+}: {
+  meta: ProjectDirMeta;
+  skill: ProjectSkillView;
+  busy: boolean;
+  onToggle: (targets: string[]) => void;
+}) {
+  const state = stateOf(skill, meta.key);
+  const badge = STATE_LABEL[state];
+  const on = skill.targets.includes(meta.key);
+
   if (!meta.verified) {
-    return <Badge tone={UNVERIFIED.tone} title="该目录尚未在真机验证，暂不支持同步">{UNVERIFIED.label}</Badge>;
+    return (
+      <span
+        role="img"
+        aria-label={`${meta.label}：未实测，暂不提供开关`}
+        title={`${meta.label}：未实测，暂不提供同步目标`}
+        className="flex h-4 w-14 items-center justify-center rounded-[4px] border-[1.5px] border-dashed border-border-strong opacity-45"
+      >
+        <span className="text-badge leading-none text-fg-3">{UNVERIFIED}</span>
+      </span>
+    );
   }
-  const view = skill.dirs[meta.key];
-  if (!view) return <Badge tone="neutral">无</Badge>;
-  const spec = STATE_LABEL[view.state] ?? STATE_LABEL.absent;
-  return <Badge tone={spec.tone}>{spec.label}</Badge>;
+
+  const disabled = state === "unavailable" || busy;
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={on}
+      aria-label={`同步到 ${meta.label}`}
+      title={`${meta.label}：${badge.label}${state === "unavailable" ? " · 对应 agent 已停用" : ""}`}
+      disabled={disabled}
+      onClick={() =>
+        onToggle(
+          on
+            ? skill.targets.filter((target) => target !== meta.key)
+            : [...skill.targets, meta.key],
+        )
+      }
+      className={`flex h-[18px] w-9 items-center justify-center rounded-full border text-badge leading-none transition-colors duration-150 ${
+        disabled ? "cursor-not-allowed opacity-45" : "cursor-pointer"
+      } ${on ? "border-action bg-action-soft text-action-text" : "border-border text-fg-2"}`}
+    >
+      {badge.label}
+    </button>
+  );
 }
 
 export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
   const { data, loading, error, refresh } = useProjectSkills(project.id);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [result, setResult] = useState<ProjectSyncReport | null>(null);
+  const [conflicts, setConflicts] = useState<ProjectConflict[]>([]);
+
   const current = data?.project ?? project;
   const dirs = data?.dirs ?? [];
   const skills = data?.skills ?? [];
+
+  const guard = async (task: () => Promise<void>) => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await task();
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setTargets = (skill: ProjectSkillView, targets: string[]) =>
+    guard(async () => {
+      await api.setProjectSkillTargets(project.id, skill.id, targets);
+      await refresh();
+    });
+
+  const sync = (resolutions: ProjectConflictResolution[] = []) =>
+    guard(async () => {
+      const report = await api.syncProjectSkills(project.id, resolutions);
+      setResult(report);
+      setConflicts(report.conflicts);
+      await refresh();
+    });
+
+  const removeCopy = (skill: ProjectSkillView, dir: string) =>
+    guard(async () => {
+      setResult(await api.removeProjectSkillCopy(project.id, skill.id, dir));
+      await refresh();
+    });
+
+  const uninstall = (skill: ProjectSkillView) =>
+    guard(async () => {
+      setResult(await api.uninstallProjectSkill(project.id, skill.id));
+      await refresh();
+    });
+
+  const menuItems = (skill: ProjectSkillView): MenuItem[] => [
+    ...dirs.map((dir) => ({
+      label: `移除 ${dir.label || dir.relativePath} 副本`,
+      disabled: stateOf(skill, dir.key) === "absent",
+      onSelect: () => void removeCopy(skill, dir.key),
+    })),
+    { label: "卸载", danger: true, onSelect: () => void uninstall(skill) },
+  ];
+
+  const copies = result?.outcomes.filter((item) => item.action === "copy").length ?? 0;
+  const deletes = result?.outcomes.filter((item) => item.action === "delete").length ?? 0;
+  const keeps = result?.outcomes.filter((item) => item.action === "keepBoth").length ?? 0;
+  const failed = result?.outcomes.filter((item) => item.status !== "ok") ?? [];
 
   return (
     <div className="flex h-full flex-col">
@@ -57,7 +171,10 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
               <FolderOpen size={14} aria-hidden />
               打开文件夹
             </Button>
-            <Button size="sm" loading={loading} onClick={() => void refresh()}>
+            <Button size="sm" variant="primary" loading={busy} onClick={() => void sync()}>
+              立即同步
+            </Button>
+            <Button size="sm" loading={loading || busy} onClick={() => void refresh()}>
               <RefreshCw size={14} aria-hidden />
               刷新
             </Button>
@@ -71,9 +188,24 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
             项目路径不存在：{current.path}
           </Notice>
         )}
-        {error && (
+        {(error || actionError) && (
           <Notice tone="danger" className="mb-3">
-            读取项目 Skills 失败：{error}
+            {actionError ?? `读取项目 Skills 失败：${error}`}
+          </Notice>
+        )}
+        {result && (copies > 0 || deletes > 0 || keeps > 0 || result.warnings.length > 0) && (
+          <Notice tone={failed.length > 0 ? "warning" : "success"} className="mb-3">
+            <div className="flex flex-wrap gap-x-3 gap-y-1">
+              <span>复制 {copies}</span>
+              <span>删除 {deletes}</span>
+              <span>保留副本 {keeps}</span>
+              {failed.length > 0 && <span>失败 {failed.length}</span>}
+              {result.warnings.map((warning) => (
+                <span key={warning} className="w-full text-fg-3">
+                  {warning}
+                </span>
+              ))}
+            </div>
           </Notice>
         )}
 
@@ -92,15 +224,11 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
             <div className="flex items-center gap-3 border-b border-border px-3 py-2 text-badge text-fg-3">
               <span className="min-w-0 flex-1">名称</span>
               {dirs.map((dir) => (
-                <span
-                  key={dir.key}
-                  className="w-20 shrink-0 text-center"
-                  title={dir.relativePath}
-                >
+                <span key={dir.key} className="w-14 min-w-0 shrink-0 truncate text-center" title={`${dir.label} · ${dir.relativePath}`}>
                   {dir.label || dir.relativePath}
                 </span>
               ))}
-              <span className="w-10 shrink-0 text-center">操作</span>
+              <span className="w-8 shrink-0 text-center">操作</span>
             </div>
             <ul className="divide-y divide-border">
               {skills.map((skill) => (
@@ -114,17 +242,34 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
                     )}
                   </span>
                   {dirs.map((dir) => (
-                    <span key={dir.key} className="flex w-20 shrink-0 justify-center">
-                      {dirBadge(dir, skill)}
+                    <span key={dir.key} className="flex w-14 shrink-0 justify-center">
+                      <DirCell
+                        meta={dir}
+                        skill={skill}
+                        busy={busy}
+                        onToggle={(targets) => void setTargets(skill, targets)}
+                      />
                     </span>
                   ))}
-                  <span className="w-10 shrink-0 text-center text-caption text-fg-3">—</span>
+                  <span className="flex w-8 shrink-0 justify-end">
+                    <Menu label={`${skill.name} 更多操作`} items={menuItems(skill)} />
+                  </span>
                 </li>
               ))}
             </ul>
           </div>
         )}
       </div>
+
+      {conflicts.length > 0 && (
+        <ProjectConflictDialog
+          conflicts={conflicts}
+          dirs={dirs}
+          busy={busy}
+          onCancel={() => setConflicts([])}
+          onResolve={(resolutions) => void sync(resolutions)}
+        />
+      )}
     </div>
   );
 }
