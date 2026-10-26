@@ -11,6 +11,13 @@ import { SkillDiscoveryPanel } from "../components/skills/SkillDiscoveryPanel";
 import { SkillInstallSheet } from "../components/skills/SkillInstallSheet";
 import { originRepoLabel, SkillSourceBadge } from "../components/skills/SkillSourceBadge";
 import { SkillFormSheet } from "../components/skills/SkillFormSheet";
+import {
+  NO_REPO_KEY,
+  filterByCommonFilters,
+  repoOptions,
+  selectedRepoKeys as selectedRepos,
+  toggled,
+} from "../components/skills/skillFilters";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Checkbox } from "../components/ui/Checkbox";
@@ -43,29 +50,6 @@ const SOURCE_FILTERS = [
   { value: "local", label: "本地目录" },
   { value: "cc-switch", label: "cc-switch 导入" },
 ] as const;
-
-function sourceKey(item: AssetSummary): string {
-  return item.origin?.kind ?? (item.source ? "github" : "local");
-}
-
-/** 仓库筛选里「没有来源仓库」的桶：本地目录、无法识别来源的旧数据。 */
-const NO_REPO_KEY = "__no_repo__";
-
-function repoLabelOf(item: AssetSummary): string | null {
-  return item.origin?.repo ?? item.source ?? null;
-}
-
-function repoKeyOf(item: AssetSummary): string {
-  return repoLabelOf(item)?.toLowerCase() ?? NO_REPO_KEY;
-}
-
-/** 多选筛选的集合增删；`present` 为真时加入，返回新 Set 便于直接放进 state。 */
-function toggled(set: Set<string>, value: string, present: boolean): Set<string> {
-  const next = new Set(set);
-  if (present) next.add(value);
-  else next.delete(value);
-  return next;
-}
 
 export function SkillsPanel() {
   const { items, error, loading, refresh } = useAssets("skill");
@@ -123,47 +107,23 @@ export function SkillsPanel() {
     setUpdateTargets(checkReport?.updates.map((update) => update.id) ?? []);
   }, [checkPrompt, checkReport, consumePrompt]);
 
-  const normalized = query.trim().toLowerCase();
-  const repoOptions = useMemo(() => {
-    const map = new Map<string, string>();
-    let hasNoRepo = false;
-    for (const item of items) {
-      const repo = repoLabelOf(item);
-      if (repo) map.set(repo.toLowerCase(), repo);
-      else hasNoRepo = true;
-    }
-    const repos = [...map.entries()]
-      .sort((left, right) => left[1].localeCompare(right[1]))
-      .map(([key, label]) => ({ key, label }));
-    return {
-      repos,
-      hasNoRepo,
-      allKeys: [...repos.map((repo) => repo.key), ...(hasNoRepo ? [NO_REPO_KEY] : [])],
-    };
-  }, [items]);
+  const repoChoices = useMemo(() => repoOptions(items), [items]);
   const selectedRepoKeys = useMemo(
-    () => new Set(repoOptions.allKeys.filter((key) => !deselectedRepos.has(key))),
-    [repoOptions, deselectedRepos],
+    () => selectedRepos(repoChoices.allKeys, deselectedRepos),
+    [repoChoices, deselectedRepos],
   );
   const allReposSelected =
-    repoOptions.allKeys.length > 0 && selectedRepoKeys.size === repoOptions.allKeys.length;
+    repoChoices.allKeys.length > 0 && selectedRepoKeys.size === repoChoices.allKeys.length;
 
   const statusAgents =
     agentFilter === "all"
       ? agentsForType
       : agentsForType.filter((agent) => agent.id === agentFilter);
-  const visible = items.filter((item) => {
-    if (
-      normalized &&
-      ![item.name, item.id, item.description ?? "", item.source ?? "", item.origin?.repo ?? ""]
-        .join(" ")
-        .toLowerCase()
-        .includes(normalized)
-    ) {
-      return false;
-    }
-    if (sourceFilter !== "all" && sourceKey(item) !== sourceFilter) return false;
-    if (!selectedRepoKeys.has(repoKeyOf(item))) return false;
+  const visible = filterByCommonFilters(items, {
+    query,
+    sourceFilter,
+    repoKeys: selectedRepoKeys,
+  }).filter((item) => {
     if (statusFilter === "all") return true;
     const enabled = statusAgents.some((agent) => enabledFor(agent, "skill").includes(item.id));
     return statusFilter === "on" ? enabled : !enabled;
@@ -202,7 +162,7 @@ export function SkillsPanel() {
   };
 
   const toggleAllRepos = (checked: boolean) => {
-    setDeselectedRepos(checked ? new Set() : new Set(repoOptions.allKeys));
+    setDeselectedRepos(checked ? new Set() : new Set(repoChoices.allKeys));
   };
 
   // 查看与编辑都要先读真源；失败时统一报错并返回 null。
@@ -496,12 +456,12 @@ export function SkillsPanel() {
             placeholder="搜索名称、描述、来源或仓库…"
             ariaLabel="搜索 Skill"
           />
-          {repoOptions.allKeys.length > 0 && (
+          {repoChoices.allKeys.length > 0 && (
             <CheckPopover
               label={
                 allReposSelected
-                  ? `仓库：全部（${repoOptions.allKeys.length}）`
-                  : `仓库：${selectedRepoKeys.size}/${repoOptions.allKeys.length}`
+                  ? `仓库：全部（${repoChoices.allKeys.length}）`
+                  : `仓库：${selectedRepoKeys.size}/${repoChoices.allKeys.length}`
               }
             >
               <CheckOption
@@ -509,7 +469,7 @@ export function SkillsPanel() {
                 checked={allReposSelected}
                 onChange={toggleAllRepos}
               />
-              {repoOptions.repos.map((repo) => (
+              {repoChoices.repos.map((repo) => (
                 <CheckOption
                   key={repo.key}
                   mono
@@ -518,7 +478,7 @@ export function SkillsPanel() {
                   onChange={(checked) => toggleRepo(repo.key, checked)}
                 />
               ))}
-              {repoOptions.hasNoRepo && (
+              {repoChoices.hasNoRepo && (
                 <CheckOption
                   label="无来源仓库"
                   checked={selectedRepoKeys.has(NO_REPO_KEY)}
