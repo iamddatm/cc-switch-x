@@ -6,7 +6,7 @@ import { byLastOpenedDesc } from "../../hooks/useProjects";
 import { Badge } from "../ui/Badge";
 import { Menu, type MenuItem } from "../ui/Menu";
 
-/** 侧栏顶部的全局 / 项目范围切换；项目范围只对 Skills 生效。 */
+/** 侧栏顶部的项目选择器：选中项目即切到项目范围，选「全局配置」切回全局；项目范围只对 Skills 生效。 */
 export function ScopeSwitcher({
   scope,
   projects,
@@ -35,7 +35,11 @@ export function ScopeSwitcher({
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: PointerEvent) => {
-      if (rootRef.current?.contains(event.target as Node)) return;
+      const target = event.target as HTMLElement | null;
+      if (rootRef.current?.contains(target)) return;
+      // 行内 ⋯ 菜单的弹层是 portal 到 body 的，不算「点到外面」：
+      // 在 pointerdown 阶段卸载下拉，菜单项的 click 就永远收不到，三项操作全点不动。
+      if (target?.closest('[role="menu"]')) return;
       setOpen(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {
@@ -52,8 +56,16 @@ export function ScopeSwitcher({
     };
   }, [open]);
 
-  const pickScope = (next: ProjectScope) => {
-    onScopeChange(next);
+  const pickGlobal = () => {
+    onScopeChange("global");
+    setOpen(false);
+  };
+
+  // 选中项目即进入项目范围，不再单独提供「全局配置 / 项目」切换。
+  const pickProject = (id: string) => {
+    onScopeChange("project");
+    onSelectProject(id);
+    setOpen(false);
   };
 
   const menuItems = (project: ProjectView): MenuItem[] => {
@@ -85,7 +97,7 @@ export function ScopeSwitcher({
         ref={triggerRef}
         type="button"
         aria-expanded={open}
-        aria-label={scope === "global" ? "切换范围：全局配置" : "切换范围：项目"}
+        aria-label={scope === "global" ? "配置范围：全局配置" : "配置范围：项目"}
         onClick={() => setOpen((value) => !value)}
         className="flex h-8 w-full items-center gap-2 rounded-control border border-border bg-surface px-2.5 text-left text-body text-fg-1 transition-colors duration-150 hover:bg-subtle focus:border-action focus:outline-none"
       >
@@ -99,32 +111,17 @@ export function ScopeSwitcher({
 
       {open && (
         <div className="absolute inset-x-2 z-40 mt-1 max-h-[70vh] overflow-auto rounded-panel border border-border bg-surface p-2 shadow-v7-md">
-          <p className="px-1.5 pb-1 text-badge text-fg-3">切换范围</p>
-          <div className="grid grid-cols-2 gap-1">
-            {(
-              [
-                { value: "global", label: "全局配置" },
-                { value: "project", label: "项目" },
-              ] as const
-            ).map((option) => {
-              const selected = scope === option.value;
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  aria-pressed={selected}
-                  onClick={() => pickScope(option.value)}
-                  className={`h-7 rounded-control text-caption transition-colors duration-150 ${
-                    selected
-                      ? "bg-selected font-medium text-fg-1"
-                      : "text-fg-2 hover:bg-subtle hover:text-fg-1"
-                  }`}
-                >
-                  {option.label}
-                </button>
-              );
-            })}
-          </div>
+          <button
+            type="button"
+            aria-pressed={scope === "global"}
+            onClick={pickGlobal}
+            className="flex h-8 w-full items-center gap-2 rounded-control px-1.5 text-left text-sm transition-colors duration-150 hover:bg-subtle"
+          >
+            <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+              {scope === "global" && <Check size={13} aria-hidden className="text-action-text" />}
+            </span>
+            <span className="truncate text-fg-1">全局配置</span>
+          </button>
 
           <p className="px-1.5 pb-1 pt-2 text-badge text-fg-3">项目</p>
           {ordered.length === 0 ? (
@@ -135,14 +132,12 @@ export function ScopeSwitcher({
                 <li key={project.id} className="flex items-center gap-0.5">
                   <button
                     type="button"
-                    onClick={() => {
-                      onSelectProject(project.id);
-                      setOpen(false);
-                    }}
+                    aria-pressed={scope === "project" && project.id === activeProjectId}
+                    onClick={() => pickProject(project.id)}
                     className="flex min-w-0 flex-1 items-center gap-2 rounded-control px-1.5 py-1 text-left transition-colors duration-150 hover:bg-subtle"
                   >
                     <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                      {project.id === activeProjectId && (
+                      {scope === "project" && project.id === activeProjectId && (
                         <Check size={13} aria-hidden className="text-action-text" />
                       )}
                     </span>
