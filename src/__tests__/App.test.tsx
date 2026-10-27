@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 import App from "../App";
+import { api } from "../lib/api";
+import type { DriftRecord } from "../types";
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -19,6 +21,8 @@ vi.mock("../lib/api", () => ({
     listProjects: vi.fn().mockResolvedValue([]),
     sessionProviders: vi.fn().mockResolvedValue([]),
     listSessions: vi.fn().mockResolvedValue([]),
+    listDrifts: vi.fn().mockResolvedValue([]),
+    rescanDrift: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -61,4 +65,24 @@ test("renders all sidebar entries and switches panes", () => {
 
   fireEvent.click(screen.getByRole("button", { name: "Rules" }));
   expect(screen.getByRole("heading", { name: "Rules" })).toBeInTheDocument();
+});
+
+test("落盘状态条常驻，重扫后数字跟着磁盘结果变", async () => {
+  const drift: DriftRecord = {
+    id: 1,
+    assetType: "rule",
+    assetId: "style",
+    agentId: "claude",
+    kind: "modified",
+    detectedAt: 1,
+    targetPath: "C:/x/.claude/rules/style.md",
+  };
+  render(<App />);
+  expect(await screen.findByText("落盘与真源一致")).toBeInTheDocument();
+
+  vi.mocked(api.rescanDrift).mockResolvedValue([drift]);
+  fireEvent.click(screen.getByRole("button", { name: "重扫落盘" }));
+
+  expect(await screen.findByText(/落盘有 1 处与真源不一致/)).toBeInTheDocument();
+  expect(api.rescanDrift).toHaveBeenCalledTimes(1);
 });

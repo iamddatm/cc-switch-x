@@ -143,14 +143,27 @@ test("saving_sends_the_canonical_rule_file", async () => {
   );
 });
 
-test("scanning_reports_what_it_skipped_and_why", async () => {
+test("scanning_adds_up_every_agent_and_skips_the_unsupported_one", async () => {
   await openRule();
-  vi.mocked(api.scanRules).mockResolvedValue({
-    imported: 1,
-    updated: 0,
-    unchanged: 2,
-    skipped: [{ file: "好.md", reason: "文件名推导不出合法 ID" }],
-  });
+  vi.mocked(api.scanRules)
+    .mockResolvedValueOnce({
+      imported: 1,
+      updated: 0,
+      unchanged: 2,
+      skipped: [{ file: "好.md", reason: "文件名推导不出合法 ID" }],
+    })
+    .mockResolvedValueOnce({
+      imported: 2,
+      updated: 1,
+      unchanged: 0,
+      skipped: [{ file: "dup.md", reason: "已有同名真源" }],
+    });
   fireEvent.click(screen.getByRole("button", { name: "从 agent 目录扫描导入" }));
-  expect(await screen.findByText(/跳过 1/)).toHaveTextContent("好.md");
+  const line = await screen.findByText(/合计/);
+  // 每个 agent 的结果相加，而不是最后一个把前面的挤掉
+  expect(line).toHaveTextContent("新增 3、更新 1、未变 2、跳过 2");
+  expect(line).toHaveTextContent("好.md");
+  expect(line).toHaveTextContent("dup.md");
+  // gemini 没有 rule 落点，不该被拿去扫
+  expect(api.scanRules).toHaveBeenCalledTimes(2);
 });

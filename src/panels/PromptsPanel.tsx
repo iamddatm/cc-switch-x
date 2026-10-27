@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { BookOpen, Pencil, Plus } from "lucide-react";
 import { AgentGlyph } from "../components/agents/AgentGlyph";
 import { AssetRow } from "../components/assets/AssetRow";
+import { DriftBanner } from "../components/DriftBanner";
 import { ImportDialog } from "../components/ImportDialog";
 import { PromptFormSheet } from "../components/prompts/PromptFormSheet";
 import { Badge } from "../components/ui/Badge";
@@ -16,6 +17,7 @@ import { SearchField } from "../components/ui/SearchField";
 import { Select } from "../components/ui/Select";
 import { useAgents } from "../hooks/useAgents";
 import { useAssets } from "../hooks/useAssets";
+import { useDrift } from "../hooks/useDrift";
 import { api } from "../lib/api";
 import { parsePrompt, type PromptForm } from "../lib/canonical";
 import { formatBytes, formatRelativeTime } from "../lib/format";
@@ -30,6 +32,7 @@ const EMPTY_FORM: PromptForm = { title: "", description: "", body: "" };
 export function PromptsPanel() {
   const { items, error, loading, refresh } = useAssets("prompt");
   const { enabledAgents, refresh: refreshAgents } = useAgents();
+  const drift = useDrift();
   const promptAgents = enabledAgents.filter((agent) => supported(agent, "prompt"));
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -53,9 +56,14 @@ export function PromptsPanel() {
   const selectedAgent = promptAgents.find((agent) => agent.id === selectedAgentId);
   const activePrompt = selectedAgent?.activePrompt ?? null;
   const canActivate = selectedAgent ? switchable(selectedAgent, "prompt") : false;
+  // 提示词是整文件接管：这个 agent 名下任何一条 prompt 的漂移都会挡住启用，所以按 agent 汇总展示
+  const promptDrifts = drift.drifts.filter(
+    (record) => record.assetType === "prompt" && record.agentId === selectedAgentId,
+  );
   const refreshAll = () => {
     void refresh();
     void refreshAgents();
+    void drift.refresh();
   };
 
   const normalized = query.trim().toLowerCase();
@@ -102,6 +110,8 @@ export function PromptsPanel() {
       }
     } catch (e) {
       setActionError(String(e));
+      // 被漂移挡住时立刻重扫，让处置横幅当场出现，而不是只留一串错误文本
+      void drift.rescan();
     } finally {
       setBusy(null);
     }
@@ -125,6 +135,7 @@ export function PromptsPanel() {
       refreshAll();
     } catch (e) {
       setActionError(String(e));
+      void drift.rescan();
     } finally {
       setBusy(null);
     }
@@ -220,6 +231,17 @@ export function PromptsPanel() {
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto px-6 pb-5">
+        <DriftBanner
+          drifts={promptDrifts}
+          busy={drift.busy}
+          onResolve={drift.resolve}
+          onRescan={() => void drift.rescan()}
+        />
+        {drift.error && (
+          <Notice tone="danger" className="mb-3">
+            {drift.error}
+          </Notice>
+        )}
         {(error || actionError) && (
           <Notice tone="danger" className="mb-3">
             {error ?? actionError}

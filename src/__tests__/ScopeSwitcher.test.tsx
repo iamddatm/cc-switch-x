@@ -19,6 +19,8 @@ vi.mock("../lib/api", () => ({
     revealProjectFolder: vi.fn().mockResolvedValue(undefined),
     sessionProviders: vi.fn().mockResolvedValue([]),
     listSessions: vi.fn().mockResolvedValue([]),
+    listDrifts: vi.fn().mockResolvedValue([]),
+    rescanDrift: vi.fn().mockResolvedValue([]),
   },
 }));
 

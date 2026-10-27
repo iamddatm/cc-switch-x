@@ -9,6 +9,7 @@ import { Button } from "../ui/Button";
 import { EmptyState } from "../ui/EmptyState";
 import { Notice } from "../ui/Notice";
 import { PageHeader } from "../ui/PageHeader";
+import { DriftStatusBar } from "./DriftStatusBar";
 import { Sidebar } from "./Sidebar";
 import { TitleBar } from "./TitleBar";
 import { AgentsPanel } from "../../panels/AgentsPanel";
@@ -123,6 +124,7 @@ export function AppShell() {
               <Notice tone="danger">项目注册表操作失败：{projects.error}</Notice>
             </div>
           )}
+          <DriftStatusBar />
           {content}
         </main>
       </div>

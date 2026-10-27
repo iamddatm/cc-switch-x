@@ -3,6 +3,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { PromptsPanel } from "../panels/PromptsPanel";
 import { api } from "../lib/api";
 import { agentStatus, capabilities } from "../test/agents";
+import type { DriftRecord } from "../types";
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -13,10 +14,23 @@ vi.mock("../lib/api", () => ({
     deactivatePrompt: vi.fn(),
     writeAsset: vi.fn(),
     deleteAsset: vi.fn(),
+    listDrifts: vi.fn(),
+    rescanDrift: vi.fn(),
+    resolveDrift: vi.fn(),
   },
 }));
 
 const claude = agentStatus();
+
+const drift: DriftRecord = {
+  id: 5,
+  assetType: "prompt",
+  assetId: "claude-team",
+  agentId: "claude",
+  kind: "modified",
+  detectedAt: 1,
+  targetPath: "C:/x/.claude/CLAUDE.md",
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -26,6 +40,8 @@ beforeEach(() => {
   vi.mocked(api.readAsset).mockResolvedValue("---\ntitle: team\n---\n\n正文\n");
   vi.mocked(api.listAgents).mockResolvedValue([claude]);
   vi.mocked(api.deactivatePrompt).mockResolvedValue(true);
+  vi.mocked(api.listDrifts).mockResolvedValue([]);
+  vi.mocked(api.rescanDrift).mockResolvedValue([]);
   vi.mocked(api.writeAsset).mockResolvedValue({
     assetType: "prompt",
     id: "team",
@@ -125,4 +141,26 @@ test("an unverified prompt target is named but not activatable", async () => {
   ).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "启用" })).toBeDisabled();
   expect(api.activatePrompt).not.toHaveBeenCalled();
+});
+
+test("a_blocked_activation_surfaces_the_drift_banner_instead_of_a_bare_error", async () => {
+  vi.mocked(api.activatePrompt).mockRejectedValue(
+    new Error(
+      "有未解决的漂移：claude 的 prompt/claude-team 有未解决的漂移：先选「采纳磁盘」或「重刷真源」",
+    ),
+  );
+  vi.mocked(api.rescanDrift).mockResolvedValue([drift]);
+  render(<PromptsPanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "启用" }));
+
+  const region = await screen.findByRole("region", { name: "落盘漂移" });
+  expect(region).toHaveTextContent("C:/x/.claude/CLAUDE.md");
+  expect(screen.getByRole("button", { name: "采纳磁盘" })).toBeEnabled();
+  // 被挡住之后面板自己没有再发写请求，覆盖只能走横幅里的那两条路
+  expect(api.activatePrompt).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "采纳磁盘" }));
+  await waitFor(() =>
+    expect(api.resolveDrift).toHaveBeenCalledWith(5, "adoptDisk", "claude"),
+  );
 });
