@@ -11,13 +11,8 @@ import { SkillDiscoveryPanel } from "../components/skills/SkillDiscoveryPanel";
 import { SkillInstallSheet } from "../components/skills/SkillInstallSheet";
 import { originRepoLabel, SkillSourceBadge } from "../components/skills/SkillSourceBadge";
 import { SkillFormSheet } from "../components/skills/SkillFormSheet";
-import {
-  NO_REPO_KEY,
-  filterByCommonFilters,
-  repoOptions,
-  selectedRepoKeys as selectedRepos,
-  toggled,
-} from "../components/skills/skillFilters";
+import { NO_REPO_KEY } from "../components/skills/skillFilters";
+import { useSkillFilters } from "../components/skills/useSkillFilters";
 import { storeScope } from "../components/skills/skillScope";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
@@ -58,11 +53,8 @@ export function SkillsPanel() {
   const skillCheck = useSkillUpdateCheck();
   const [view, setView] = useState<"installed" | "discover">("installed");
   const [discoverMounted, setDiscoverMounted] = useState(false);
-  const [query, setQuery] = useState("");
   const [agentFilter, setAgentFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "on" | "off">("all");
-  const [sourceFilter, setSourceFilter] = useState("all");
-  const [deselectedRepos, setDeselectedRepos] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<Editing | null>(null);
   const [viewing, setViewing] = useState<{ item: AssetSummary; form: SkillForm } | null>(null);
   const [loadingEdit, setLoadingEdit] = useState(false);
@@ -72,7 +64,6 @@ export function SkillsPanel() {
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [installing, setInstalling] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [updateTargets, setUpdateTargets] = useState<string[] | null>(null);
   const [updating, setUpdating] = useState(false);
   const [batchBusy, setBatchBusy] = useState(false);
@@ -89,6 +80,26 @@ export function SkillsPanel() {
 
   const agentsForType = enabledAgents.filter((agent) => supported(agent, "skill"));
   const scope = useMemo(() => storeScope(agentsForType), [agentsForType]);
+  const {
+    query,
+    setQuery,
+    sourceFilter,
+    setSourceFilter,
+    repoChoices,
+    repoKeys,
+    allReposSelected,
+    matched,
+    selected,
+    selectedItems,
+    selectedIds,
+    toggleRepo,
+    toggleAllRepos,
+    toggleOne,
+    toggleAll,
+    allVisibleSelected,
+    drop,
+    clear,
+  } = useSkillFilters(items);
   const refreshAll = () => {
     void refresh();
     void refreshAgents();
@@ -109,23 +120,12 @@ export function SkillsPanel() {
     setUpdateTargets(checkReport?.updates.map((update) => update.id) ?? []);
   }, [checkPrompt, checkReport, consumePrompt]);
 
-  const repoChoices = useMemo(() => repoOptions(items), [items]);
-  const selectedRepoKeys = useMemo(
-    () => selectedRepos(repoChoices.allKeys, deselectedRepos),
-    [repoChoices, deselectedRepos],
-  );
-  const allReposSelected =
-    repoChoices.allKeys.length > 0 && selectedRepoKeys.size === repoChoices.allKeys.length;
-
   const statusAgents =
     agentFilter === "all"
       ? agentsForType
       : agentsForType.filter((agent) => agent.id === agentFilter);
-  const visible = filterByCommonFilters(items, {
-    query,
-    sourceFilter,
-    repoKeys: selectedRepoKeys,
-  }).filter((item) => {
+  // 搜索 / 来源 / 仓库三轴在 useSkillFilters 里；「启用状态」这一轴是用户级特有的
+  const visible = matched.filter((item) => {
     if (statusFilter === "all") return true;
     const enabled = statusAgents.some((agent) => enabledFor(agent, "skill").includes(item.id));
     return statusFilter === "on" ? enabled : !enabled;
@@ -133,39 +133,10 @@ export function SkillsPanel() {
   const updateIds = checkReport?.updates.map((update) => update.id) ?? [];
   const updatesCount = updateIds.length;
 
-  const selectedItems = items.filter((item) => selected.has(item.id));
-  const selectedIds = selectedItems.map((item) => item.id);
-  const allVisibleSelected =
-    visible.length > 0 && visible.every((item) => selected.has(item.id));
   const enabledAgentsForSelected = agentsForType.filter((agent) =>
     selectedItems.some((item) => agent.enabledSkills.includes(item.id)),
   );
   const updatableSelected = selectedItems.filter((item) => item.origin?.updatable).length;
-
-  const toggleSelected = (id: string, checked: boolean) => {
-    setSelected((previous) => toggled(previous, id, checked));
-  };
-
-  const toggleAllVisible = () => {
-    setSelected((previous) => {
-      const next = new Set(previous);
-      if (allVisibleSelected) {
-        visible.forEach((item) => next.delete(item.id));
-      } else {
-        visible.forEach((item) => next.add(item.id));
-      }
-      return next;
-    });
-  };
-
-  const toggleRepo = (key: string, checked: boolean) => {
-    // 存的是「已排除」集合，勾选对应移出。
-    setDeselectedRepos((previous) => toggled(previous, key, !checked));
-  };
-
-  const toggleAllRepos = (checked: boolean) => {
-    setDeselectedRepos(checked ? new Set() : new Set(repoChoices.allKeys));
-  };
 
   // 查看与编辑都要先读真源；失败时统一报错并返回 null。
   const readSkill = async (item: AssetSummary): Promise<string | null> => {
@@ -256,7 +227,7 @@ export function SkillsPanel() {
           .filter((outcome) => outcome.status !== "failed")
           .map((outcome) => outcome.id),
       );
-      setSelected(new Set());
+      clear();
       refreshAll();
     } catch (e) {
       setActionError(String(e));
@@ -284,11 +255,7 @@ export function SkillsPanel() {
           failed.map((outcome) => `${outcome.id}：${outcome.error}`).join("；"),
         );
       }
-      setSelected((previous) => {
-        const next = new Set(previous);
-        ids.forEach((id) => next.delete(id));
-        return next;
-      });
+      drop(ids);
       dropUpdates(ids);
       setDeleting(null);
       refreshAll();
@@ -458,7 +425,7 @@ export function SkillsPanel() {
               label={
                 allReposSelected
                   ? `仓库：全部（${repoChoices.allKeys.length}）`
-                  : `仓库：${selectedRepoKeys.size}/${repoChoices.allKeys.length}`
+                  : `仓库：${repoKeys.size}/${repoChoices.allKeys.length}`
               }
             >
               <CheckOption
@@ -471,14 +438,14 @@ export function SkillsPanel() {
                   key={repo.key}
                   mono
                   label={repo.label}
-                  checked={selectedRepoKeys.has(repo.key)}
+                  checked={repoKeys.has(repo.key)}
                   onChange={(checked) => toggleRepo(repo.key, checked)}
                 />
               ))}
               {repoChoices.hasNoRepo && (
                 <CheckOption
                   label="无来源仓库"
-                  checked={selectedRepoKeys.has(NO_REPO_KEY)}
+                  checked={repoKeys.has(NO_REPO_KEY)}
                   onChange={(checked) => toggleRepo(NO_REPO_KEY, checked)}
                 />
               )}
@@ -590,7 +557,7 @@ export function SkillsPanel() {
               onEnable={(agentId) => void setEnabledFor(agentId, true)}
               onDisable={(agentId) => void setEnabledFor(agentId, false)}
               onDelete={() => setDeleting(selectedItems)}
-              onClear={() => setSelected(new Set())}
+              onClear={clear}
             />
           </div>
         )}
@@ -630,8 +597,8 @@ export function SkillsPanel() {
               <span className="flex w-6 shrink-0 items-center">
                 <Checkbox
                   aria-label="全选当前列表"
-                  checked={allVisibleSelected}
-                  onChange={toggleAllVisible}
+                  checked={allVisibleSelected(visible)}
+                  onChange={() => toggleAll(visible)}
                 />
               </span>
               <span className="flex-1 text-caption font-semibold text-fg-2">名称</span>
@@ -660,7 +627,7 @@ export function SkillsPanel() {
                       <Checkbox
                         aria-label={`选择 ${item.name}`}
                         checked={selected.has(item.id)}
-                        onChange={(event) => toggleSelected(item.id, event.target.checked)}
+                        onChange={(event) => toggleOne(item.id, event.target.checked)}
                       />
                     }
                     selected={selected.has(item.id)}

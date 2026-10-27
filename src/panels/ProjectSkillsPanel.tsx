@@ -11,13 +11,8 @@ import { SkillDiscoveryPanel } from "../components/skills/SkillDiscoveryPanel";
 import { SkillFormSheet } from "../components/skills/SkillFormSheet";
 import { SkillInstallSheet } from "../components/skills/SkillInstallSheet";
 import { SkillSourceBadge } from "../components/skills/SkillSourceBadge";
-import {
-  NO_REPO_KEY,
-  filterByCommonFilters,
-  repoOptions,
-  selectedRepoKeys as selectedRepos,
-  toggled,
-} from "../components/skills/skillFilters";
+import { NO_REPO_KEY } from "../components/skills/skillFilters";
+import { useSkillFilters } from "../components/skills/useSkillFilters";
 import { projectRow, projectScope } from "../components/skills/skillScope";
 import type { SkillDeployTarget } from "../components/skills/skillScope";
 import { Badge, type BadgeTone } from "../components/ui/Badge";
@@ -182,12 +177,8 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
 
   const [view, setView] = useState<"installed" | "discover">("installed");
   const [discoverMounted, setDiscoverMounted] = useState(false);
-  const [query, setQuery] = useState("");
   const [dirFilter, setDirFilter] = useState("all");
   const [stateFilter, setStateFilter] = useState<"all" | ProjectDirState>("all");
-  const [sourceFilter, setSourceFilter] = useState("all");
-  const [deselectedRepos, setDeselectedRepos] = useState<Set<string>>(new Set());
-  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [viewing, setViewing] = useState<{ row: ProjectRow; form: SkillForm } | null>(null);
   const [editing, setEditing] = useState<{ mode: "create" | "edit"; id: string; form: SkillForm } | null>(
     null,
@@ -235,36 +226,40 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
 
   useEffect(() => setAutoSync(project.autoSync), [project.autoSync]);
 
-  const repoChoices = useMemo(() => repoOptions(rows), [rows]);
-  const activeRepoKeys = useMemo(
-    () => selectedRepos(repoChoices.allKeys, deselectedRepos),
-    [repoChoices, deselectedRepos],
-  );
-  const allReposSelected =
-    repoChoices.allKeys.length > 0 && activeRepoKeys.size === repoChoices.allKeys.length;
+  const {
+    query,
+    setQuery,
+    sourceFilter,
+    setSourceFilter,
+    repoChoices,
+    repoKeys: activeRepoKeys,
+    allReposSelected,
+    matched,
+    selected,
+    selectedItems: selectedRows,
+    selectedIds,
+    toggleRepo,
+    toggleAllRepos,
+    toggleOne,
+    toggleAll,
+    allVisibleSelected,
+    clear,
+  } = useSkillFilters(rows);
 
-  // 与全局一致：目录筛选只收窄「状态」这一轴的判断范围，本身不删行；状态筛选才删行。
+  // 搜索 / 来源 / 仓库三轴与全局共用；「部署目录 + 部署状态」是项目级特有的那一轴。
+  // 目录筛选只收窄「状态」这一轴的判断范围，本身不删行；状态筛选才删行。
   const visible = useMemo(
     () =>
-      filterByCommonFilters(rows, {
-        query,
-        sourceFilter,
-        repoKeys: activeRepoKeys,
-      }).filter((row) => {
+      matched.filter((row) => {
         if (stateFilter === "all") return true;
-        const considered =
-          dirFilter === "all" ? Object.keys(row.skill.dirs) : [dirFilter];
+        const considered = dirFilter === "all" ? Object.keys(row.skill.dirs) : [dirFilter];
         return considered.some((key) => stateOf(row.skill, key) === stateFilter);
       }),
-    [rows, query, sourceFilter, activeRepoKeys, stateFilter, dirFilter],
+    [matched, stateFilter, dirFilter],
   );
 
   const updateIds = checkReport?.updates.map((update) => update.id) ?? [];
   const updatesCount = updateIds.length;
-  const selectedRows = rows.filter((row) => selected.has(row.id));
-  const selectedIds = selectedRows.map((row) => row.id);
-  const allVisibleSelected =
-    visible.length > 0 && visible.every((row) => selected.has(row.id));
   const updatableSelected = selectedRows.filter((row) => row.origin?.updatable).length;
   /** 只有已实测的目录能作为批量落点，未实测的列本来就不可点。 */
   const deployTargets: SkillDeployTarget[] = useMemo(
@@ -360,7 +355,7 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
       }
       setResult({ outcomes, conflicts: conflictList, warnings });
       setConflicts(conflictList);
-      setSelected(new Set());
+      clear();
       await refresh();
     });
 
@@ -406,31 +401,6 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
     } finally {
       setBatchBusy(false);
     }
-  };
-
-  const toggleSelected = (id: string, checked: boolean) => {
-    setSelected((previous) => toggled(previous, id, checked));
-  };
-
-  const toggleAllVisible = () => {
-    setSelected((previous) => {
-      const next = new Set(previous);
-      if (allVisibleSelected) {
-        visible.forEach((row) => next.delete(row.id));
-      } else {
-        visible.forEach((row) => next.add(row.id));
-      }
-      return next;
-    });
-  };
-
-  const toggleRepo = (key: string, checked: boolean) => {
-    // 存的是「已排除」集合，勾选对应移出。
-    setDeselectedRepos((previous) => toggled(previous, key, !checked));
-  };
-
-  const toggleAllRepos = (checked: boolean) => {
-    setDeselectedRepos(checked ? new Set() : new Set(repoChoices.allKeys));
   };
 
   // 查看与编辑读的是项目真源；失败时统一报错并返回 null。
@@ -523,7 +493,7 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
         );
       }
       setCheckReport(null);
-      setSelected(new Set());
+      clear();
       await refresh();
     } catch (e) {
       setActionError(String(e));
@@ -903,7 +873,7 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
                 onEnable={(dirKey) => void setEnabledFor(dirKey, true)}
                 onDisable={(dirKey) => void setEnabledFor(dirKey, false)}
                 onDelete={() => setPendingDelete({ kind: "uninstall", rows: selectedRows })}
-                onClear={() => setSelected(new Set())}
+                onClear={clear}
               />
             </div>
           )}
@@ -947,8 +917,8 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
                 <span className="flex w-6 shrink-0 items-center">
                   <Checkbox
                     aria-label="全选当前列表"
-                    checked={allVisibleSelected}
-                    onChange={toggleAllVisible}
+                    checked={allVisibleSelected(visible)}
+                    onChange={() => toggleAll(visible)}
                   />
                 </span>
                 <span className="flex-1 text-caption font-semibold text-fg-2">名称</span>
@@ -997,7 +967,7 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
                         <Checkbox
                           aria-label={`选择 ${row.name}`}
                           checked={selected.has(row.id)}
-                          onChange={(event) => toggleSelected(row.id, event.target.checked)}
+                          onChange={(event) => toggleOne(row.id, event.target.checked)}
                         />
                       }
                       selected={selected.has(row.id)}
