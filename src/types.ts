@@ -550,6 +550,8 @@ export interface ProjectDirMeta {
   label: string;
   relativePath: string;
   agents: string[];
+  /** 映射到这个物理目录的 agent id；矩阵按 agent 展开列时靠它反查。 */
+  agentIds: string[];
   verified: boolean;
 }
 
@@ -594,7 +596,7 @@ export interface ProjectSkillView {
   dirs: Record<string, ProjectDirView>;
   source: ProjectSkillSource | null;
   lastOp: ProjectSkillOp | null;
-  /** 项目真源 `.ccswitchx/skills/<id>/` 是否已落地。 */
+  /** 项目真源（客户端 `local/projects/<id>/skills/<id>/`）是否已落地。 */
   canonical: boolean;
   /** 账本记着有真源、磁盘上却没有：只能由显式「删除全部副本」处置。 */
   canonicalMissing: boolean;
@@ -618,6 +620,25 @@ export interface ProjectSkillsView {
   conflictCount: number;
   /** v1 台账的迁移计划；已迁移或无事可做时为 null。只读计算，不落盘。 */
   migration: ProjectMigrationPlan | null;
+  /** 项目数据布局。hybrid / foreign 时面板顶部要给显式提示。 */
+  layout: ProjectLayoutStatus;
+}
+
+/** 项目数据布局（后端 `domain::project::ProjectLayoutStatus`）。 */
+export type ProjectLayoutStatus =
+  | { kind: "native" }
+  | { kind: "legacy" }
+  | { kind: "hybrid"; collisions: string[] }
+  | { kind: "redundantLegacy"; entries: string[] }
+  | { kind: "foreign"; entries: string[] }
+  | { kind: "unsupported"; version: number };
+
+/** 布局搬迁的结果（后端 `services::project_relocate::ProjectRelocationReport`）。 */
+export interface ProjectRelocationReport {
+  status: ProjectLayoutStatus;
+  migrated: string[];
+  legacyRemoved: boolean;
+  warnings: string[];
 }
 
 /** 迁移的一条采纳：把某个目录的现有字节新建进项目真源，agent 目录本身不动。 */

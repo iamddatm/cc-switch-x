@@ -30,6 +30,29 @@ async function main() {
   await target.reload({ waitUntil: "networkidle" });
   await target.waitForTimeout(800);
 
+  // 启动主题：settings.json 是深色，首帧就该是深色 —— localStorage 镜像
+  // 让 index.html 的预帧脚本不等 IPC 也能直接上 class。
+  log.themeMirror = await target.evaluate(() => localStorage.getItem("ccswitchx.theme"));
+  log.themeDarkClassOnBoot = await target.evaluate(() =>
+    document.documentElement.classList.contains("dark"),
+  );
+
+  // ── 全局 Skills：skills.sh 不再自动拉趋势，点「趋势」页签才请求 ──────
+  await sidebar("Skills");
+  await target.getByRole("tab", { name: "发现", exact: true }).click();
+  await target.waitForTimeout(600);
+  const shSource = (label) =>
+    target.getByRole("group", { name: "Skill 发现来源" }).getByRole("button", { name: label });
+  await shSource(/skills\.sh/).click();
+  await target.waitForTimeout(1500);
+  log.skillsShSearchHint = await target.getByText("搜索 skills.sh").count();
+  log.trendingHeaderBeforeTrendTab = await target.getByText(/趋势榜 · 近 24 小时/).count();
+  await shSource("趋势").click();
+  await target.waitForTimeout(3000);
+  log.trendingHeaderAfterTrendTab = await target.getByText(/趋势榜 · 近 24 小时/).count();
+  log.trendingFailed = await target.getByText("趋势榜读取失败").count();
+  await shot("00-skills-trend");
+
   // ── MCP ────────────────────────────────────────────
   await sidebar("MCP");
   await target.waitForTimeout(500);
@@ -119,7 +142,9 @@ async function main() {
   const PROJECT = process.env.PROJECT_PATH;
   if (PROJECT) {
     const claudeFile = path.join(PROJECT, ".claude/skills/probe/SKILL.md");
-    const canonicalFile = path.join(PROJECT, ".ccswitchx/skills/probe/SKILL.md");
+    // v3：真源住在 store 的 local/projects/<id>/ 里，项目里只剩渲染产物。
+    const canonicalFor = (projectId) =>
+      path.join(STORE, "local/projects", projectId, "skills/probe/SKILL.md");
     const qoderFile = path.join(PROJECT, ".qoder/skills/probe/SKILL.md");
     const claudeBefore = read(claudeFile);
 
@@ -129,6 +154,8 @@ async function main() {
       async (p) => await window.__TAURI_INTERNALS__.invoke("add_project", { path: p }),
       PROJECT,
     );
+    const canonicalFile = canonicalFor(log.projectAdded.id);
+    log.legacyDirGoneAfterAdd = !fs.existsSync(path.join(PROJECT, ".ccswitchx"));
     await target.reload({ waitUntil: "networkidle" });
     await target.waitForTimeout(1000);
 
@@ -146,8 +173,8 @@ async function main() {
     }
     await shot("09-project-list");
     log.projectRowVisible = await target.getByRole("button", { name: "查看 probe" }).count();
-    // 未实测的 .agents/skills 只能显示「待实测」，不给开关
-    log.agentsCellUnverified = await target.getByText("待实测").count();
+    // 未实测的落点只给一个虚线占位（图标 + aria-label），没有开关。
+    log.agentsCellUnverified = await target.getByRole("img", { name: /未实测/ }).count();
     log.agentsCheckboxAbsent = await target.getByRole("checkbox", { name: /Agents|Codex/i }).count();
 
     // 1. 收进真源：只新建 .ccswitchx/skills/probe，Claude 的目录一个字节都不动
@@ -162,7 +189,8 @@ async function main() {
     // 2. 勾选两个渲染目录：只改台账不写盘；按「立即同步」才铺开
     await target.getByRole("checkbox", { name: /同步到 Claude/ }).click();
     await target.waitForTimeout(600);
-    await target.getByRole("checkbox", { name: /同步到 Qoder/ }).click();
+    // 列按 agent 展开：Qoder 与 Qoder CN 共用 .qoder/skills，两列点哪一列改的都是同一个 target。
+    await target.getByRole("checkbox", { name: /^同步到 Qoder CN/ }).click();
     await target.waitForTimeout(800);
     log.qoderStillAbsentAfterCheck = !fs.existsSync(qoderFile);
     log.claudeStillOriginalAfterCheck = read(claudeFile) === claudeBefore;
@@ -207,6 +235,34 @@ async function main() {
     log.projectAddItems = await target.getByRole("menuitem").allTextContents();
     await shot("15-project-add-menu");
     await target.keyboard.press("Escape");
+  }
+
+  // ── v3 搬迁：旧布局项目登记时自动搬进 store，并删掉仓库里的 .ccswitchx/ ──
+  const LEGACY = process.env.LEGACY_PROJECT;
+  if (LEGACY) {
+    const added = await target.evaluate(
+      async (p) => await window.__TAURI_INTERNALS__.invoke("add_project", { path: p }),
+      LEGACY,
+    );
+    const storeSkill = path.join(STORE, "local/projects", added.id, "skills/probe/SKILL.md");
+    const layout = await target.evaluate(
+      async (id) =>
+        await window.__TAURI_INTERNALS__.invoke("list_project_skills", { projectId: id }),
+      added.id,
+    );
+    log.legacy = {
+      id: added.id,
+      legacyDirGone: !fs.existsSync(path.join(LEGACY, ".ccswitchx")),
+      storeSkillExists: fs.existsSync(storeSkill),
+      storeSkillBody: fs.existsSync(storeSkill) ? read(storeSkill) : null,
+      renderedUntouched: read(path.join(LEGACY, ".claude/skills/probe/SKILL.md")).includes(
+        "旧布局正文",
+      ),
+      backupKept: fs.existsSync(path.join(STORE, "backups/projects", added.id)),
+      layout: layout.layout,
+      canonical: layout.skills.map((skill) => ({ id: skill.id, canonical: skill.canonical })),
+    };
+    await shot("16-legacy-migrated");
   }
 
   console.log(JSON.stringify(log, null, 2));

@@ -59,7 +59,7 @@ node scripts/check-release-version.mjs
 
 canonical 格式：MCP 为 JSON；Prompt / Rule 为 Markdown + YAML frontmatter；Subagent / Hook 为 YAML；Skill 为目录 + `SKILL.md`（来源信息在 `.meta.json`）。
 
-项目级 Skills 另有一套真源（设计文档 §4 方案 B）：`<project>/.ccswitchx/skills/<id>/` 是项目真源、唯一可编辑副本；`<project>/.ccswitchx/skills.json` 是随仓库提交的台账（version 2，记 `targets` / `canonical` / `dirs` 渲染基线 / `source` 来源）；`.claude|.qoder|.agents/skills/` 只是渲染产物，可随时删除重生成。易变的检查状态（`updateAvailable` / `lastCheckedAt` 等）只存 `<storeRoot>/local/project-skill-checks/<projectId>.json`，不进仓库；项目真源**不写** `.meta.json` 或任何归属标记文件。
+项目级 Skills 另有一套真源（设计文档 §4）：`<storeRoot>/local/projects/<project-id>/skills/<id>/` 是项目真源、唯一可编辑副本；同目录的 `skills.json` 是台账（version 2，记 `targets` / `canonical` / `dirs` 渲染基线 / `source` 来源），`layout.json` 是 v3 布局戳记。`local/` 不参与任何跨设备同步；项目里只剩 `.claude|.qoder|.agents/skills/` 这些渲染产物，可随时删除重生成。存量 `<project>/.ccswitchx/` 在打开项目时自动搬进 store（先备份、校验通过才删旧目录；有陌生条目则保留并提示）。易变的检查状态（`updateAvailable` / `lastCheckedAt` 等）只存 `<storeRoot>/local/project-skill-checks/<projectId>.json`；项目真源**不写** `.meta.json` 或任何归属标记文件。
 
 ## 必须保持的约束
 

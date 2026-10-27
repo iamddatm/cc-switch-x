@@ -1,6 +1,6 @@
 // Skill 组件的作用域适配器：同一套抽屉、市场、详情组件，装的东西去向不同。
 // 全局 = 中央库 `assets/skills/<id>`（来源在 `.meta.json`，启用 = 部署到 agent 目录）；
-// 项目 = `<project>/.ccswitchx/skills/<id>`（来源在台账 `skills.json`，部署 = 渲染到勾选的目录）。
+// 项目 = 客户端数据目录 `local/projects/<id>/skills/<id>`（来源在台账 `skills.json`，部署 = 渲染到勾选的目录）。
 // 组件只认这个接口，不在内部写「是全局还是项目」的分支。
 import { api } from "../../lib/api";
 import type {
@@ -136,7 +136,7 @@ export function projectScope(
       noneDeployed: "未渲染到任何目录",
     },
     installHint:
-      "安装只写入项目真源 .ccswitchx/skills/，要铺开还得勾选渲染目录后同步。",
+      "安装只写入客户端里的项目真源，要铺开还得勾选渲染目录后同步。",
     existsLabel: "项目真源里已存在",
     previewSource,
     // 安装只落真源，不带渲染目标：往仓库的 agent 目录里写文件必须由「勾选 + 同步」明确发生。

@@ -32,6 +32,7 @@ import type {
   PullOutcome,
   ProjectConflictResolution,
   ProjectInstallReport,
+  ProjectRelocationReport,
   ProjectSkillView,
   ProjectSkillsView,
   ProjectSyncReport,
@@ -233,6 +234,8 @@ export const api = {
   touchProject: (id: string) => invoke<ProjectView>("touch_project", { id }),
   setProjectAutoSync: (id: string, enabled: boolean) =>
     invoke<ProjectView>("set_project_auto_sync", { id, enabled }),
+  resolveProjectLayout: (projectId: string, choice: "store" | "legacy") =>
+    invoke<ProjectRelocationReport>("resolve_project_layout", { projectId, choice }),
   listProjectSkills: (projectId: string) =>
     invoke<ProjectSkillsView>("list_project_skills", { projectId }),
   revealProjectFolder: (projectId: string) =>

@@ -16,7 +16,7 @@ function labelOf(dirs: ProjectDirMeta[], key: string): string {
 /**
  * v1「对等副本」台账迁到 v2「项目真源」的确认对话框。
  *
- * 必须让用户看清两件事：会在自己仓库里新建哪些文件，以及**不会**改动任何
+ * 必须让用户看清两件事：会在客户端数据目录里新建哪些文件，以及**不会**改动任何
  * agent 目录的字节。冲突条目一律要人工裁决（含显式「跳过」），否则不开放提交 ——
  * 后端同样会整体拒绝，这里只是把失败提前到点按钮之前。
  */
@@ -43,7 +43,7 @@ export function ProjectMigrationDialog({
     ...plan.proposals
       .filter((item) => adopted[item.skillId])
       .flatMap((item) => item.files),
-    ".ccswitchx/skills.json",
+    "skills.json",
   ].sort();
   const undecided = plan.conflicts.filter((item) => winners[item.skillId] === undefined);
 
@@ -68,7 +68,7 @@ export function ProjectMigrationDialog({
       onClose={onCancel}
       role="alertdialog"
       title="把项目 skill 收进项目真源"
-      description="项目级 Skills 改为在 .ccswitchx/skills/ 里保留唯一可编辑真源，.claude / .qoder / .agents 目录变成它的渲染产物。迁移只新建真源文件，不会改动任何 agent 目录的字节。"
+      description="项目级 Skills 改为在客户端数据目录里保留唯一可编辑真源，.claude / .qoder / .agents 目录变成它的渲染产物。迁移只在客户端新建真源文件，不会改动任何 agent 目录的字节。"
       width={620}
       footer={
         <>

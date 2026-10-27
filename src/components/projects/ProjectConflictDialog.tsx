@@ -50,7 +50,7 @@ export function ProjectConflictDialog({
               <p className="text-body text-fg-1">{conflict.skillId}</p>
               <p className="mt-0.5 text-caption text-fg-3">
                 {missingCanonical
-                  ? "账本记着有项目真源，但 .ccswitchx/skills/ 下找不到它。"
+                  ? "账本记着有项目真源，但客户端的项目数据目录里找不到它。"
                   : "这些目录里的副本被外部改过，与真源和基线都不一致。"}
               </p>
               <ul className="mt-1 space-y-0.5 text-caption text-fg-2">

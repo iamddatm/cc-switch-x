@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderInput, Plus, RefreshCw, Sparkles } from "lucide-react";
 import { AssetRow } from "../components/assets/AssetRow";
+import { AGENT_COLUMN_WIDTH, supportedAgents } from "../components/assets/AgentColumnCells";
+import { AgentGlyph } from "../components/agents/AgentGlyph";
 import { cn } from "../lib/cn";
 import { ProjectConflictDialog } from "../components/projects/ProjectConflictDialog";
 import { ProjectMigrationDialog } from "../components/projects/ProjectMigrationDialog";
@@ -27,11 +29,13 @@ import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
 import { SearchField } from "../components/ui/SearchField";
 import { Select } from "../components/ui/Select";
+import { useAgents } from "../hooks/useAgents";
 import { useProjectSkills } from "../hooks/useProjectSkills";
 import { api } from "../lib/api";
 import { parseSkill, type SkillForm } from "../lib/canonical";
 import { formatRelativeTime } from "../lib/format";
 import type {
+  AgentStatus,
   AssetSummary,
   MigrationDecision,
   ProjectConflict,
@@ -66,9 +70,6 @@ const STATE_HINT: Record<ProjectDirState, string> = {
   untracked: "不是本项目渲染的副本，工具不会改动它",
   unavailable: "对应 agent 已停用，或该落点尚未实测",
 };
-
-/** 未在真机验证的目录不给开关：状态列只显示「待实测」。 */
-const UNVERIFIED = "待实测";
 
 const FALLBACK_DIRS = [".claude/skills", ".qoder/skills", ".agents/skills"];
 
@@ -107,32 +108,39 @@ function dirLabel(dir: ProjectDirMeta): string {
   return dir.label || dir.relativePath;
 }
 
-/** 某个目录在该行的渲染产物。 */
-function DirCell({
-  meta,
+/**
+ * 一列（某个 agent）在该行的渲染产物。
+ * 列按 agent 展开、格子按物理目录取状态：共用同一目录的几个 agent
+ * （Qoder 与 Qoder CN → `.qoder/skills`）看到的是同一份字节，点任意一列改的是同一个 target。
+ */
+function AgentDirCell({
+  agent,
+  dir,
   skill,
   busy,
   onToggle,
 }: {
-  meta: ProjectDirMeta;
+  agent: AgentStatus;
+  dir: ProjectDirMeta;
   skill: ProjectSkillView;
   busy: boolean;
   onToggle: (targets: string[]) => void;
 }) {
-  const state = stateOf(skill, meta.key);
+  const state = stateOf(skill, dir.key);
   const badge = STATE_LABEL[state];
-  const on = skill.targets.includes(meta.key);
+  const on = skill.targets.includes(dir.key);
+  const peers = dir.agents.filter((name) => name !== agent.displayName);
+  const shared = peers.length > 0;
+  const label = `${agent.displayName}${shared ? `（与 ${peers.join("、")} 共用 ${dir.relativePath}）` : ""}`;
 
-  if (!meta.verified) {
+  if (!dir.verified) {
     return (
       <span
         role="img"
-        aria-label={`${dirLabel(meta)}：未实测，暂不提供开关`}
-        title={`${dirLabel(meta)}：未实测，暂不提供同步目标`}
-        className="flex h-4 w-14 items-center justify-center rounded-[4px] border-[1.5px] border-dashed border-border-strong opacity-45"
-      >
-        <span className="text-badge leading-none text-fg-3">{UNVERIFIED}</span>
-      </span>
+        aria-label={`${label}：未实测，暂不提供开关`}
+        title={`${label}：落点 ${dir.relativePath} 未实测，暂不能作为同步目标`}
+        className="flex h-4 w-4 items-center justify-center rounded-[4px] border-[1.5px] border-dashed border-border-strong opacity-45"
+      />
     );
   }
 
@@ -142,14 +150,14 @@ function DirCell({
       type="button"
       role="checkbox"
       aria-checked={on}
-      aria-label={`同步到 ${dirLabel(meta)}`}
-      title={`${dirLabel(meta)}：${badge.label} · ${STATE_HINT[state]}`}
+      aria-label={`同步到 ${label}`}
+      title={`${label}：${badge.label} · ${STATE_HINT[state]}`}
       disabled={disabled}
       onClick={() =>
         onToggle(
           on
-            ? skill.targets.filter((target) => target !== meta.key)
-            : [...skill.targets, meta.key],
+            ? skill.targets.filter((target) => target !== dir.key)
+            : [...skill.targets, dir.key],
         )
       }
       className={`flex h-[18px] w-9 items-center justify-center rounded-full border text-badge leading-none transition-colors duration-150 ${
@@ -173,6 +181,9 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
   const [pending, setPending] = useState<ProjectConflict[]>([]);
   const [migrating, setMigrating] = useState(false);
   const [migrationNote, setMigrationNote] = useState<string | null>(null);
+  /** 两边都有项目数据时的裁决目标：null 表示对话框关着。 */
+  const [layoutChoice, setLayoutChoice] = useState<"store" | "legacy" | null>(null);
+  const [resolvingLayout, setResolvingLayout] = useState(false);
   const [autoSync, setAutoSync] = useState(project.autoSync);
   const autoSyncedFor = useRef<string | null>(null);
 
@@ -197,12 +208,29 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
     | null
   >(null);
 
+  const { agents } = useAgents();
   const current = data?.project ?? project;
   const dirs = data?.dirs ?? [];
   const skills = data?.skills ?? [];
   const hasTargets = skills.some((skill) => skill.targets.length > 0);
   /** 一个可同步的目录都没有（落点未实测）时，同步按钮只能说明原因，不能让人点了吃一个错。 */
   const selectable = dirs.some((dir) => dir.verified);
+
+  /**
+   * 矩阵的列：按 agent 展开，口径与全局面板一致（Skill 能力成立就出列）。
+   * 后端返回的目录已经是「启用的 agent ∪ 台账里勾过的目录」，所以这里不再按启用状态收窄——
+   * 否则停用的 agent 那一列会消失，用户没法把还勾着的渲染目标取消掉。
+   */
+  const columns = useMemo(() => {
+    const visible = supportedAgents(agents, "skill");
+    const list: { agent: AgentStatus; dir: ProjectDirMeta }[] = [];
+    for (const dir of dirs) {
+      for (const agent of visible) {
+        if (dir.agentIds.includes(agent.id)) list.push({ agent, dir });
+      }
+    }
+    return list;
+  }, [dirs, agents]);
 
   /**
    * 安装、编辑、检查更新的去向都在这里定义：组件只认这个适配器，
@@ -401,6 +429,29 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
       setActionError(String(e));
     } finally {
       setBatchBusy(false);
+    }
+  };
+
+  /**
+   * 两边都有项目数据时的裁决：被覆盖的一侧由后端先整份备份，这里只负责把选择发过去。
+   */
+  const resolveLayout = async () => {
+    if (!layoutChoice) return;
+    setResolvingLayout(true);
+    setActionError(null);
+    try {
+      await api.resolveProjectLayout(project.id, layoutChoice);
+      setActionMessage(
+        layoutChoice === "store"
+          ? "已以客户端数据为准：项目里的旧目录已清理。"
+          : "已以项目里的旧数据为准：客户端副本已替换，旧目录已清理。",
+      );
+      setLayoutChoice(null);
+      await refresh();
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setResolvingLayout(false);
     }
   };
 
@@ -750,8 +801,8 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
               <div className="flex flex-wrap items-center gap-2">
                 <span>
                   这个项目的台账还是旧格式（各目录互为副本）。迁移后
-                  <code className="mx-1 font-mono">.ccswitchx/skills/</code>
-                  成为项目真源，agent 目录变成它的渲染产物；迁移只新建文件，不改动任何 agent 目录。
+                  <code className="mx-1 font-mono">skills/</code>
+                  成为项目真源（住在客户端数据目录里），agent 目录变成它的渲染产物；迁移只新建文件，不改动任何 agent 目录。
                 </span>
                 <Button size="sm" onClick={() => setMigrating(true)}>
                   查看迁移方案
@@ -762,6 +813,55 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
           {migrationNote && (
             <Notice tone="success" className="mb-3">
               {migrationNote}
+            </Notice>
+          )}
+          {data?.layout.kind === "hybrid" && (
+            <Notice tone="warning" className="mb-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span>
+                  客户端和项目里的
+                  <code className="mx-1 font-mono">.ccswitchx/</code>
+                  都有这个项目的数据，内容不一致
+                  {data.layout.collisions.length > 0
+                    ? `（${data.layout.collisions.join("、")}）`
+                    : ""}
+                  。请选择以哪一边为准，被覆盖的一侧会先整份备份。
+                </span>
+                <Button size="sm" onClick={() => setLayoutChoice("store")}>
+                  以客户端为准
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setLayoutChoice("legacy")}>
+                  以项目为准
+                </Button>
+              </div>
+            </Notice>
+          )}
+          {data?.layout.kind === "foreign" && (
+            <Notice tone="info" className="mb-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span>
+                  数据已经搬到客户端，但
+                  <code className="mx-1 font-mono">.ccswitchx/</code>
+                  里还有不属于 CC Switch X 的条目（{data.layout.entries.join("、")}），因此没有自动删除。
+                </span>
+                <Button size="sm" variant="ghost" onClick={() => setLayoutChoice("store")}>
+                  删除旧目录
+                </Button>
+              </div>
+            </Notice>
+          )}
+          {data?.layout.kind === "redundantLegacy" && (
+            <Notice tone="info" className="mb-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span>
+                  数据已经在客户端，项目里的
+                  <code className="mx-1 font-mono">.ccswitchx/</code>
+                  是同一份内容的残留，可以删除。
+                </span>
+                <Button size="sm" variant="ghost" onClick={() => setLayoutChoice("store")}>
+                  清理旧目录
+                </Button>
+              </div>
             </Notice>
           )}
           {!selectable && dirs.length > 0 && (
@@ -833,7 +933,7 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
             <EmptyState
               icon={Sparkles}
               title="项目里还没有 Skills"
-              description={`真源在 <项目>/.ccswitchx/skills/，渲染产物会从这些目录读写：${(dirs.length > 0
+              description={`真源在客户端的项目数据目录里，渲染产物会从这些目录读写：${(dirs.length > 0
                 ? dirs.map((dir) => dir.relativePath)
                 : FALLBACK_DIRS
               ).join("、")}。`}
@@ -870,22 +970,25 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
                   />
                 </span>
                 <span className="flex-1 text-caption font-semibold text-fg-2">名称</span>
-                {dirs.map((dir) => {
+                {columns.map(({ agent, dir }) => {
                   const count = visible.filter((row) => row.skill.targets.includes(dir.key)).length;
                   return (
                     <span
-                      key={dir.key}
+                      key={agent.id}
                       className={cn(
-                        "flex w-14 shrink-0 flex-col items-center justify-center gap-0.5",
+                        AGENT_COLUMN_WIDTH,
+                        "flex shrink-0 flex-col items-center justify-center gap-0.5",
                         !dir.verified && "opacity-45",
                       )}
-                      title={`${dirLabel(dir)} · ${dir.relativePath}：当前列表已渲染 ${count} 个${
+                      title={`${agent.displayName} · ${dir.relativePath}：当前列表已渲染 ${count} 个${
                         dir.verified ? "" : "（未实测，不能作为目标）"
+                      }${
+                        dir.agentIds.length > 1
+                          ? `；这个目录由 ${dir.label} 共用，几列状态始终一致`
+                          : ""
                       }`}
                     >
-                      <span className="w-full truncate text-center text-badge text-fg-2">
-                        {dirLabel(dir)}
-                      </span>
+                      <AgentGlyph agentId={agent.id} label={agent.displayName} size={16} />
                       <span className="text-badge tabular-nums text-fg-3">{count}</span>
                     </span>
                   );
@@ -932,10 +1035,14 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
                       badges={<SkillSourceBadge item={row} />}
                       agentCells={
                         <>
-                          {dirs.map((dir) => (
-                            <span key={dir.key} className="flex w-14 shrink-0 justify-center">
-                              <DirCell
-                                meta={dir}
+                          {columns.map(({ agent, dir }) => (
+                            <span
+                              key={agent.id}
+                              className={cn(AGENT_COLUMN_WIDTH, "flex shrink-0 justify-center")}
+                            >
+                              <AgentDirCell
+                                agent={agent}
+                                dir={dir}
                                 skill={row.skill}
                                 busy={busy || batchBusy}
                                 onToggle={(targets) => void setTargets(row.skill, targets)}
@@ -993,7 +1100,7 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
           onClose={() => setViewing(null)}
           extra={
             <p className="text-caption text-fg-3">
-              项目真源：<code className="font-mono">.ccswitchx/skills/{viewing.row.id}</code>
+              项目真源：<code className="font-mono">skills/{viewing.row.id}</code>
               {" · 已渲染到："}
               {viewing.row.skill.targets.length > 0
                 ? viewing.row.skill.targets
@@ -1028,6 +1135,29 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
       )}
 
       <ConfirmDialog
+        open={layoutChoice !== null}
+        title={
+          layoutChoice === "legacy"
+            ? "以项目里的旧数据为准？"
+            : layoutChoice === "store"
+              ? "删除项目里的旧目录？"
+              : ""
+        }
+        danger={layoutChoice === "legacy"}
+        pending={resolvingLayout}
+        confirmLabel={layoutChoice === "legacy" ? "覆盖客户端副本" : "删除旧目录"}
+        body={
+          <p>
+            {layoutChoice === "legacy"
+              ? "客户端里的副本会先整份备份，然后被项目里的旧数据覆盖；随后删除项目里的 .ccswitchx/。"
+              : "项目里的 .ccswitchx/ 会先整份备份再删除，客户端数据不受影响。"}
+          </p>
+        }
+        onConfirm={() => void resolveLayout()}
+        onCancel={() => setLayoutChoice(null)}
+      />
+
+      <ConfirmDialog
         open={updateTargets !== null}
         title={`更新 ${updateTargets?.length ?? 0} 个项目 Skill？`}
         pending={updating}
@@ -1036,7 +1166,7 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
           <div className="space-y-2">
             <p>
               更新会用仓库里的内容整目录替换项目真源
-              <code className="mx-1 font-mono">.ccswitchx/skills/</code>
+              <code className="mx-1 font-mono">skills/</code>
               ，本地改过的地方只保留在备份里。渲染产物不会被动，要点「立即同步」才会铺开。
             </p>
             {updateEntries.length > 0 && (
@@ -1088,9 +1218,9 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
               <p>
                 删除项目真源{" "}
                 <code className="font-mono">
-                  .ccswitchx/skills/[{pendingDelete.rows.map((row) => row.id).join("、")}]
+                  skills/[{pendingDelete.rows.map((row) => row.id).join("、")}]
                 </code>{" "}
-                与所有已跟踪副本，并移除 .ccswitchx/skills.json 里的条目。
+                与所有已跟踪副本，并移除台账里的条目。
               </p>
               <p>
                 会删到的目录：
@@ -1107,7 +1237,7 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
           ) : pendingDelete?.kind === "purge" ? (
             <div className="space-y-1">
               <p>
-                账本记着这个项目有真源，但 <code className="font-mono">.ccswitchx/skills/</code>{" "}
+                账本记着这个项目有真源，但 <code className="font-mono">skills/</code>{" "}
                 下已经找不到它了。删除所有还留着的副本并移除条目；副本之外不会碰任何文件。
               </p>
               <p className="text-caption text-fg-3">

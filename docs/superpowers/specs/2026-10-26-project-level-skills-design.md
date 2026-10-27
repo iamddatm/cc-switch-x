@@ -1,9 +1,30 @@
 # 项目级 Skills 多 Agent 同步设计
 
 - 日期：2026-10-26
-- 状态：已修订（2026-10-26 由产品负责人推翻 §4 的方案选择，改为 B「项目内主副本」；本文各节已按 B 重写，原反对 B 的理由与缓解措施保留在 §4 附录）
+- 状态：已修订（2026-10-26 由产品负责人推翻 §4 的方案选择，改为 B「项目内主副本」；2026-10-27 再修订为 v3：真源与台账搬进客户端 store，见 §0。原反对 B 的理由与缓解措施保留在 §4 附录）
 - 范围：项目级 Skills 的扫描、真源、渲染部署、安装/更新/卸载、迁移、自动/手动同步
 - 后续：项目级 MCP 单独立项，见文末边界
+
+## 0. v3 修订（2026-10-27）：真源搬进客户端 store
+
+原方案把真源与台账放在 `<project>/.ccswitchx/` 里随仓库提交。实际使用后确认这个选择有问题：项目仓库里出现一份与 agent 渲染目录内容重复的 `.ccswitchx/skills/`，每改一次 skill 都在 git status 里多一份噪音，而这份真源从不参与任何跨机器协作 —— 项目自己的 git 已经解决了这件事。
+
+v3 起：
+
+```
+<storeRoot>/local/projects/<project-id>/
+  skills/<skill-id>/     项目真源，唯一可编辑副本（照旧不写 .meta.json）
+  skills.json            台账，version 仍为 2
+  layout.json            布局戳记，version = 3
+<project>/.claude|.qoder|.agents/skills   渲染产物，位置与语义不变
+```
+
+- **不参与同步**：`local/` 在 store 的 `.gitignore` 必需条目里，`backup::collect_files` 也是白名单（只收 `assets/*` + `agents/*.json` + `.gitignore`），所以这份真源不进 Git 同步、不进云备份。
+- **台账版本不动**：台账里没有任何项目根相对路径或绝对路径，升 version 是对格式撒谎。布局改用独立的 `layout.json` 表达，两条轴交叉覆盖「两边都有」的半状态。
+- **自动搬迁**：打开/添加项目时，存量 `<project>/.ccswitchx/` 先整份快照进 `backups/projects/<id>/<ts>/legacy/`，逐 skill 复制并比对树哈希、台账回读反序列化，全部一致才写 `layout.json`；只有「戳记已写 + 每个 skill 哈希一致 + 旧目录里没有陌生条目」三条同时成立才删除旧目录。有陌生条目时数据照搬、目录保留并提示；两边内容有分歧时判 `Hybrid`，由用户显式选择「以客户端为准」或「以项目为准」，被覆盖的一侧先备份。
+- **代价（如实记录）**：台账不再跟随项目 git。换一台机器需要重新添加项目并导出/导入 store 数据；同一项目的协作方之间不再共享 targets 与来源记录，只共享渲染出来的 agent 目录。
+
+以下各节已按 v3 改写；仍出现 `.ccswitchx` 的地方都是「旧布局的检测与搬迁」语境。
 
 ## 1. 背景与目标
 
@@ -11,7 +32,7 @@
 
 目标：
 
-- 项目内保留**唯一可编辑真源** `<project>/.ccswitchx/skills/<id>/`，各 agent 目录是它的**渲染产物**，可随时删除重生成。
+- 客户端里保留**唯一可编辑真源** `<storeRoot>/local/projects/<project-id>/skills/<id>/`，各 agent 目录是它的**渲染产物**，可随时删除重生成（v3，见 §0）。
 - 在客户端按项目查看全部 skill、每个渲染目标的部署状态（待部署 / 已同步 / 真源已更新 / 外部已改 / 未跟踪 / 不可用）。
 - 用户选择渲染目标；客户端把整个 skill 目录复制过去。首次只列出不自动补齐；之后支持手动与自动同步。
 - 支持和全局 Skills **一样的能力面**：搜索、筛选、新建、从文件夹导入、从来源安装（GitHub/ZIP）、技能市场发现、检查更新、更新、编辑正文、批量部署、卸载、详情。
@@ -24,7 +45,7 @@
 非目标：
 
 - 项目级 MCP / Prompts / Rules / Subagents / Hooks；这些仍只支持全局，后续 MCP 单独立项。
-- 跨机器同步项目状态；`.ccswitchx/skills.json` 与 `.ccswitchx/skills/` 跟随仓库 git，客户端不做额外同步。
+- 跨机器同步项目状态；真源与台账只在本机 store 的 `local/` 里，客户端不做额外同步，也不随项目仓库 git 走。
 - 符号链接 / junction 部署：项目级一律整目录复制。链接目录会被扫描判为不可解析，从而永远无法同步或删除。
 - 团队权限、审计、冲突合并算法（只做整目录覆盖或人工选择）。
 - 项目版「从 cc-switch 导入」：`~/.cc-switch` 是用户级数据，项目范围没有对应概念，**不提供**。
@@ -34,42 +55,43 @@
 - 未经用户确认就在用户仓库里新建内容。
 - 静默覆盖部署目标里被外部改过的内容（`edited`）。
 - 删除或覆盖未被账本跟踪的副本（`untracked`）。
-- 把绝对路径、密钥、易变的检查状态写进随仓库提交的文件。
+- 把绝对路径、密钥、易变的检查状态写进真源或台账。
+- 在没有备份、没有逐项校验的情况下删除项目里的旧布局目录（§0 的三重闸）。
 - 改动或删除项目根之外的任何文件（备份与本机检查缓存除外，它们写在 store 里）。
 
 ## 3. 约束
 
-- 文本优先：真源与台账都是可读文本；`skills.json` 与 `.ccswitchx/skills/` 随仓库提交。
-- 写入前备份；目录替换原子化（同父目录临时名 + rename）；**写后回读校验**；失败整批回滚。
+- 文本优先：真源与台账都是可读文本；它们住在 store 的 `local/projects/<id>/` 下，不随项目仓库提交（§0）。
+- 写入前备份；目录替换原子化（同父目录临时名 + rename）；**写后回读校验**；失败整批回滚。搬迁时的删除还多一道「逐项哈希一致 + 无陌生条目」的闸。
 - Windows 优先，全部用 `PathBuf`；项目根必须规范化（去掉 `\\?\` 逐字前缀），拒绝路径穿越和逃逸的符号链接。
 - 能力闸：只有实测确认过项目级落点的 agent 才允许写；未实测的列显示「待实测」且不可操作。**勾选侧与写入侧都要校验**（`targets` 可能来自旧版本或手改的 JSON）。
 - 项目级与用户级完全隔离：不读写 `~/.claude/skills` 等用户级目录。
-- 项目 JSON 不存绝对路径；agent 用稳定的目录 key 标识。
+- 台账不存绝对路径；agent 用稳定的目录 key 标识；项目数据目录用「slug + 路径哈希」派生的安全 ID。
 - 真源与渲染基线的目录指纹**不计入点开头条目**（`.DS_Store`、编辑器临时文件不该触发重渲染；真源里也不写 `.meta.json`，见 §6.5）。
-- 易变的检查状态（`lastCheckedAt` / `updateAvailable` / `lastCheckError`）不进随仓库提交的文件，只存本机。
+- 易变的检查状态（`lastCheckedAt` / `updateAvailable` / `lastCheckError`）不进台账或真源，只存本机缓存。
 - 不改项目 `.gitignore`，不替用户提交 git。agent 目录是否入库由用户仓库自己决定。
 
 ## 4. 方案选择（已修订）
 
-**现选 B：项目内主副本。** `.ccswitchx/skills/<id>/` 是项目真源，三个 agent 目录是渲染产物；安装/更新只写真源，渲染唯一入口是同步引擎。
+**现选 B：主副本 + 客户端真源（v3）。** 真源唯一可编辑，三个 agent 目录是渲染产物；安装/更新只写真源，渲染唯一入口是同步引擎。v3 只把真源与台账的**落点**从项目仓库挪进 store，模型本身没变（§0）。
 
 考虑过的三种：
 
 - **A. 对等副本 + 项目 JSON 台账**（原选定，已实现为 v1 账本）：各 agent 目录互为副本，同步在项目内目录之间复制。仓库里只有一份内容，但代价是：真源里没有的 skill 落不进项目；「哪份是最新的」要靠 mtime 与基线推断；安装必须为每个目录单独落盘；与全局面板的「真源 → 落点」模型不一致，UI 无法对齐。
-- **B. 项目内主副本**（选定）：安装/更新/编辑逻辑与全局同构，UI 可直接复用；缺点见附录。
-- **C. 复用全局中央库**：`~/.ccswitchx/assets/skills` 做真源再下发到项目。会引入跨项目共享状态，和「项目仓库即真源、不需要跨机器同步」冲突。仍不选。
+- **B. 主副本**（选定，v3 起真源在 store）：安装/更新/编辑逻辑与全局同构，UI 可直接复用；缺点见附录。
+- **C. 复用全局中央库**：`~/.ccswitchx/assets/skills` 做真源再下发到项目。会引入跨项目共享状态（多个项目共用同一份 skill），和「每个项目各管各的」冲突。仍不选；v3 的 `local/projects/<id>/` 是**每个项目各存一份**，不共用。
 
 ### §4 附录：原反对 B 的理由与缓解
 
-原理由：仓库里会同时出现 `.ccswitchx/skills` 和 `.claude/skills` 两份内容，和「项目已有 git 管理的 skills」冲突。
+原理由（已由 v3 消解）：仓库里会同时出现 `.ccswitchx/skills` 和 `.claude/skills` 两份内容，和「项目已有 git 管理的 skills」冲突。v3 把真源搬进 store 后，项目里只剩渲染产物。
 
 接受该代价的理由：A 模型下「项目里安装新 skill」在架构上走不通（同步源只能是项目内另一个目录），且与全局面板的语义差异让 UI 无法对齐。
 
 缓解措施：
 
 1. agent 目录在文档与 UI 上一律称「渲染产物」，明确可随时删除重生成；真源是唯一可编辑副本。
-2. 目录指纹跳过点开头条目、空 map 不序列化、键序稳定，压 git diff 噪音。
-3. 迁移**只新建文件**，不改动任何已有 agent 目录的字节；apply 前展示「会在你仓库里新建哪些文件」的完整清单。
+2. 目录指纹跳过点开头条目、空 map 不序列化、键序稳定，压台账 diff 噪音。
+3. 迁移（含 v1→v2 与 v2→v3 两段）**只新建文件**，不改动任何已有 agent 目录的字节；v2→v3 搬迁在删旧目录前先备份、再逐项比对哈希。
 4. 不提供任何 git 介入（不改 `.gitignore`、不代为提交）。
 
 ## 5. 用户体验
@@ -83,7 +105,7 @@
 - **选中项目即切到项目范围**，不再单独提供范围分段按钮；切回全局点首行「全局配置」。
 - 勾只在「项目范围且该项目为当前项」时显示，保证同时只有一项处于选中态。
 - 添加重复项目时直接定位到已有项，不新增。
-- 移除项目只从客户端注册表移除，不删除项目文件，也不删除 `.ccswitchx/`；确认文案写明。
+- 移除项目只从客户端注册表移除，不删除项目文件，也不删除 store 里的 `local/projects/<id>/`（重新添加即可接上）；确认文案写明。
 - 项目路径失效时，行内显示「路径不存在」，提供「重新定位」和「移除」。
 - 菜单弹层是 portal 挂到 `document.body` 的，判定「点到外面」时必须把弹层内的 pointerdown 排除，否则菜单项的 click 收不到。
 
@@ -97,10 +119,11 @@
 ### 5.3 项目 Skills 面板（与全局同构）
 
 - 顶部：项目名、路径、「打开文件夹」、「立即同步」、自动同步开关、刷新。
+- 顶部横幅（v3）：布局为 `Hybrid` 时给出「以客户端为准 / 以项目为准」两个裁决按钮（被覆盖的一侧先备份）；`Foreign` 说明旧目录里有陌生条目、提供显式清理；`RedundantLegacy` 提供清理入口。
 - 视图 tab：已安装（带数量）/ 发现（懒挂载后保持隐藏，不重复拉取）。
 - 主区矩阵：
   - 行：项目真源里的 skill ∪ 各 agent 目录里出现的 skill（后者标 `untracked`）。
-  - 列：按**物理目录**合并 —— Claude Code → `.claude/skills`；Qoder / Qoder CN → `.qoder/skills`；Codex / Gemini CLI / Pi → `.agents/skills`。列头显示目录 key 与实际使用该目录的 agent 名称；只显示 Settings 里启用的 agent 对应的列。
+  - 列：按 **agent** 展开，与全局面板一致（`AgentGlyph` 图标 + 计数，不写文字名），一个 agent 一列。Claude Code → `.claude/skills`；Qoder / Qoder CN → `.qoder/skills`；Codex / Gemini CLI / Pi → `.agents/skills`（共享同一物理目录的 agent 两列状态恒定相同，列头 `title` 写明共享关系）。只显示 Skill 能力支持的 agent；台账 `targets` 里已停用 agent 的目录仍要出列，否则用户没法取消它。
   - 单元格状态六值：`absent` 待部署 / `present` 已同步 / `stale` 真源已更新 / `edited` 外部已改 / `untracked` 未跟踪 / `unavailable` 不可用（含未实测）。
   - 真源自身单独一个徽标：账本记着有、磁盘上没有 → `canonicalMissing`，只能由显式 purge 处置。
   - 勾选表示该目录是否为渲染目标；取消勾选只写回 `targets` 并保留文件（该副本从此按未跟踪处理）。
@@ -149,9 +172,12 @@
 - 注册表不进 assets、不参与 Git 同步、不进备份快照。
 - `add_project` 校验：目录必须存在；拒绝 home 本身、storeRoot 内部、任何用户级 agent 配置根内部；拒绝重复路径；允许嵌套项目与没有 git 的目录，UI 提示父子项目可能重复扫描。
 
-### 6.2 项目状态（随项目仓库提交）
+### 6.2 项目状态（v3：住在客户端 store）
 
-路径：`<project>/.ccswitchx/skills.json`，`version: 2`
+路径：`<storeRoot>/local/projects/<project-id>/skills.json`，`version: 2`
+同目录的 `layout.json` 记录布局版本（当前 3）与来路，是「已用上新布局」的戳记。
+
+台账 `version` 在 v3 **保持 2**：它只记目录内相对路径与目录 key，与「真源住在哪」无关；升 version 会打断 v1→v2 迁移器的幂等闸。布局用独立的一条轴表达，两条轴交叉覆盖「两边都有」的半状态。
 
 ```json
 {
@@ -188,8 +214,8 @@
 - `lastOp.action`：`render | delete | adopt | targets | purge | migrate`。
 - `source` 可选。`treeHash` 语义钉死为「安装/更新那一刻**上游候选目录**的 `compute_dir_hash`」，与全局 `SkillMeta.contentHash/latestHash` 同算法，**不得**与 `canonical.treeHash` / `dirs[*].treeHash` 互比（两套哈希函数格式不同：前者裸 hex、跳过点文件；后者 `sha256:` 前缀、清单哈希）。
 - 不存绝对路径；mtime 不持久化，只在冲突时用于推荐。
-- 键按稳定顺序序列化，原子写，减少 git diff 噪音。
-- JSON 损坏显式报错，不当作空表；`version` 高于本程序支持的版本 → 明确报错要求升级，不按旧模型解释。
+- 键按稳定顺序序列化，原子写。v3 起台账不再进项目仓库，`git diff` 噪音不再是约束，但稳定键序仍保留（备份可比对、人眼可读）。
+- JSON 损坏显式报错，不当作空表；`version` 高于本程序支持的版本 → 明确报错要求升级，不按旧模型解释。`layout.json` 同理（§7.6）。
 - 提供「重建基线（会丢失删除记录）」的显式操作。
 
 ### 6.3 项目级 agent 落点
@@ -211,8 +237,8 @@
 
 ### 6.5 本机缓存与备份
 
-- 检查状态：`<storeRoot>/local/project-skill-checks/<projectId>.json`（`updateAvailable` / `latestHash` / `lastCheckedAt` / `lastCheckError`）。`local/` 已在 store 的 `.gitignore` 内，天然不同步、不进备份快照。缺失按空表处理。
-- 备份：`<storeRoot>/backups/projects/<projectId>/<timestampMillis>/{dirKey|canonical|ledger}/<skillId>/`，其中 `canonical` 是真源备份、`ledger` 是整个 `skills.json` 的备份（迁移前必做）。
+- 检查状态：`<storeRoot>/local/project-skill-checks/<projectId>.json`（`updateAvailable` / `latestHash` / `lastCheckedAt` / `lastCheckError`）。缺失按空表处理。
+- 备份：`<storeRoot>/backups/projects/<projectId>/<timestampMillis>/{dirKey|canonical|ledger|legacy|store-before-legacy}/<skillId>/`，其中 `canonical` 是真源备份、`ledger` 是整个 `skills.json` 的备份（迁移前必做）、`legacy` 是 v2→v3 搬迁前对项目里 `.ccswitchx/` 的整份快照、`store-before-legacy` 是用户选「以项目为准」时对 store 侧的整份快照。
 
 ## 7. 同步算法
 
@@ -221,7 +247,7 @@
 1. 读注册表，规范化项目根；不存在则报错。
 2. 取 Settings 启用的 agent，映射到目录 key；同一物理目录只扫一次。
 3. 扫每个目录下的子目录：含 `SKILL.md` 才视为 skill；计算指纹；链接目录记为不可解析并告警。
-4. 另扫 `<project>/.ccswitchx/skills/` 得真源状态（不进落点 key 空间）。
+4. 另扫 `<storeRoot>/local/projects/<id>/skills/` 得真源状态（不进落点 key 空间）。
 5. 取真源 ∪ 各目录的 skill ID 并集，读 `skills.json` 作基线。
 
 ### 7.2 差异分类（两轴）
@@ -259,17 +285,17 @@
 
 ### 7.5 安装 / 更新 / 卸载 / 编辑
 
-- 安装：复用 `skill_source` 的预览/下载/解压（预览只读，staging 留在 store 卷）；**提交 staging 必须落在 `<project>/.ccswitchx/skills/` 内**（与真源同卷，项目可能在另一块盘，跨卷 rename 会失败）；先逐个校验渲染目标可写，再写任何文件；写进真源 → 写 JSON 条目（`targets`、`source`、`dirs` 基线 absent）→ 交给同步引擎渲染。渲染唯一入口永远是同步。
-- 项目真源**不写 `.meta.json`**：既污染仓库，又会让每次检查都改指纹从而触发全目标重渲染。检查状态只进本机缓存。
+- 安装：复用 `skill_source` 的预览/下载/解压（预览只读）；**提交 staging 落在 store 卷的真源根内**，与真源同卷，跨卷 rename 不会发生；先逐个校验渲染目标可写，再写任何文件；写进真源 → 写 JSON 条目（`targets`、`source`、`dirs` 基线 absent）→ 交给同步引擎渲染。渲染唯一入口永远是同步。
+- 项目真源**不写 `.meta.json`**：既会让每次检查都改指纹从而触发全目标重渲染，也和「真源里只有 skill 内容」的约定冲突。检查状态只进本机缓存。
 - 更新：仅 GitHub 来源，用 `compute_dir_hash` 与上游比较；只写真源（先备份真源），不直接写 target。每个 target 仍等于基线才渲染替换；有漂移的 target 列为冲突。
-- 编辑正文：写 `<project>/.ccswitchx/skills/<id>/SKILL.md`，只动这一个文件（附件保持不动）；校验 UTF-8 + ID 安全 + 写后回读字节一致；先备份真源。注意 `parse_and_validate` 对 Skill 是空实现，不能当安全闸。
+- 编辑正文：写 `<storeRoot>/local/projects/<id>/skills/<id>/SKILL.md`，只动这一个文件（附件保持不动）；校验 UTF-8 + ID 安全 + 写后回读字节一致；先备份真源。注意 `parse_and_validate` 对 Skill 是空实现，不能当安全闸。
 - 收进真源：把某个 agent 目录的当前字节写进真源（先备份旧真源），保留 `targets`。
 - 移除单个副本：删指定 target 副本（先备份），从 `targets` 移除，基线置 `present:false`；**不删条目**（真源还在）。
 - 卸载：删真源与所有 target 副本（同一批次、同一时间戳、同一回滚圈，先备份），移除条目；有漂移时先确认。
 - 取消跟踪：从 `targets` 移除指定目录，保留文件，不更新该目录基线。
 - 被 Settings 停用的 agent 对应 target：保留在 `targets` 中标记 `unavailable`，同步跳过并提示；重新启用后先显示基线差异，由用户确认再同步。
 
-### 7.6 首次初始化与 v1 迁移
+### 7.6 首次初始化、v1 迁移与 v2→v3 布局搬迁
 
 - **新项目**：`add_project` 立即写 `version: 2` 的 `skills.json`，为扫描到的每个 skill 写 `dirs` 现状快照，`targets: []`、`canonical: absent`。只写这个 JSON，不复制、不删除任何内容；矩阵显示「未跟踪」，用户逐项「收进真源」。JSON 已存在时不覆盖。
 - **v1 项目迁移**：读路径保持纯读（不在 `load_ledger` 或列表命令里写盘，否则会破坏「只读命令不加写锁」「空跑不改仓库文件」两条不变量）；列表命令只**计算**迁移计划并返回给界面；落盘只由显式命令执行。
@@ -289,22 +315,25 @@
 
 - 迁移**只新建文件**，agent 目录一个字节都不改；旧 JSON 先备份；原子写后回读解析成功才算完成；任一步失败按记录的路径精确删除本次新建的真源目录并从备份还原 JSON；冲突未全部裁决就整体拒绝、不做部分写入；幂等（已存在且等 → skip，不等 → 拒），第二次跑计划为空。
 - `source` 继承 v1 条目，`kind == "github"` 时补 `treeHash = compute_dir_hash(被采纳的上游候选)`。
-- 多机共享同一仓库：另一台首次打开时基线落后 → 全部 `edited` → 不自动写盘，只提供批量「以真源为准」。
+- 多机共享同一仓库（v3 前）：另一台首次打开时基线落后 → 全部 `edited` → 不自动写盘，只提供批量「以真源为准」。v3 后台账不再随仓库走，这条只适用于尚未搬迁的存量项目。
 - 降级保护：v2 的 `version` 字段要求旧版本程序在读到 `version > 1` 时明确报错（backport），否则它会把渲染产物当对等副本互相复制。
+- **v2→v3 布局搬迁**（`services/project_relocate.rs`）：`layout.json` 存在 → 已迁完；旧目录与 store 都没有数据 → `Native`；两边都有数据 → 逐项比对，一致就补完，不一致判 `Hybrid` 让人裁决。搬迁顺序固定为「整份快照 → 逐 skill 复制 + 台账回读 → 逐项哈希校验 → 写 `layout.json` → 三条件齐全才删旧目录」。旧目录里有陌生条目时数据照搬、目录保留（`Foreign`）；`layout.json` 版本高于本程序 → 所有读写命令直接报错。
 
 ## 8. 后端改动
 
-- `domain/project.rs`：`PROJECT_LEDGER_VERSION = 2`、`PROJECT_CANONICAL_RELATIVE`、`canonical_root`、`canonical_skill_dir`、`ProjectSkillEntry.canonical`、`strip_verbatim`、状态与差异类型。
+- `domain/project.rs`：`PROJECT_LEDGER_VERSION = 2`、`PROJECT_LAYOUT_VERSION = 3`、`ProjectPaths`（`resolve` 钉住 ID 安全、真源在 `local/projects` 之下、旧目录与 store 互不包含）、`canonical_skill_dir`、`ProjectSkillEntry.canonical`、`ProjectLayoutStatus`、`strip_verbatim`、状态与差异类型。
 - `domain/agent.rs`：项目落点映射；不改变用户级 `AgentPaths` 语义。
+- `store/mod.rs`：`projects_root` / `project_dir` / `project_backup_dir`；`init` 建 `local/projects`。
 - `store/projects.rs`：`local/projects.json` 读写、路径规范化、原子写。
 - `store/project_checks.rs`（新）：本机检查状态缓存的读写。
-- `services/project_scan.rs`：`scan` + `scan_canonical`、`tree_state`（跳点文件）、账本读写与版本闸、`ensure_baseline` 写 v2。
+- `services/project_scan.rs`：`scan` + `scan_canonical`、`tree_state`（跳点文件）、账本读写与版本闸、`ensure_baseline` 写 v2（旧布局存在时拒绝写空台账）。
+- `services/project_relocate.rs`（新，v3）：布局判定（`Native` / `Legacy` / `Hybrid` / `RedundantLegacy` / `Foreign` / `Unsupported`）、`auto` 自动搬迁、`resolve` 人工裁决（Store / Legacy 两条路都先备份）。
 - `services/project_registry.rs`：视图投影（`summary` 与全局 `AssetSummary` 字段对齐）、`selectable_dir_keys` 能力闸、`describe_skill` 优先读真源、`conflict_count` 真算。
 - `services/project_sync.rs`：`SyncSourceRef{Canonical,Dir}`、`plan_sync`（含 `allowed_dirs` 写入侧校验）、`apply_render` + `verify_render`、`apply_adopt`、`refresh_ledger`、`set_targets`、`remove_copy`、`uninstall`、`adopt`、`read_body`、`write_body`。
 - `services/project_migrate.rs`（新）：`plan_migration` / `apply_migration`。
 - `services/project_install.rs`（新）：`install_project_skill` / `import_project_skill_dir` / `create_project_skill`。
-- `services/skill_source.rs` / `skill_update.rs`：抽出 `SkillSink` / `UpdateSink`，让下载、校验、冲突策略可复用；项目分支不写中央 assets、不写 `.meta.json`、staging 与真源同卷。
-- `commands/projects.rs`：`list_projects` / `add_project` / `remove_project` / `touch_project` / `set_project_auto_sync` / `list_project_skills` / `sync_project_skills` / `set_project_skill_targets` / `remove_project_skill_copy` / `uninstall_project_skill` / `reveal_project_folder`，新增 `preview_project_skill_migration` / `migrate_project_skills` / `preview_project_skill_source` / `install_project_skill` / `install_discovered_project_skill` / `import_project_skill_dir` / `create_project_skill` / `read_project_skill_body` / `write_project_skill_body` / `adopt_project_skill` / `check_project_skill_updates` / `update_project_skills`。写命令一律 `project_ops` → `enter_write()` → 校验项目在注册表且路径存在；网络类命令额外 `begin_skill_job()`。
+- `services/skill_source.rs` / `skill_update.rs`：抽出 `SkillSink` / `UpdateSink`，让下载、校验、冲突策略可复用；项目分支不写中央 assets、不写 `.meta.json`、staging 与真源同卷（v3 起两者都在 store 卷上，与全局共用 staging 实现）。
+- `commands/projects.rs`：`list_projects` / `add_project` / `remove_project` / `touch_project` / `set_project_auto_sync` / `list_project_skills` / `sync_project_skills` / `set_project_skill_targets` / `remove_project_skill_copy` / `uninstall_project_skill` / `reveal_project_folder`，新增 `preview_project_skill_migration` / `migrate_project_skills` / `preview_project_skill_source` / `install_project_skill` / `install_discovered_project_skill` / `import_project_skill_dir` / `create_project_skill` / `read_project_skill_body` / `write_project_skill_body` / `adopt_project_skill` / `check_project_skill_updates` / `update_project_skills` / `resolve_project_layout`。所有项目命令先经 `registered_project_paths` 解析落点并触发自动搬迁；写命令一律 `project_ops` → `enter_write()` → 校验项目在注册表且路径存在；网络类命令额外 `begin_skill_job()`。
 - `state.rs`：项目互斥锁；不把项目状态塞进 `AppSettings`。
 - `error.rs`：`Project(String)`、`SyncConflict` 等。
 - `index/`：**不加表**，项目状态每次由 JSON + 文件系统现算；将来要加也必须可重建。
@@ -345,8 +374,9 @@ Rust 单测（全部 `tempfile` 临时 store + 临时项目根）：
 - `scripts/seed-ui-e2e.ps1 -Project` 铺项目沙箱，`scripts/drive-ui-e2e.cjs` 走「添加项目 → 收进真源 → 勾选两个目录 → 同步 → 搜索筛选 → 编辑正文 → 再同步」并逐张看截图。几点与最初写法不同，都是为了让断言真的成立：
   - 「添加项目…」开的是原生文件夹对话框，CDP 操作不了 —— driver 直接调同一条 `add_project` IPC，注册表 / 台账 / 能力闸仍全部由后端算。
   - 项目默认开着自动同步，勾完目标立刻铺盘；流程先关掉它，才验得到「勾选只改台账、同步才写盘」这条两步纪律。
-  - 已断言：收进真源只新建 `.ccswitchx/skills/probe`，原 `.claude/skills/probe` 字节不变；勾选两个目录后磁盘仍无变化；同步后两份产物与真源逐字相同；编辑正文只有真源先变，两份产物保持落后直到下一次同步；`.agents/` 全程没被创建。
+  - 已断言：收进真源只在客户端数据目录里新建 `skills/probe`，原 `.claude/skills/probe` 字节不变；勾选两个目录后磁盘仍无变化；同步后两份产物与真源逐字相同；编辑正文只有真源先变，两份产物保持落后直到下一次同步；`.agents/` 全程没被创建。
   - **迁移横幅没走 UI**：沙箱项目是新建的（直接 v2，无迁移可做），v1→v2 的迁移路径由 `project_migrate` 的 Rust 测试与 `#[ignore]` 集成测试覆盖。
+  - v3 的 v2→v3 搬迁由 `project_relocate` 的 Rust 单测覆盖（搬迁+删旧目录、陌生条目、内容分歧、崩溃残留补完、未来版本拒绝、搬迁后同步空跑），`#[ignore]` 集成测试只用临时 store + 临时项目，不再把本仓库当项目根。
 - 用户级配置的保护：`#[ignore]` 集成测试结尾用 `compute_dir_hash` 比对真实 `~/.claude/skills`、`~/.qoder-cn/skills` 与三个用户级配置文件的字节，证明项目级同步一格都没碰到 home。
 - 能力档位：`.claude/skills` 与 `.qoder/skills` 已有真机读取证据（`domain/project.rs` 注明日期与证据）；`.agents/skills` 本机取不到证（codex CLI 无 skills 概念、gemini 未安装、pi 报 Connection error），**继续 `verified: false`，测试全绿不升档**。
 
@@ -364,33 +394,35 @@ Rust 单测（全部 `tempfile` 临时 store + 临时项目根）：
 - P5：前端抽取（`6918f27` 筛选项 + `skillScope` 作用域适配器）。原计划的 `MatrixCells` / `SkillInstalledView` 未做，理由见 §9。
 - P6：项目面板接上全量能力（`0653cc1`）。
 - P7：集成测试扩段与真机取证（`c466c5e`、`52d6c4b`）；`.agents/skills` 本机取不到证，继续 `verified: false`。
+- P8（v3，2026-10-27）：真源与台账搬进 store（`ProjectPaths` 收敛落点）、存量 `.ccswitchx/` 自动搬迁与删除三重闸、矩阵列按 agent 展开且列头只显示图标、skills.sh 趋势改为独立页签、启动主题去掉跳变。
 - 后续：项目级 MCP 独立设计。其他资产的项目级支持不在本期。
 
 ## 12. 已定决策与实现者裁量
 
 已定（含 2026-10-26 修订）：
 
-- **项目内主副本（方案 B）**：`.ccswitchx/skills/<id>/` 是唯一可编辑真源，agent 目录是渲染产物。（原为「不做项目主副本」，由产品负责人推翻。）
+- **主副本（方案 B）**：真源是唯一可编辑副本，agent 目录是渲染产物。（原为「不做项目主副本」，由产品负责人推翻；v3 再把真源从项目仓库搬进客户端 store，见 §0。）
 - 侧栏选中项目即切项目范围；项目范围只有 Skills；其他资产置灰。
 - 新项目直接写 v2：`targets` 空、`canonical` absent，不复制内容；旧项目走显式迁移，迁移只新建文件。
 - 只有 `targets` 参与渲染；取消勾选保留文件；移除副本/卸载才删文件。
 - 真源变更可安全覆盖 `stale` 目标；`edited` 与 `untracked` 永不自动覆盖或删除。
 - **真源与所有 target 都消失才移除条目**（原「所有 target 删光即移除」在 B 方案下会制造孤儿真源，已改）。
-- 项目状态与真源随仓库提交，不存绝对路径；易变检查状态只存本机；来源记 `repo/branch/subpath/treeHash`。
+- v3：真源与台账住在 store 的 `local/projects/<id>/` 下，不随项目仓库提交、不参与跨设备同步；台账不存绝对路径；易变检查状态只存本机；来源记 `repo/branch/subpath/treeHash`。
+- v3：存量 `.ccswitchx/` 自动搬迁，先备份、逐项校验、三条件齐全才删旧目录；两边内容分歧时由用户显式裁决，被覆盖的一侧先备份。
 - 共享物理目录按「已在 Settings 启用的 reader agent 全部实测通过」才可作为目标；勾选侧与写入侧双重校验。
 - 项目级写入只复制，不 symlink/junction；不写 `.meta.json` 与归属标记文件。
 - 项目根拒绝 home、storeRoot 和用户级 agent 配置根内的路径。
 - 「从 cc-switch 导入」仅全局，不做项目版。
-- 安装 / 导入 / 新建**只落项目真源，不带渲染目标**：往仓库里的 agent 目录写文件必须由「勾选 + 同步」这一步显式发生。
-- 检查更新的结果只写本机 `local/project-skill-checks/<pid>.json`，绝不进随仓库提交的 `skills.json`；更新只换真源，渲染留给下一次同步。
+- 安装 / 导入 / 新建**只落项目真源，不带渲染目标**：往项目里的 agent 目录写文件必须由「勾选 + 同步」这一步显式发生。
+- 检查更新的结果只写本机 `local/project-skill-checks/<pid>.json`，绝不进台账；更新只换真源，渲染留给下一次同步。
+- v3：矩阵列按 agent 展开、列头只显示图标（与全局面板一致）；共享物理目录的 agent 两列状态联动，列头写明共享关系。
 - Skills 先行，MCP 后做。
 
 实现者可自行决定（写进实现计划即可）：
 
-- 共享目录的列头展示方式（多 agent 名称堆叠或合并文案）。
 - 自动同步的结果展示形式（结果条或 toast）。
 - 同步批次内动作顺序、备份保留数量。
-- 项目格子的具体视觉：实现期定为「占全局格子那一列宽（`w-9`），里面写状态文字 + 悬停说明」，不用全局的两态圆点 —— 六态里「已改（要人工裁决）」不能被压成一种颜色。（2026-10-27 定，真机截图已核对。）
+- 项目格子的具体视觉：实现期定为「占全局格子那一列宽（`w-9`），里面写状态文字 + 悬停说明」，不用全局的两态圆点 —— 六态里「已改（要人工裁决）」不能被压成一种颜色。（2026-10-27 定，真机截图已核对。）列头则与全局一致，只显示 agent 图标。
 
 ## 13. 项目级 MCP 边界（后续）
 

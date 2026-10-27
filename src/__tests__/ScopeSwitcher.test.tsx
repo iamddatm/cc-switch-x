@@ -63,6 +63,7 @@ beforeEach(() => {
     skills: [],
     conflictCount: 0,
     migration: null,
+    layout: { kind: "native" },
   });
 });
 

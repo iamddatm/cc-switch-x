@@ -127,6 +127,22 @@ description: 只给 Claude 写的那份 skill
 '@
   New-Item -ItemType Directory -Path (Join-Path $projectRoot "src") -Force | Out-Null
   Set-Content -Encoding utf8NoBOM -Path (Join-Path $projectRoot "README.md") -Value "# demo-project`n"
+
+  # 旧布局项目（v2）：真源与台账还在仓库里，登记时应当被搬进 store 并删掉 .ccswitchx/。
+  $legacyRoot = Join-Path $root "home/work/legacy-project"
+  New-Item -ItemType Directory -Path (Join-Path $legacyRoot ".claude/skills/probe") -Force | Out-Null
+  New-Item -ItemType Directory -Path (Join-Path $legacyRoot ".ccswitchx/skills/probe") -Force | Out-Null
+  Set-Content -Encoding utf8NoBOM -Path (Join-Path $legacyRoot ".claude/skills/probe/SKILL.md") -Value @'
+---
+name: probe
+description: 旧布局里的探针
+---
+
+旧布局正文。
+'@
+  Copy-Item (Join-Path $legacyRoot ".claude/skills/probe/SKILL.md") (Join-Path $legacyRoot ".ccswitchx/skills/probe/SKILL.md")
+  # targets 故意留空：迁移只验「搬字节 + 删旧目录」，不制造渲染冲突。
+  Set-Content -Encoding utf8NoBOM -Path (Join-Path $legacyRoot ".ccswitchx/skills.json") -Value '{"version":2,"updatedAt":"","skills":{"probe":{"targets":[],"canonical":{"present":true}}}}'
 }
 
 # 应用设置指到这个临时 store（跑完必须 -Restore 还原）
@@ -150,4 +166,7 @@ Set-Content -Encoding utf8NoBOM -Path $settingsPath -Value ($settings | ConvertT
 Write-Output "STORE=$store"
 Write-Output "SANDBOX=$sandbox"
 Write-Output "SETTINGS=$settingsPath"
-if ($Project) { Write-Output "PROJECT=$projectRoot" }
+if ($Project) {
+  Write-Output "PROJECT=$projectRoot"
+  Write-Output "LEGACY_PROJECT=$legacyRoot"
+}

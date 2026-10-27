@@ -3,17 +3,25 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ProjectSkillsPanel } from "../panels/ProjectSkillsPanel";
 import { api } from "../lib/api";
-import type { ProjectSkillView, ProjectSkillsView, ProjectView } from "../types";
+import { agentStatus } from "../test/agents";
+import type {
+  ProjectDirMeta,
+  ProjectSkillView,
+  ProjectSkillsView,
+  ProjectView,
+} from "../types";
 
 vi.mock("../lib/api", () => ({
   api: {
     listProjectSkills: vi.fn(),
+    listAgents: vi.fn(),
     revealProjectFolder: vi.fn(),
     setProjectSkillTargets: vi.fn(),
     syncProjectSkills: vi.fn(),
     removeProjectSkillCopy: vi.fn(),
     uninstallProjectSkill: vi.fn(),
     setProjectAutoSync: vi.fn(),
+    resolveProjectLayout: vi.fn(),
     migrateProjectSkills: vi.fn(),
     adoptProjectSkill: vi.fn(),
     readProjectSkillBody: vi.fn(),
@@ -50,21 +58,24 @@ function projectView(overrides: Partial<ProjectView> = {}): ProjectView {
   };
 }
 
-const CLAUDE_DIR = {
+/** 矩阵现在按 agent 出列，所以夹具必须带上 agentIds。 */
+const CLAUDE_DIR: ProjectDirMeta = {
   key: "claude",
   label: "Claude Code",
   relativePath: ".claude/skills",
-  agents: ["claude"],
+  agents: ["Claude Code"],
+  agentIds: ["claude"],
   verified: true,
-} as const;
+};
 
-const QODER_DIR = {
+const QODER_DIR: ProjectDirMeta = {
   key: "qoder",
   label: "Qoder",
   relativePath: ".qoder/skills",
-  agents: ["qoder"],
+  agents: ["Qoder"],
+  agentIds: ["qoder"],
   verified: true,
-} as const;
+};
 
 function viewWithOneSkill(
   skill: Partial<ProjectSkillView> = {},
@@ -72,10 +83,7 @@ function viewWithOneSkill(
 ): ProjectSkillsView {
   return {
     project: projectView(project),
-    dirs: [
-      { ...CLAUDE_DIR, agents: ["claude"] },
-      { ...QODER_DIR, agents: ["qoder"] },
-    ],
+    dirs: [CLAUDE_DIR, QODER_DIR],
     skills: [
       {
         id: "a",
@@ -83,8 +91,8 @@ function viewWithOneSkill(
         description: null,
         targets: [],
         dirs: {
-          claude: { ...CLAUDE_DIR, agents: ["claude"], state: "present" },
-          qoder: { ...QODER_DIR, agents: ["qoder"], state: "absent" },
+          claude: { ...CLAUDE_DIR, agents: ["Claude Code"], state: "present" },
+          qoder: { ...QODER_DIR, agents: ["Qoder"], state: "absent" },
         },
         source: null,
         lastOp: null,
@@ -95,11 +103,17 @@ function viewWithOneSkill(
     ],
     conflictCount: 0,
     migration: null,
+    layout: { kind: "native" },
   };
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // 矩阵列按 agent 展开，夹具里的 claude / qoder 两个目录要能对号入座。
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agentStatus({ id: "claude", displayName: "Claude Code" }),
+    agentStatus({ id: "qoder", displayName: "Qoder" }),
+  ]);
   vi.mocked(api.listProjectSkills).mockResolvedValue(viewWithOneSkill());
   vi.mocked(api.setProjectSkillTargets).mockResolvedValue(viewWithOneSkill().skills[0]);
   vi.mocked(api.syncProjectSkills).mockResolvedValue({
@@ -150,7 +164,6 @@ function viewWithRows(): ProjectSkillsView {
         key,
         {
           ...(key === "claude" ? CLAUDE_DIR : QODER_DIR),
-          agents: [key],
           state,
         },
       ]),
@@ -178,22 +191,7 @@ function viewWithRows(): ProjectSkillsView {
 test("renders project skill matrix with per-directory state", async () => {
   vi.mocked(api.listProjectSkills).mockResolvedValue({
     project: projectView(),
-    dirs: [
-      {
-        key: "claude",
-        label: "Claude Code",
-        relativePath: ".claude/skills",
-        agents: ["claude"],
-        verified: true,
-      },
-      {
-        key: "qoder",
-        label: "Qoder",
-        relativePath: ".qoder/skills",
-        agents: ["qoder"],
-        verified: true,
-      },
-    ],
+    dirs: [CLAUDE_DIR, QODER_DIR],
     skills: [
       {
         id: "code-review",
@@ -201,22 +199,8 @@ test("renders project skill matrix with per-directory state", async () => {
         description: "审查代码",
         targets: [],
         dirs: {
-          claude: {
-            key: "claude",
-            label: "Claude Code",
-            relativePath: ".claude/skills",
-            agents: ["claude"],
-            verified: true,
-            state: "present",
-          },
-          qoder: {
-            key: "qoder",
-            label: "Qoder",
-            relativePath: ".qoder/skills",
-            agents: ["qoder"],
-            verified: true,
-            state: "absent",
-          },
+          claude: { ...CLAUDE_DIR, state: "present" },
+          qoder: { ...QODER_DIR, state: "absent" },
         },
         source: null,
         lastOp: null,
@@ -226,6 +210,7 @@ test("renders project skill matrix with per-directory state", async () => {
     ],
     conflictCount: 0,
     migration: null,
+    layout: { kind: "native" },
   });
 
   render(<ProjectSkillsPanel project={projectView()} />);
@@ -233,6 +218,65 @@ test("renders project skill matrix with per-directory state", async () => {
   // 状态文字要看的是格子里那份，筛选下拉里也有同名选项。
   expect(screen.getByRole("checkbox", { name: "同步到 Claude Code" })).toHaveTextContent("已同步");
   expect(screen.getByRole("checkbox", { name: "同步到 Qoder" })).toHaveTextContent("无");
+  // 列头与全局一致：只有 agent 图标，不再排目录名文字。
+  expect(screen.getByRole("img", { name: "Claude Code" })).toBeInTheDocument();
+  expect(screen.getByRole("img", { name: "Qoder" })).toBeInTheDocument();
+});
+
+// 一个物理目录可能映射多个 agent（Qoder 与 Qoder CN 共用 .qoder/skills）。
+// 列按 agent 展开，两列指向同一份字节，勾任意一个改的是同一个渲染目标。
+test("one shared render directory still gives every agent its own column", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agentStatus({ id: "qoder", displayName: "Qoder" }),
+    agentStatus({ id: "qoder-cn", displayName: "Qoder CN" }),
+  ]);
+  const sharedDir: ProjectDirMeta = {
+    ...QODER_DIR,
+    label: "Qoder / Qoder CN",
+    agents: ["Qoder", "Qoder CN"],
+    agentIds: ["qoder", "qoder-cn"],
+  };
+  vi.mocked(api.listProjectSkills).mockResolvedValue({
+    ...viewWithOneSkill(),
+    dirs: [sharedDir],
+    skills: [{ ...viewWithOneSkill().skills[0], dirs: { qoder: { ...sharedDir, state: "absent" } } }],
+  });
+
+  render(<ProjectSkillsPanel project={projectView()} />);
+  expect(await screen.findByRole("checkbox", { name: /^同步到 Qoder（/ })).toBeInTheDocument();
+  expect(screen.getByRole("checkbox", { name: /^同步到 Qoder CN（/ })).toBeInTheDocument();
+});
+
+test("hybrid layout asks the user to pick which side wins", async () => {
+  vi.mocked(api.listProjectSkills).mockResolvedValue({
+    ...viewWithOneSkill(),
+    layout: { kind: "hybrid", collisions: ["code-review"] },
+  });
+  vi.mocked(api.resolveProjectLayout).mockResolvedValue({
+    status: { kind: "native" },
+    migrated: [],
+    legacyRemoved: true,
+    warnings: [],
+  });
+
+  render(<ProjectSkillsPanel project={projectView()} />);
+  expect(await screen.findByText(/内容不一致/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "以项目为准" }));
+  fireEvent.click(await screen.findByRole("button", { name: "覆盖客户端副本" }));
+  await waitFor(() =>
+    expect(api.resolveProjectLayout).toHaveBeenCalledWith("p1", "legacy"),
+  );
+});
+
+test("foreign entries in the old directory keep it and explain why", async () => {
+  vi.mocked(api.listProjectSkills).mockResolvedValue({
+    ...viewWithOneSkill(),
+    layout: { kind: "foreign", entries: ["notes.md"] },
+  });
+
+  render(<ProjectSkillsPanel project={projectView()} />);
+  expect(await screen.findByText(/notes\.md/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "删除旧目录" })).toBeInTheDocument();
 });
 
 test("shows empty state when project has no skills", async () => {
@@ -242,6 +286,7 @@ test("shows empty state when project has no skills", async () => {
     skills: [],
     conflictCount: 0,
     migration: null,
+    layout: { kind: "native" },
   });
 
   render(<ProjectSkillsPanel project={projectView()} />);
@@ -307,8 +352,8 @@ test("row menu removes a single copy without touching the other target", async (
         ...viewWithOneSkill().skills[0],
         targets: ["claude", "qoder"],
         dirs: {
-          claude: { ...CLAUDE_DIR, agents: ["claude"], state: "present" },
-          qoder: { ...QODER_DIR, agents: ["qoder"], state: "present" },
+          claude: { ...CLAUDE_DIR, agents: ["Claude Code"], state: "present" },
+          qoder: { ...QODER_DIR, agents: ["Qoder"], state: "present" },
         },
       },
     ],
@@ -329,8 +374,8 @@ test("uninstall needs an explicit confirmation before deleting every copy", asyn
         ...viewWithOneSkill().skills[0],
         targets: ["claude", "qoder"],
         dirs: {
-          claude: { ...CLAUDE_DIR, agents: ["claude"], state: "present" },
-          qoder: { ...QODER_DIR, agents: ["qoder"], state: "present" },
+          claude: { ...CLAUDE_DIR, agents: ["Claude Code"], state: "present" },
+          qoder: { ...QODER_DIR, agents: ["Qoder"], state: "present" },
         },
       },
     ],
@@ -349,15 +394,15 @@ test("sync is disabled and explained while no project directory is verified", as
   vi.mocked(api.listProjectSkills).mockResolvedValue({
     ...viewWithOneSkill(),
     dirs: [
-      { ...CLAUDE_DIR, agents: ["claude"], verified: false },
-      { ...QODER_DIR, agents: ["qoder"], verified: false },
+      { ...CLAUDE_DIR, agents: ["Claude Code"], verified: false },
+      { ...QODER_DIR, agents: ["Qoder"], verified: false },
     ],
     skills: [
       {
         ...viewWithOneSkill().skills[0],
         dirs: {
-          claude: { ...CLAUDE_DIR, agents: ["claude"], verified: false, state: "present" },
-          qoder: { ...QODER_DIR, agents: ["qoder"], verified: false, state: "absent" },
+          claude: { ...CLAUDE_DIR, agents: ["Claude Code"], verified: false, state: "present" },
+          qoder: { ...QODER_DIR, agents: ["Qoder"], verified: false, state: "absent" },
         },
       },
     ],
@@ -422,12 +467,12 @@ test("toggling auto sync persists through setProjectAutoSync", async () => {
 });
 
 const migrationPlan = {
-  adopts: [{ skillId: "a", fromDir: "claude", files: [".ccswitchx/skills/a/SKILL.md"] }],
+  adopts: [{ skillId: "a", fromDir: "claude", files: ["skills/a/SKILL.md"] }],
   proposals: [
     {
       skillId: "b",
       fromDir: "claude",
-      files: [".ccswitchx/skills/b/SKILL.md"],
+      files: ["skills/b/SKILL.md"],
       candidates: ["claude"],
       defaultAdopt: false,
       reason: "该 skill 还没被勾选为渲染目标",
@@ -465,9 +510,9 @@ test("旧台账显示迁移横幅，冲突未裁决时不能提交", async () =>
 test("迁移清单只列会真正新建的文件", async () => {
   await openMigrationDialog();
 
-  expect(screen.getByText(".ccswitchx/skills/a/SKILL.md")).toBeInTheDocument();
-  expect(screen.getByText(".ccswitchx/skills.json")).toBeInTheDocument();
-  expect(screen.queryByText(".ccswitchx/skills/b/SKILL.md")).not.toBeInTheDocument();
+  expect(screen.getByText("skills/a/SKILL.md")).toBeInTheDocument();
+  expect(screen.getByText("skills.json")).toBeInTheDocument();
+  expect(screen.queryByText("skills/b/SKILL.md")).not.toBeInTheDocument();
   expect(screen.getByText(/台账里有 1 个条目在磁盘上已经不存在/)).toBeInTheDocument();
 });
 
@@ -503,8 +548,8 @@ test("stale 与 edited 两种状态分得开", async () => {
         ...viewWithOneSkill().skills[0],
         targets: ["claude", "qoder"],
         dirs: {
-          claude: { ...CLAUDE_DIR, agents: ["claude"], state: "stale" },
-          qoder: { ...QODER_DIR, agents: ["qoder"], state: "edited" },
+          claude: { ...CLAUDE_DIR, agents: ["Claude Code"], state: "stale" },
+          qoder: { ...QODER_DIR, agents: ["Qoder"], state: "edited" },
         },
       },
     ],
@@ -614,7 +659,7 @@ test("安装抽屉装进项目真源，且不带任何渲染目标", async () =>
   fireEvent.click(await screen.findByRole("button", { name: "添加 Skill" }));
   fireEvent.click(await screen.findByRole("menuitem", { name: "从来源安装…" }));
   // 去向说明必须是项目真源，不是中央库。
-  expect(await screen.findByText(/安装只写入项目真源/)).toBeInTheDocument();
+  expect(await screen.findByText(/安装只写入客户端里的项目真源/)).toBeInTheDocument();
 
   vi.mocked(open).mockResolvedValue("D:/skills");
   fireEvent.click(screen.getByRole("button", { name: "本地目录" }));
@@ -648,7 +693,7 @@ test("详情与编辑读写项目真源，不碰中央库", async () => {
   fireEvent.click(await screen.findByRole("button", { name: "查看 a" }));
   expect(await screen.findByText("# 正文")).toBeInTheDocument();
   // 项目专属的那一段：真源路径 + 已经渲染到哪些目录。
-  expect(screen.getByText(/\.ccswitchx\/skills\/a/)).toBeInTheDocument();
+  expect(screen.getByText(/skills\/a/)).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "编辑" }));
   fireEvent.change(screen.getByLabelText(/正文/), { target: { value: "# 新正文\n" } });
