@@ -363,7 +363,7 @@ export function SkillsPanel() {
         title="Skills"
         actions={
           <>
-            {updatesCount > 0 && !checking ? (
+            {updatesCount > 0 && !checking && (
               <Button
                 variant="primary"
                 onClick={() => askUpdate(updateIds)}
@@ -371,16 +371,16 @@ export function SkillsPanel() {
               >
                 全部更新（{updatesCount} 个）
               </Button>
-            ) : (
-              <Button
-                onClick={() => void checkUpdates()}
-                loading={checking}
-                disabled={items.length === 0 || updating || pendingDelete}
-              >
-                <RefreshCw size={14} aria-hidden />
-                检查更新
-              </Button>
             )}
+            {/* 检查更新常驻：查到更新后它不能被「全部更新」顶掉，否则重检只剩菜单里一个入口 */}
+            <Button
+              onClick={() => void checkUpdates()}
+              loading={checking}
+              disabled={items.length === 0 || updating || pendingDelete}
+            >
+              <RefreshCw size={14} aria-hidden />
+              检查更新
+            </Button>
             <Menu
               label="添加 Skill"
               trigger={
@@ -399,11 +399,6 @@ export function SkillsPanel() {
             <Menu
               label="Skills 的更多操作"
               items={[
-                {
-                  label: "重新检查更新",
-                  onSelect: () => void checkUpdates(),
-                  disabled: checking || items.length === 0,
-                },
                 { label: "从 cc-switch 导入", onSelect: () => setImporting(true) },
                 { label: "刷新列表", onSelect: refreshAll },
               ]}

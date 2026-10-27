@@ -613,7 +613,7 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
               />
               自动同步
             </label>
-            {updatesCount > 0 && !checking ? (
+            {updatesCount > 0 && !checking && (
               <Button
                 variant="primary"
                 onClick={() => setUpdateTargets(updateIds)}
@@ -621,16 +621,16 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
               >
                 全部更新（{updatesCount} 个）
               </Button>
-            ) : (
-              <Button
-                onClick={() => void checkUpdates()}
-                loading={checking}
-                disabled={rows.length === 0 || updating}
-              >
-                <RefreshCw size={14} aria-hidden />
-                检查更新
-              </Button>
             )}
+            {/* 与用户级面板同纪律：检查更新常驻，不被「全部更新」顶掉 */}
+            <Button
+              onClick={() => void checkUpdates()}
+              loading={checking}
+              disabled={rows.length === 0 || updating}
+            >
+              <RefreshCw size={14} aria-hidden />
+              检查更新
+            </Button>
             <Menu
               label="添加 Skill"
               trigger={
@@ -664,11 +664,6 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
                     void api
                       .revealProjectFolder(project.id)
                       .catch((e) => console.warn("打开项目文件夹失败：", e)),
-                },
-                {
-                  label: "重新检查更新",
-                  onSelect: () => void checkUpdates(),
-                  disabled: checking || rows.length === 0,
                 },
                 { label: "刷新列表", onSelect: () => void refresh() },
               ]}

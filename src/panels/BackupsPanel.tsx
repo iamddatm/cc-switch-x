@@ -571,7 +571,7 @@ export function BackupsPanel() {
                 </Select>
               </Field>
               <p className="pb-1.5 text-caption text-fg-3">
-                间隔为 0 时关闭自动快照；清理只作用于 snapshots 目录。
+                间隔为 0 时关闭自动快照；保留数只裁剪 snapshots 目录里的旧快照，不动写入留底与日志。
               </p>
             </div>
 
@@ -712,16 +712,6 @@ export function BackupsPanel() {
                   {git.remoteVerified ? "远端已验证" : "远端未验证"}
                 </Badge>
               )}
-              <span className="ml-auto flex gap-1.5">
-                <Button
-                  size="sm"
-                  onClick={() => void refresh()}
-                  loading={loading}
-                  title="刷新状态"
-                >
-                  <RefreshCw size={13} aria-hidden />
-                </Button>
-              </span>
             </div>
 
             {!git ? (
