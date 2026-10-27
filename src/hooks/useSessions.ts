@@ -8,8 +8,9 @@ import type {
 } from "../types";
 
 /** 一次加载足够覆盖本机会话的摘要；按项目分组需要完整数据，不能只取一页。 */
-const ALL_LIMIT = 2000;
-const SEARCH_LIMIT = 500;
+export const ALL_SESSIONS_LIMIT = 2000;
+/** 搜索命中的上限；项目范围在前端二次过滤，可能把目标项目的命中挤出列表。 */
+export const SESSION_SEARCH_LIMIT = 500;
 
 export interface SessionsState {
   sessions: SessionSummary[];
@@ -43,7 +44,7 @@ export function useSessions(): SessionsState {
     setError(null);
     try {
       const [nextSessions, nextProviders] = await Promise.all([
-        api.listSessions(undefined, undefined, 0, ALL_LIMIT),
+        api.listSessions(undefined, undefined, 0, ALL_SESSIONS_LIMIT),
         api.sessionProviders(),
       ]);
       setSessions(nextSessions);
@@ -62,7 +63,7 @@ export function useSessions(): SessionsState {
       const report = await api.scanSessions();
       setScanReport(report);
       const [nextSessions, nextProviders] = await Promise.all([
-        api.listSessions(undefined, undefined, 0, ALL_LIMIT),
+        api.listSessions(undefined, undefined, 0, ALL_SESSIONS_LIMIT),
         api.sessionProviders(),
       ]);
       setSessions(nextSessions);
@@ -84,7 +85,7 @@ export function useSessions(): SessionsState {
     setLoading(true);
     setError(null);
     try {
-      setHits(await api.searchSessions(query, SEARCH_LIMIT));
+      setHits(await api.searchSessions(query, SESSION_SEARCH_LIMIT));
     } catch (cause) {
       setError(String(cause));
     } finally {

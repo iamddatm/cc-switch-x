@@ -71,6 +71,27 @@ export function projectOf(session: SessionSummary): string {
   return session.projectPath?.trim() ? session.projectPath : "未知项目";
 }
 
+/**
+ * 项目路径归一化，用于跨来源比较。
+ *
+ * 注册表里存的是 Rust `PathBuf` 的 Windows 可读写法（`D:\repos\ai\App`），而会话的
+ * `projectPath` 是各 provider 从会话文件的 `cwd` / `directory` 原样取来的字符串，
+ * 分隔符与盘符大小写都不保证一致；Windows 路径本身大小写不敏感，因此统一成
+ * 正斜杠 + 小写 + 无尾部斜杠后再比。长度 > 1 才去尾部斜杠，避免把根 `/` 变成空串。
+ */
+export function normalizeProjectPath(path: string): string {
+  const collapsed = path.trim().replace(/[\\/]+/g, "/").toLowerCase();
+  return collapsed.length > 1 ? collapsed.replace(/\/+$/, "") : collapsed;
+}
+
+/** 会话是否属于该项目：项目根本身或其下任意子目录；缺少 cwd 的会话不属于任何项目。 */
+export function isSessionInProject(session: SessionSummary, projectPath: string): boolean {
+  const root = normalizeProjectPath(projectPath);
+  if (!root || !session.projectPath?.trim()) return false;
+  const cwd = normalizeProjectPath(session.projectPath);
+  return Boolean(cwd) && (cwd === root || cwd.startsWith(`${root}/`));
+}
+
 /** 路径末尾的目录名；「未知项目」原样返回。 */
 export function projectName(project: string): string {
   if (project === "未知项目") return project;

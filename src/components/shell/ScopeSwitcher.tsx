@@ -6,7 +6,7 @@ import { byLastOpenedDesc } from "../../hooks/useProjects";
 import { Badge } from "../ui/Badge";
 import { Menu, type MenuItem } from "../ui/Menu";
 
-/** 侧栏顶部的项目选择器：选中项目即切到项目范围，选「全局配置」切回全局；项目范围只对 Skills 生效。 */
+/** 侧栏顶部的项目选择器：选中项目即切到项目范围，选「全局配置」切回全局；项目范围影响 Skills 与会话列表。 */
 export function ScopeSwitcher({
   scope,
   projects,

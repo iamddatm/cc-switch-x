@@ -2,7 +2,8 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
 import { api } from "../lib/api";
-import type { ProjectView } from "../types";
+import { agentStatus } from "../test/agents";
+import type { ProjectView, SessionSummary } from "../types";
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -31,10 +32,28 @@ const project: ProjectView = {
   exists: true,
 };
 
+function sessionRow(overrides: Partial<SessionSummary> = {}): SessionSummary {
+  return {
+    agentId: "claude",
+    sessionId: "s1",
+    title: "会话标题",
+    projectPath: project.path,
+    sourcePath: `${project.path}/s1.jsonl`,
+    createdAt: null,
+    updatedAt: Date.now(),
+    messageCount: 1,
+    parseError: null,
+    preview: null,
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   vi.mocked(api.listProjects).mockResolvedValue([]);
+  vi.mocked(api.listAgents).mockResolvedValue([]);
+  vi.mocked(api.listSessions).mockResolvedValue([]);
   vi.mocked(api.touchProject).mockResolvedValue(project);
   vi.mocked(api.listProjectSkills).mockResolvedValue({
     project,
@@ -141,4 +160,23 @@ test("注册表读不出来时必须说明原因，不能当成没有项目", as
 
   render(<App />);
   expect(await screen.findByText(/格式损坏/)).toBeInTheDocument();
+});
+
+test("选中项目后会话自动只看这个项目的记录", async () => {
+  vi.mocked(api.listProjects).mockResolvedValue([project]);
+  vi.mocked(api.listAgents).mockResolvedValue([agentStatus()]);
+  vi.mocked(api.listSessions).mockResolvedValue([
+    sessionRow({ sessionId: "in", title: "本项目会话" }),
+    sessionRow({ sessionId: "sub", title: "子目录会话", projectPath: `${project.path}\\web` }),
+    sessionRow({ sessionId: "out", title: "其他项目会话", projectPath: "D:\\repos\\other" }),
+  ]);
+
+  render(<App />);
+  await pickProject();
+  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+
+  expect(await screen.findByText("本项目会话")).toBeInTheDocument();
+  expect(screen.getByText("子目录会话")).toBeInTheDocument();
+  expect(screen.queryByText("其他项目会话")).not.toBeInTheDocument();
+  expect(screen.getByText("PddWorker · D:\\repos\\ai\\PddWorker")).toBeInTheDocument();
 });

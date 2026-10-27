@@ -26,7 +26,7 @@ import { SubagentsPanel } from "../../panels/SubagentsPanel";
 
 const SCOPE_STORAGE_KEY = "ccswitchx.scope";
 
-/** 项目范围只有 Skills 是项目级资产；停在这些 pane 上时自动跳到 Skills。 */
+/** 项目范围只有 Skills 是项目级资产；停在这些 pane 上时自动跳到 Skills。会话仍可见，但按当前项目过滤。 */
 const GLOBAL_ONLY_PANES = new Set<Pane>(["mcp", "prompt", "rule", "subagent", "hook"]);
 
 function ProjectEmptyState({ onAdd }: { onAdd: () => void }) {
@@ -93,7 +93,7 @@ export function AppShell() {
     rule: <RulesPanel />,
     subagent: <SubagentsPanel />,
     hook: <HooksPanel />,
-    sessions: <SessionsPanel />,
+    sessions: <SessionsPanel project={scope === "project" ? projects.active : null} />,
     agents: <AgentsPanel />,
     network: <NetworkPanel />,
     backup: <BackupsPanel />,
