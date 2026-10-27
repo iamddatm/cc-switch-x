@@ -15,8 +15,8 @@ pnpm dev                    # 只启动前端
 pnpm tauri dev              # 启动桌面应用
 pnpm build                  # tsc -b && vite build
 pnpm test                   # Vitest 全量
-pnpm test -- src/__tests__/RulesPanel.test.tsx   # 单个测试文件
-pnpm test -- -t "drift_banner"                  # 按名称过滤
+pnpm test src/__tests__/RulesPanel.test.tsx   # 单个测试文件
+pnpm test -t "drift_banner"                   # 按名称过滤
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml some_test_name
 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored
@@ -24,6 +24,7 @@ node scripts/check-release-version.mjs
 ```
 
 - `cargo check` / `cargo test` 前先跑 `pnpm build`：`tauri::generate_context!` 在编译期读取 `dist/`。
+- 过滤测试不要写成 `pnpm test -- ...`：`test` 脚本是 `vitest run`，`--` 会被 pnpm 吞掉，过滤参数失效、静默跑全量。
 - 没有独立 lint/format 脚本；TypeScript 检查由 `pnpm build` 的 `tsc -b` 覆盖。
 - Vitest 只收集 `src/**/*.test.{ts,tsx}`；`references/` 是 gitignore 的第三方参考仓库，不要放测试或作为构建输入。
 - `--ignored` 的导入测试依赖本机已安装 cc-switch，默认不在 CI 运行。
@@ -34,14 +35,15 @@ node scripts/check-release-version.mjs
 - `store/`：文本真源目录布局、原子写、备份、staging 与 `secrets.local.json`。
 - `index/`：SQLite 派生索引（assets / agent_state / runs / drift / sessions / FTS）；`AppState::init` 启动时全量重建 assets，`index.db` 可随时删除。
 - `adapters/`：各 agent 的渲染、键级合并、CLI 通道与归属台账；`ledger.rs` 记录「我们往哪个路径写了哪份字节」。
-- `services/`：`apply`（备份→写→回读→记录→失败整批回滚）、`drift`、`scan`、`import`、`assets`、`agents`、`skills_*`、`sessions`。
+- `services/`：`apply`（备份→写→回读→记录→失败整批回滚）、`drift`、`scan`、`import`、`assets`、`agents`、`sessions`、`settings`。Skill 三件套前缀是**单数** `skill_`（`skill_source` / `skill_update` / `skill_discovery`）；项目级 Skills 走 `project_registry` / `project_scan` / `project_install` / `project_migrate` / `project_sync`；备份子系统是 `backup`、`git_sync`（store root 本身是一个 git 仓库）、`cloud_backup`（WebDAV）。
 - `commands/`：薄 Tauri IPC 层；`state.rs` 持有 Store、Index、设置、secrets 与真实 home。
 - `sessions/`：各工具只读会话 provider 注册表；大文件解析走 `spawn_blocking`。
-- `net/`：GitHub 归档下载、ZIP 安全解压与代理配置；同步网络层由调用方放进 `spawn_blocking`，批量 Skill 任务用 `AppState::begin_skill_job` 互斥。
+- `net/`：GitHub 归档下载、ZIP 安全解压、代理配置与 WebDAV 客户端（`webdav.rs`）；同步网络层由调用方放进 `spawn_blocking`，批量 Skill 任务用 `AppState::begin_skill_job` 互斥。
 
 ## 前端（src）
 
-- `components/shell/AppShell.tsx` 按 `Pane` 切换面板；面板在 `panels/`，通用矩阵与表单组件在 `components/`。
+- `components/shell/AppShell.tsx` 按 `Pane` 切换面板。`panels/` 一类资产一个面板（Mcp / Rules / Prompts / Subagents / Hooks / Skills / ProjectSkills / Agents / Network / Backups / Sessions / Settings）；`components/` 下 `ui/` 是无业务原语、`shell/` 是骨架与 scope 切换、`assets/` 是共用的行与矩阵单元（`AssetRow` / `AgentColumnCells`）、其余按功能分（`skills` / `projects` / `prompts` / `mcp` / `sessions` / `agents` / `settings`）。
+- 用户级与项目级是两套真源与两套面板：`SkillsPanel` + `components/skills/` 管 `assets/skills/`，`ProjectSkillsPanel` + `components/projects/` 管 `<project>/.ccswitchx/`；改一边不会同步另一边，动手前先确认改的是哪一层。
 - 所有后端调用集中在 `lib/api.ts`（`invoke`），参数用 camelCase；`types.ts` 是前后端类型的单一来源。数据获取在 `hooks/`，mutation 后手动 `refresh()`，没有全局状态库。
 - 面板测试 mock `../lib/api`；能力表用 `test/agents.ts` 的 `capabilities()` 构造。用户可见文案用中文。
 
@@ -75,6 +77,8 @@ canonical 格式：MCP 为 JSON；Prompt / Rule 为 Markdown + YAML frontmatter�
 - **同时涉及 index 与 secrets 时，锁顺序固定为 index → secrets**；网络/批量任务不阻塞 UI 线程。
 - **ID 安全**：资产 ID 直接参与文件名，只允许 `[A-Za-z0-9._-]`，长度不超过 128；外部 ID 先经 `import::slug`。
 - **路径**：Windows 优先，一律 `PathBuf`；声明式落点以 `~/` 开头，经 `adapters::paths::expand_root` 展开。
+- **UI 精简**：面板只留能完成当前任务的控件；重复入口、无实际作用的装饰、说不清用途的元素一律清理。布局含义不清时重构该面板，而不是在旧结构上继续叠加。
+- **三侧体验**：每次迭代同时权衡用户（看得懂、点得动）、开发者（可读、可测、可维护）与 AI Agent（按本文即可正确定位与操作）三方体验。改动不得破坏现有功能：动手前先查清受影响的既有行为与测试，改后跑已有门禁验证。
 
 ## 测试与真机验证
 
