@@ -1,12 +1,12 @@
-import { useEffect, useState } from "react";
 import { AgentMatrix } from "../components/AgentMatrix";
+import { AssetDriftHeader } from "../components/assets/AssetDriftHeader";
 import {
   AssetEditorLayout,
   AssetEditorPane,
   AssetSourceList,
 } from "../components/assets/AssetEditor";
+import { useFileAssetEditor } from "../components/assets/useFileAssetEditor";
 import { useSourceScan } from "../components/assets/useSourceScan";
-import { DriftBanner } from "../components/DriftBanner";
 import { Input, Textarea } from "../components/ui/Input";
 import { Select } from "../components/ui/Select";
 import { useAgents } from "../hooks/useAgents";
@@ -30,48 +30,26 @@ export function RulesPanel() {
   const { agents, refresh: refreshAgents } = useAgents();
   const drift = useDrift();
   const scan = useSourceScan("rule", agents, (agentId) => api.scanRules(agentId), refresh);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [form, setForm] = useState<RuleForm>(EMPTY);
-  const [newId, setNewId] = useState("");
-  const [formError, setFormError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!selected || !items.some((item) => item.id === selected)) return;
-    void api
-      .readAsset("rule", selected)
-      .then((text) => {
-        setForm(parseRule(text));
-        setFormError(null);
-      })
-      .catch((e) => setFormError(String(e)));
-  }, [selected, items]);
-
-  const create = () => {
-    const id = newId.trim();
-    if (!id) return;
-    setSelected(id);
-    setForm({ ...EMPTY, name: id });
-    setNewId("");
-  };
-
-  const save = async () => {
-    if (!selected) return;
-    try {
-      await api.writeAsset("rule", selected, renderRule(form));
-      setFormError(null);
-      await refresh();
-    } catch (e) {
-      setFormError(String(e));
-    }
-  };
-
-  const remove = async () => {
-    if (!selected || !window.confirm(`删除真源里的规则 ${selected}？已落盘的文件要先在下面取消勾选。`))
-      return;
-    await api.deleteAsset("rule", selected);
-    setSelected(null);
-    await refresh();
-  };
+  const {
+    selected,
+    setSelected,
+    form,
+    setForm,
+    newId,
+    setNewId,
+    formError,
+    create,
+    save,
+    remove,
+  } = useFileAssetEditor<RuleForm>({
+    assetType: "rule",
+    items,
+    refresh,
+    empty: EMPTY,
+    parse: parseRule,
+    render: renderRule,
+    removeConfirm: (id) => `删除真源里的规则 ${id}？已落盘的文件要先在下面取消勾选。`,
+  });
 
   return (
     <AssetEditorLayout>
@@ -94,17 +72,7 @@ export function RulesPanel() {
         onSave={() => void save()}
         onDelete={() => void remove()}
         notSelectedHint="选择左侧规则进行编辑。"
-        header={
-          <>
-            <DriftBanner
-              drifts={selected ? drift.forAsset("rule", selected) : []}
-              busy={drift.busy}
-              onResolve={drift.resolve}
-              onRescan={() => void drift.rescan()}
-            />
-            {drift.error && <p className="mb-2 text-caption text-danger-text">{drift.error}</p>}
-          </>
-        }
+        header={<AssetDriftHeader assetType="rule" selected={selected} drift={drift} />}
       >
         <div className="space-y-2 text-body">
           <label className="block">

@@ -1,12 +1,12 @@
-import { useEffect, useState } from "react";
 import { AgentMatrix } from "../components/AgentMatrix";
+import { AssetDriftHeader } from "../components/assets/AssetDriftHeader";
 import {
   AssetEditorLayout,
   AssetEditorPane,
   AssetSourceList,
 } from "../components/assets/AssetEditor";
+import { useFileAssetEditor } from "../components/assets/useFileAssetEditor";
 import { useSourceScan } from "../components/assets/useSourceScan";
-import { DriftBanner } from "../components/DriftBanner";
 import { Input, Textarea } from "../components/ui/Input";
 import { useAgents } from "../hooks/useAgents";
 import { useAssets } from "../hooks/useAssets";
@@ -40,47 +40,26 @@ export function SubagentsPanel() {
     (agentId) => api.scanSubagents(agentId),
     refresh,
   );
-  const [selected, setSelected] = useState<string | null>(null);
-  const [form, setForm] = useState<SubagentForm>(EMPTY);
-  const [newId, setNewId] = useState("");
-  const [formError, setFormError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!selected || !items.some((item) => item.id === selected)) return;
-    void api
-      .readAsset("subagent", selected)
-      .then((text) => {
-        setForm(parseSubagent(text));
-        setFormError(null);
-      })
-      .catch((e) => setFormError(String(e)));
-  }, [selected, items]);
-
-  const create = () => {
-    const id = newId.trim();
-    if (!id) return;
-    setSelected(id);
-    setForm({ ...EMPTY, name: id });
-    setNewId("");
-  };
-
-  const save = async () => {
-    if (!selected) return;
-    try {
-      await api.writeAsset("subagent", selected, renderSubagent(form));
-      setFormError(null);
-      await refresh();
-    } catch (e) {
-      setFormError(String(e));
-    }
-  };
-
-  const remove = async () => {
-    if (!selected || !window.confirm(`删除真源里的子代理 ${selected}？`)) return;
-    await api.deleteAsset("subagent", selected);
-    setSelected(null);
-    await refresh();
-  };
+  const {
+    selected,
+    setSelected,
+    form,
+    setForm,
+    newId,
+    setNewId,
+    formError,
+    create,
+    save,
+    remove,
+  } = useFileAssetEditor<SubagentForm>({
+    assetType: "subagent",
+    items,
+    refresh,
+    empty: EMPTY,
+    parse: parseSubagent,
+    render: renderSubagent,
+    removeConfirm: (id) => `删除真源里的子代理 ${id}？`,
+  });
 
   return (
     <AssetEditorLayout>
@@ -102,17 +81,7 @@ export function SubagentsPanel() {
         onSave={() => void save()}
         onDelete={() => void remove()}
         notSelectedHint="选择左侧子代理进行编辑。"
-        header={
-          <>
-            <DriftBanner
-              drifts={selected ? drift.forAsset("subagent", selected) : []}
-              busy={drift.busy}
-              onResolve={drift.resolve}
-              onRescan={() => void drift.rescan()}
-            />
-            {drift.error && <p className="mb-2 text-caption text-danger-text">{drift.error}</p>}
-          </>
-        }
+        header={<AssetDriftHeader assetType="subagent" selected={selected} drift={drift} />}
       >
         <div className="space-y-2 text-body">
           <label className="block">

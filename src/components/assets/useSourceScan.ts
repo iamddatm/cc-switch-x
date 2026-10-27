@@ -1,14 +1,12 @@
 import { useState } from "react";
-import { supported, type AgentStatus, type ScanReport } from "../../types";
+import { supportedAgents } from "./AgentColumnCells";
+import type { AgentStatus, ScanReport } from "../../types";
 import type { MatrixAsset } from "./matrix";
 
 /** 扫描按钮的文案要按类别说清落点是什么，兜底用类型本身。 */
 const KIND_LABEL: Partial<Record<MatrixAsset, string>> = {
   rule: "规则",
   subagent: "子代理",
-  hook: "hook",
-  skill: "Skill",
-  mcp: "MCP",
 };
 
 export interface SourceScanState {
@@ -35,7 +33,7 @@ export function useSourceScan(
   const [running, setRunning] = useState(false);
 
   const run = async () => {
-    const targets = agents.filter((agent) => agent.detected && supported(agent, assetType));
+    const targets = supportedAgents(agents, assetType).filter((agent) => agent.detected);
     setReport(null);
     setError(null);
     if (targets.length === 0) {

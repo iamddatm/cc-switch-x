@@ -5,6 +5,7 @@ import {
   AssetEditorPane,
   AssetSourceList,
 } from "../components/assets/AssetEditor";
+import { useFileAssetEditor } from "../components/assets/useFileAssetEditor";
 import { HooksSafety } from "../components/HooksSafety";
 import { Input, Textarea } from "../components/ui/Input";
 import { Select } from "../components/ui/Select";
@@ -26,23 +27,28 @@ const EMPTY: HookForm = {
 export function HooksPanel() {
   const { items, error, refresh } = useAssets("hook");
   const { agents, refresh: refreshAgents } = useAgents();
-  const [selected, setSelected] = useState<string | null>(null);
-  const [form, setForm] = useState<HookForm>(EMPTY);
-  const [newId, setNewId] = useState("");
-  const [formError, setFormError] = useState<string | null>(null);
+  const {
+    selected,
+    setSelected,
+    form,
+    setForm,
+    newId,
+    setNewId,
+    formError,
+    create,
+    save,
+    remove,
+  } = useFileAssetEditor<HookForm>({
+    assetType: "hook",
+    items,
+    refresh,
+    empty: EMPTY,
+    parse: parseHook,
+    render: renderHook,
+    removeConfirm: (id) => `删除真源里的 hook ${id}？`,
+  });
   const [foreign, setForeign] = useState<{ agent: string; count: number }[]>([]);
   const [gate, setGate] = useState<HooksNeedUserAction | null>(null);
-
-  useEffect(() => {
-    if (!selected || !items.some((item) => item.id === selected)) return;
-    void api
-      .readAsset("hook", selected)
-      .then((text) => {
-        setForm(parseHook(text));
-        setFormError(null);
-      })
-      .catch((e) => setFormError(String(e)));
-  }, [selected, items]);
 
   // 每个可写的 agent 都要问一次「有多少条不是我们写的」与功能开关状态
   useEffect(() => {
@@ -69,32 +75,6 @@ export function HooksPanel() {
       setGate(null);
     })();
   }, [agents]);
-
-  const create = () => {
-    const id = newId.trim();
-    if (!id) return;
-    setSelected(id);
-    setForm({ ...EMPTY, name: id });
-    setNewId("");
-  };
-
-  const save = async () => {
-    if (!selected) return;
-    try {
-      await api.writeAsset("hook", selected, renderHook(form));
-      setFormError(null);
-      await refresh();
-    } catch (e) {
-      setFormError(String(e));
-    }
-  };
-
-  const remove = async () => {
-    if (!selected || !window.confirm(`删除真源里的 hook ${selected}？`)) return;
-    await api.deleteAsset("hook", selected);
-    setSelected(null);
-    await refresh();
-  };
 
   return (
     <AssetEditorLayout>
