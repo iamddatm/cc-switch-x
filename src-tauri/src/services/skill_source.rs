@@ -6,6 +6,7 @@
 use crate::adapters::skills::{self, Deployed, RefreshOutcome, Removed};
 use crate::domain::agent::{builtin_agents, AgentDescriptor};
 use crate::domain::skill_meta::{read_meta, write_meta, SkillMeta, SkillSourceKind};
+use crate::domain::project::ProjectPaths;
 use crate::domain::{AssetKind, AssetType};
 use crate::error::AppError;
 use crate::import::mcp::ConflictPolicy;
@@ -545,13 +546,15 @@ pub fn install_discovered<F: RepoFetcher>(
 
 /// 安装目的：中央库（用户级真源）或某个项目的真源。
 ///
-/// 两者只差四件事，其余流程（预览、下载、校验、暂存、换目录）完全共用：
-/// 1. 目录怎么算：`assets/skills/<id>` vs `<project>/.ccswitchx/skills/<id>`。
+/// 两者只差三件事，其余流程（预览、下载、校验、暂存、换目录）完全共用：
+/// 1. 目录怎么算：`assets/skills/<id>` vs `local/projects/<pid>/skills/<id>`。
 /// 2. 备份放哪：`backups/<ms>/skills/…` vs `backups/projects/<pid>/<ms>/canonical/<id>`。
-/// 3. 提交用的暂存目录必须**与目的同卷**（`replace_dir` 靠 rename）：项目在另一块盘时
-///    用 store 的 staging 会直接失败，所以项目分支把暂存放进真源目录内部。
-/// 4. 写不写 `.meta.json`：项目真源**不写**。它随仓库提交，既污染仓库，又会让每次
-///    检查更新都改变目录指纹、把全部渲染目标刷成「待更新」。检查状态只存本机缓存。
+/// 3. 写不写 `.meta.json`：项目真源**不写**。它会带着项目指纹信息落进客户端数据，
+///    既让每次检查更新都改变目录指纹、把全部渲染目标刷成「待更新」，又没必要 ——
+///    来源与基线都记在台账 `skills.json` 里，检查状态只存本机缓存。
+///
+/// 暂存目录两侧都用 store 的 `state/staging`：v3 起项目真源也在 store 卷上，
+/// `replace_dir` 的 rename 前提天然成立，不再需要往目的目录里塞临时目录。
 pub enum SkillSink<'a> {
     Store {
         store: &'a Store,
@@ -559,8 +562,7 @@ pub enum SkillSink<'a> {
     },
     Project {
         store: &'a Store,
-        project_root: &'a Path,
-        project_id: &'a str,
+        paths: &'a ProjectPaths,
         timestamp: i64,
     },
 }
@@ -578,57 +580,27 @@ impl<'a> SkillSink<'a> {
     pub fn entry_dir(&self, id: &str) -> Result<PathBuf, AppError> {
         match self {
             SkillSink::Store { store, .. } => Ok(store.entry_path(AssetType::Skill, id)?),
-            SkillSink::Project { project_root, .. } => {
-                crate::domain::project::canonical_skill_dir(project_root, id)
-            }
+            SkillSink::Project { paths, .. } => paths.canonical_skill_dir(id),
         }
     }
 
     /// 提交用的暂存目录：必须与 `entry_dir` 同卷（`replace_dir` 靠 rename）。
     /// `label` 只用于目录名，方便排查是哪一次写入留下的。
     pub fn staging(&self, label: &str) -> Result<PathBuf, AppError> {
-        match self {
-            SkillSink::Store { store, .. } => new_staging_dir(store, label),
-            SkillSink::Project { project_root, .. } => {
-                let root = crate::domain::project::canonical_root(project_root);
-                let path = root.join(format!(
-                    ".staging-{label}-{}-{}",
-                    self.timestamp_of(project_root),
-                    std::process::id()
-                ));
-                fs::create_dir_all(&path)?;
-                Ok(path)
-            }
-        }
-    }
-
-    fn timestamp_of(&self, _project_root: &Path) -> i64 {
-        match self {
-            SkillSink::Store { .. } => 0,
-            SkillSink::Project { timestamp, .. } => *timestamp,
-        }
+        new_staging_dir(self.store(), label)
     }
 
     /// 覆盖前的备份；返回实际落地的备份路径（没有可备份的内容时为 None）。
     pub fn backup(&self, id: &str) -> Result<Option<PathBuf>, AppError> {
         match self {
             SkillSink::Store { store, .. } => Ok(store.backup_skill(id)?),
-            SkillSink::Project {
-                store,
-                project_root,
-                project_id,
-                timestamp,
-            } => {
-                let source = crate::domain::project::canonical_skill_dir(project_root, id)?;
+            SkillSink::Project { store, paths, timestamp } => {
+                let source = paths.canonical_skill_dir(id)?;
                 if !source.is_dir() {
                     return Ok(None);
                 }
                 let target = store
-                    .root()
-                    .join("backups")
-                    .join("projects")
-                    .join(*project_id)
-                    .join(timestamp.to_string())
+                    .project_backup_dir(&paths.id, *timestamp)?
                     .join("canonical")
                     .join(id);
                 if let Some(parent) = target.parent() {

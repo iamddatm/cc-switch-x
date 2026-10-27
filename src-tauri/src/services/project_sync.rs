@@ -1,5 +1,6 @@
 use crate::domain::project::{
-    ProjectDirState, ProjectLedger, ProjectSkillEntry, ProjectSkillOp, PROJECT_SKILL_DIRS,
+    ProjectDirState, ProjectLedger, ProjectPaths, ProjectSkillEntry, ProjectSkillOp,
+    PROJECT_SKILL_DIRS,
 };
 use crate::error::AppError;
 use crate::services::project_scan::{self, ProjectScan};
@@ -273,8 +274,8 @@ fn spec_relative_path(dir: &str) -> Option<&'static str> {
         .map(|spec| spec.relative_path)
 }
 
-/// 项目内的 skill 目录：目录 key 必须是已知落点，skill id 必须能当文件名，且不得越出项目根。
-fn skill_dir(project_root: &Path, dir: &str, skill_id: &str) -> Result<PathBuf, AppError> {
+/// 项目内的 skill 渲染目录：目录 key 必须是已知落点，skill id 必须能当文件名，且不得越出项目根。
+fn skill_dir(paths: &ProjectPaths, dir: &str, skill_id: &str) -> Result<PathBuf, AppError> {
     let relative = spec_relative_path(dir)
         .ok_or_else(|| AppError::Project(format!("未知的项目目录：{dir}")))?;
     if !is_safe_id(skill_id) {
@@ -282,8 +283,8 @@ fn skill_dir(project_root: &Path, dir: &str, skill_id: &str) -> Result<PathBuf, 
             "Skill ID 不能用作目录名：{skill_id}"
         )));
     }
-    let path = project_root.join(relative).join(skill_id);
-    if !path.starts_with(project_root) {
+    let path = paths.root.join(relative).join(skill_id);
+    if !path.starts_with(&paths.root) {
         return Err(AppError::Project(format!(
             "路径越出项目根：{}",
             path.display()
@@ -293,22 +294,20 @@ fn skill_dir(project_root: &Path, dir: &str, skill_id: &str) -> Result<PathBuf, 
 }
 
 impl SyncAction {
-    /// 本动作落到的目录：Adopt 写的是真源，其余写的是渲染目标。
-    pub fn target_path(&self, project_root: &Path) -> Result<PathBuf, AppError> {
+    /// 本动作落到的目录：Adopt 写的是真源（在 store 里），其余写的是渲染目标（在项目里）。
+    pub fn target_path(&self, paths: &ProjectPaths) -> Result<PathBuf, AppError> {
         match self.kind {
-            SyncKind::Adopt => crate::domain::project::canonical_skill_dir(project_root, &self.skill_id),
-            _ => skill_dir(project_root, &self.dir, &self.skill_id),
+            SyncKind::Adopt => paths.canonical_skill_dir(&self.skill_id),
+            _ => skill_dir(paths, &self.dir, &self.skill_id),
         }
     }
 
-    pub fn source_path(&self, project_root: &Path) -> Result<PathBuf, AppError> {
+    pub fn source_path(&self, paths: &ProjectPaths) -> Result<PathBuf, AppError> {
         match self.source.as_ref().ok_or_else(|| {
             AppError::Project(format!("{} 缺少渲染来源", self.skill_id))
         })? {
-            SyncSourceRef::Canonical => {
-                crate::domain::project::canonical_skill_dir(project_root, &self.skill_id)
-            }
-            SyncSourceRef::Dir(dir) => skill_dir(project_root, dir, &self.skill_id),
+            SyncSourceRef::Canonical => paths.canonical_skill_dir(&self.skill_id),
+            SyncSourceRef::Dir(dir) => skill_dir(paths, dir, &self.skill_id),
         }
     }
 
@@ -350,19 +349,15 @@ fn verify_render(source: &Path, target: &Path) -> Result<(), AppError> {
 
 fn backup_target(
     store: &Store,
-    project_id: &str,
+    paths: &ProjectPaths,
     timestamp: i64,
-    dir: &str,
+    slot: &str,
     skill_id: &str,
     target: &Path,
 ) -> Result<PathBuf, AppError> {
     let path = store
-        .root()
-        .join("backups")
-        .join("projects")
-        .join(project_id)
-        .join(timestamp.to_string())
-        .join(dir)
+        .project_backup_dir(&paths.id, timestamp)?
+        .join(slot)
         .join(skill_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -385,16 +380,15 @@ fn reject_link(path: &Path, what: &str) -> Result<(), AppError> {
 /// 备份 → 同父目录临时名 → rename → **回读校验**；失败当场还原。
 fn apply_render(
     store: &Store,
-    project_id: &str,
+    paths: &ProjectPaths,
     timestamp: i64,
-    project_root: &Path,
     action: &SyncAction,
     allowed_dirs: &[String],
 ) -> Result<(SyncOutcome, Applied), AppError> {
     if action.kind == SyncKind::Render {
         assert_writable_dir(&action.dir, allowed_dirs)?;
     }
-    let source = action.source_path(project_root)?;
+    let source = action.source_path(paths)?;
     reject_link(&source, "渲染来源")?;
     if !source.is_dir() {
         return Err(AppError::Project(format!(
@@ -403,7 +397,7 @@ fn apply_render(
         )));
     }
 
-    let target = action.target_path(project_root)?;
+    let target = action.target_path(paths)?;
     reject_link(&target, "渲染目标")?;
     let parent = target
         .parent()
@@ -419,7 +413,7 @@ fn apply_render(
     let backup = if existed {
         Some(backup_target(
             store,
-            project_id,
+            paths,
             timestamp,
             &slot,
             &action.skill_id,
@@ -478,12 +472,11 @@ fn apply_render(
 /// 是唯一能把未实测目录恢复原样的途径，挡下它反而留下删不掉的东西。
 fn apply_delete(
     store: &Store,
-    project_id: &str,
+    paths: &ProjectPaths,
     timestamp: i64,
-    project_root: &Path,
     action: &SyncAction,
 ) -> Result<(SyncOutcome, Applied), AppError> {
-    let target = action.target_path(project_root)?;
+    let target = action.target_path(paths)?;
     reject_link(&target, "删除目标")?;
     if !target.is_dir() {
         return Ok((
@@ -503,7 +496,7 @@ fn apply_delete(
     }
     let backup = backup_target(
         store,
-        project_id,
+        paths,
         timestamp,
         &action.dir,
         &action.skill_id,
@@ -528,11 +521,11 @@ fn apply_delete(
 
 /// 「两边都保留」：落败目录另存为 `<skill>-copy`（重名递增），不写入 targets。
 fn apply_preserve(
-    project_root: &Path,
+    paths: &ProjectPaths,
     skill_id: &str,
     dir: &str,
 ) -> Result<(SyncOutcome, Applied), AppError> {
-    let source = skill_dir(project_root, dir, skill_id)?;
+    let source = skill_dir(paths, dir, skill_id)?;
     reject_link(&source, "保留副本来源")?;
     let outcome = SyncOutcome {
         skill_id: skill_id.to_string(),
@@ -597,19 +590,18 @@ fn rollback(applied: &Applied) -> Result<(), AppError> {
 /// 因为 `targets` 可能来自旧版本、git 合并或手改的 JSON。
 pub fn sync_project(
     store: &Store,
-    project_id: &str,
-    project_root: &Path,
+    paths: &ProjectPaths,
     enabled_agent_ids: &[String],
     allowed_dirs: &[String],
     resolutions: &[Resolution],
 ) -> Result<SyncReport, AppError> {
-    let ledger = project_scan::load_ledger(project_root)?;
+    let ledger = project_scan::load_ledger(paths)?;
     let enabled_keys = project_scan::enabled_dir_keys(enabled_agent_ids);
     let enabled_names: Vec<String> = enabled_keys
         .iter()
         .map(|key| key.as_str().to_string())
         .collect();
-    let scan = project_scan::scan(project_root, &enabled_keys)?;
+    let scan = project_scan::scan(paths, &enabled_keys)?;
 
     let mut unavailable: Vec<String> = Vec::new();
     for entry in ledger.skills.values() {
@@ -759,14 +751,12 @@ pub fn sync_project(
 
     for step in &steps {
         let result = match step {
-            Step::Preserve { skill_id, dir } => apply_preserve(project_root, skill_id, dir),
+            Step::Preserve { skill_id, dir } => apply_preserve(paths, skill_id, dir),
             Step::Apply(action) => match action.kind {
                 SyncKind::Render | SyncKind::Adopt => {
-                    apply_render(store, project_id, timestamp, project_root, action, allowed_dirs)
+                    apply_render(store, paths, timestamp, action, allowed_dirs)
                 }
-                SyncKind::Delete | SyncKind::Purge => {
-                    apply_delete(store, project_id, timestamp, project_root, action)
-                }
+                SyncKind::Delete | SyncKind::Purge => apply_delete(store, paths, timestamp, action),
             },
         };
         match result {
@@ -798,14 +788,15 @@ pub fn sync_project(
         &applied_skills,
         &plan.refresh,
         &last_ops,
-        project_root,
+        paths,
         &now,
     ) {
         return Err(sync_error(error, rollback_all(&applied)));
     }
-    // 空跑（自动同步每次进项目都会来一轮）不该改仓库里要提交的文件。
+    // 空跑（自动同步每次进项目都会来一轮）不该改台账文件；台账不在仓库里了，
+    // 但「读一次就把磁盘现状写回去」仍然是多余的写入。
     if updated != ledger {
-        if let Err(error) = project_scan::save_ledger(project_root, &updated) {
+        if let Err(error) = project_scan::save_ledger(paths, &updated) {
             return Err(sync_error(error, rollback_all(&applied)));
         }
     }
@@ -833,7 +824,7 @@ fn refresh_ledger(
     applied_skills: &BTreeSet<String>,
     refresh: &[String],
     last_ops: &BTreeMap<String, (String, String)>,
-    project_root: &Path,
+    paths: &ProjectPaths,
     now: &str,
 ) -> Result<(), AppError> {
     let mut removed: Vec<String> = Vec::new();
@@ -841,16 +832,13 @@ fn refresh_ledger(
         let Some(entry) = ledger.skills.get_mut(skill_id) else {
             continue;
         };
-        entry.canonical =
-            project_scan::tree_state(&crate::domain::project::canonical_skill_dir(
-                project_root, skill_id,
-            )?)?;
+        entry.canonical = project_scan::tree_state(&paths.canonical_skill_dir(skill_id)?)?;
         let blocked = blocked_dirs(entry, scan, skill_id, unavailable);
         for target in entry.targets.clone() {
             if blocked.contains(&target) {
                 continue;
             }
-            let path = skill_dir(project_root, &target, skill_id)?;
+            let path = skill_dir(paths, &target, skill_id)?;
             let state = project_scan::tree_state(&path)?;
             entry.dirs.insert(target, state);
         }
@@ -885,7 +873,7 @@ fn refresh_ledger(
 /// 把用户自己的内容写成基线，下一轮就会认为它没被改过而直接用真源覆盖；留空基线，
 /// `plan_sync` 才会把它判成需要人工裁决而不是可以安全渲染。
 pub fn set_targets(
-    project_root: &Path,
+    paths: &ProjectPaths,
     skill_id: &str,
     targets: &[String],
     allowed_dirs: &[String],
@@ -905,7 +893,7 @@ pub fn set_targets(
         }
     }
 
-    let mut ledger = project_scan::load_ledger(project_root)?;
+    let mut ledger = project_scan::load_ledger(paths)?;
     let entry = ledger
         .skills
         .entry(skill_id.to_string())
@@ -920,19 +908,18 @@ pub fn set_targets(
         at: chrono::Utc::now().to_rfc3339(),
     });
     ledger.updated_at = chrono::Utc::now().to_rfc3339();
-    project_scan::save_ledger(project_root, &ledger)
+    project_scan::save_ledger(paths, &ledger)
 }
 
 /// 移除单个副本：先备份再删，从 targets 移除并把基线置为不存在。
 /// 真源还在就必须保留条目 —— 取消部署一个目录不等于卸载这个 skill。
 pub fn remove_copy(
     store: &Store,
-    project_id: &str,
-    project_root: &Path,
+    paths: &ProjectPaths,
     skill_id: &str,
     dir: &str,
 ) -> Result<SyncReport, AppError> {
-    let mut ledger = project_scan::load_ledger(project_root)?;
+    let mut ledger = project_scan::load_ledger(paths)?;
     let entry = ledger
         .skills
         .get_mut(skill_id)
@@ -951,9 +938,9 @@ pub fn remove_copy(
         dir: dir.to_string(),
         source: None,
     };
-    let (outcome, _record) = apply_delete(store, project_id, timestamp, project_root, &action)?;
+    let (outcome, _record) = apply_delete(store, paths, timestamp, &action)?;
 
-    let path = skill_dir(project_root, dir, skill_id)?;
+    let path = skill_dir(paths, dir, skill_id)?;
     let entry = ledger
         .skills
         .get_mut(skill_id)
@@ -965,7 +952,7 @@ pub fn remove_copy(
         at: chrono::Utc::now().to_rfc3339(),
     });
     ledger.updated_at = chrono::Utc::now().to_rfc3339();
-    project_scan::save_ledger(project_root, &ledger)?;
+    project_scan::save_ledger(paths, &ledger)?;
 
     Ok(SyncReport {
         outcomes: vec![outcome],
@@ -977,11 +964,10 @@ pub fn remove_copy(
 /// 卸载：从所有已跟踪副本删除（先备份），并移除账本条目。
 pub fn uninstall(
     store: &Store,
-    project_id: &str,
-    project_root: &Path,
+    paths: &ProjectPaths,
     skill_id: &str,
 ) -> Result<SyncReport, AppError> {
-    let mut ledger = project_scan::load_ledger(project_root)?;
+    let mut ledger = project_scan::load_ledger(paths)?;
     let entry = ledger
         .skills
         .get(skill_id)
@@ -1010,7 +996,7 @@ pub fn uninstall(
             dir: dir.clone(),
             source: None,
         };
-        match apply_delete(store, project_id, timestamp, project_root, &action) {
+        match apply_delete(store, paths, timestamp, &action) {
             Ok((outcome, record)) => {
                 outcomes.push(outcome);
                 applied.push(record);
@@ -1019,7 +1005,7 @@ pub fn uninstall(
         }
     }
     // 真源与副本在同一批次、同一回滚圈里删除：只删副本会留下没人认领的真源。
-    match apply_delete_canonical(store, project_id, timestamp, project_root, skill_id) {
+    match apply_delete_canonical(store, paths, timestamp, skill_id) {
         Ok(Some((outcome, record))) => {
             outcomes.push(outcome);
             applied.push(record);
@@ -1030,7 +1016,7 @@ pub fn uninstall(
 
     ledger.skills.remove(skill_id);
     ledger.updated_at = chrono::Utc::now().to_rfc3339();
-    if let Err(error) = project_scan::save_ledger(project_root, &ledger) {
+    if let Err(error) = project_scan::save_ledger(paths, &ledger) {
         return Err(sync_error(error, rollback_all(&applied)));
     }
 
@@ -1044,17 +1030,16 @@ pub fn uninstall(
 /// 删除项目真源目录（先备份）。真源不存在时返回 None，不算失败。
 fn apply_delete_canonical(
     store: &Store,
-    project_id: &str,
+    paths: &ProjectPaths,
     timestamp: i64,
-    project_root: &Path,
     skill_id: &str,
 ) -> Result<Option<(SyncOutcome, Applied)>, AppError> {
-    let target = crate::domain::project::canonical_skill_dir(project_root, skill_id)?;
+    let target = paths.canonical_skill_dir(skill_id)?;
     if !target.is_dir() {
         return Ok(None);
     }
     reject_link(&target, "删除真源")?;
-    let backup = backup_target(store, project_id, timestamp, "canonical", skill_id, &target)?;
+    let backup = backup_target(store, paths, timestamp, "canonical", skill_id, &target)?;
     std::fs::remove_dir_all(&target)?;
     Ok(Some((
         SyncOutcome {
@@ -1076,12 +1061,11 @@ fn apply_delete_canonical(
 /// 用于「项目里已有一份手工 skill，想让它受管」的场景；targets 保持不变。
 pub fn adopt(
     store: &Store,
-    project_id: &str,
-    project_root: &Path,
+    paths: &ProjectPaths,
     skill_id: &str,
     from_dir: &str,
 ) -> Result<SyncReport, AppError> {
-    let source = skill_dir(project_root, from_dir, skill_id)?;
+    let source = skill_dir(paths, from_dir, skill_id)?;
     if !source.join("SKILL.md").is_file() {
         return Err(AppError::Project(format!(
             "{from_dir} 里没有 SKILL.md，不能收进真源"
@@ -1095,11 +1079,11 @@ pub fn adopt(
         dir: from_dir.to_string(),
         source: Some(SyncSourceRef::Dir(from_dir.to_string())),
     };
-    let (outcome, record) = apply_render(store, project_id, timestamp, project_root, &action, &[])?;
+    let (outcome, record) = apply_render(store, paths, timestamp, &action, &[])?;
 
-    let written = crate::domain::project::canonical_skill_dir(project_root, skill_id)?;
+    let written = paths.canonical_skill_dir(skill_id)?;
     let ledger_result = (|| -> Result<(), AppError> {
-        let mut ledger = project_scan::load_ledger(project_root)?;
+        let mut ledger = project_scan::load_ledger(paths)?;
         let now = chrono::Utc::now().to_rfc3339();
         let entry = ledger.skills.entry(skill_id.to_string()).or_default();
         entry.canonical = project_scan::tree_state(&written)?;
@@ -1109,7 +1093,7 @@ pub fn adopt(
             at: now.clone(),
         });
         ledger.updated_at = now;
-        project_scan::save_ledger(project_root, &ledger)
+        project_scan::save_ledger(paths, &ledger)
     })();
     if let Err(error) = ledger_result {
         // 真源写了而账本没跟上，下一轮会把这份内容当成外来副本，必须回滚。
@@ -1128,8 +1112,8 @@ pub fn adopt(
 }
 
 /// 读项目真源的正文（应用内编辑用）。
-pub fn read_body(project_root: &Path, skill_id: &str) -> Result<String, AppError> {
-    let path = crate::domain::project::canonical_skill_dir(project_root, skill_id)?.join("SKILL.md");
+pub fn read_body(paths: &ProjectPaths, skill_id: &str) -> Result<String, AppError> {
+    let path = paths.canonical_skill_dir(skill_id)?.join("SKILL.md");
     if !path.is_file() {
         return Err(AppError::NotFound(format!(
             "项目真源里还没有该 skill：{skill_id}"
@@ -1143,12 +1127,11 @@ pub fn read_body(project_root: &Path, skill_id: &str) -> Result<String, AppError
 /// 备份 → 原子写 → 回读字节一致；渲染留给下一次同步。
 pub fn write_body(
     store: &Store,
-    project_id: &str,
-    project_root: &Path,
+    paths: &ProjectPaths,
     skill_id: &str,
     content: &str,
 ) -> Result<SyncReport, AppError> {
-    let dir = crate::domain::project::canonical_skill_dir(project_root, skill_id)?;
+    let dir = paths.canonical_skill_dir(skill_id)?;
     let path = dir.join("SKILL.md");
     let bytes = content.as_bytes();
     let timestamp = chrono::Utc::now().timestamp_millis();
@@ -1156,7 +1139,7 @@ pub fn write_body(
     if dir.is_dir() {
         reject_link(&dir, "真源目录")?;
         if path.is_file() {
-            backup_target(store, project_id, timestamp, "canonical", skill_id, &dir)?;
+            backup_target(store, paths, timestamp, "canonical", skill_id, &dir)?;
         }
     } else {
         std::fs::create_dir_all(&dir)?;
@@ -1167,7 +1150,7 @@ pub fn write_body(
         return Err(AppError::Project("真源回读与写入内容不一致".into()));
     }
 
-    let mut ledger = project_scan::load_ledger(project_root)?;
+    let mut ledger = project_scan::load_ledger(paths)?;
     let entry = ledger.skills.entry(skill_id.to_string()).or_default();
     entry.canonical = project_scan::tree_state(&dir)?;
     entry.last_op = Some(ProjectSkillOp {
@@ -1176,7 +1159,7 @@ pub fn write_body(
         at: chrono::Utc::now().to_rfc3339(),
     });
     ledger.updated_at = chrono::Utc::now().to_rfc3339();
-    project_scan::save_ledger(project_root, &ledger)?;
+    project_scan::save_ledger(paths, &ledger)?;
 
     Ok(SyncReport {
         outcomes: vec![SyncOutcome {
@@ -1230,12 +1213,20 @@ mod tests {
             project_registry::add_project(&self.store, &self.home, &self.root, agents).unwrap()
         }
 
+        /// v3 的三条落点。测试里项目根固定是 `root`，ID 由根路径算出，与 `add_project`
+        /// 写进注册表的那个一致，所以各辅助方法都能这样现算，不用把 id 一路传下去。
+        fn paths(&self) -> ProjectPaths {
+            let id = project_registry::project_id(&self.root);
+            ProjectPaths::resolve(self.store.root(), &id, &self.root).unwrap()
+        }
+
         /// 直接改账本，只用于铺测试数据；走正式入口请用 `set_targets`。
         fn mark_targets(&self, skill_id: &str, dirs: &[&str]) {
-            let mut ledger = project_scan::load_ledger(&self.root).unwrap();
+            let paths = self.paths();
+            let mut ledger = project_scan::load_ledger(&paths).unwrap();
             let entry = ledger.skills.entry(skill_id.to_string()).or_default();
             entry.targets = dirs.iter().map(|dir| dir.to_string()).collect();
-            project_scan::save_ledger(&self.root, &ledger).unwrap();
+            project_scan::save_ledger(&paths, &ledger).unwrap();
         }
 
         fn set_targets(&self, project_id: &str, skill_id: &str, dirs: &[&str]) {
@@ -1251,19 +1242,19 @@ mod tests {
             allowed: &[&str],
         ) -> Result<(), AppError> {
             set_targets(
-                &self.root,
+                &self.paths(),
                 skill_id,
                 &dirs.iter().map(|dir| dir.to_string()).collect::<Vec<_>>(),
                 &allowed.iter().map(|dir| dir.to_string()).collect::<Vec<_>>(),
             )
         }
 
-        fn remove_copy(&self, project_id: &str, skill_id: &str, dir: &str) {
-            remove_copy(&self.store, project_id, &self.root, skill_id, dir).unwrap();
+        fn remove_copy(&self, _project_id: &str, skill_id: &str, dir: &str) {
+            remove_copy(&self.store, &self.paths(), skill_id, dir).unwrap();
         }
 
-        fn uninstall(&self, project_id: &str, skill_id: &str) {
-            uninstall(&self.store, project_id, &self.root, skill_id).unwrap();
+        fn uninstall(&self, _project_id: &str, skill_id: &str) {
+            uninstall(&self.store, &self.paths(), skill_id).unwrap();
         }
 
         fn sync(&self, project_id: &str, resolutions: &[Resolution]) -> Result<SyncReport, AppError> {
@@ -1272,14 +1263,13 @@ mod tests {
 
         fn sync_allowed(
             &self,
-            project_id: &str,
+            _project_id: &str,
             allowed: &[&str],
             resolutions: &[Resolution],
         ) -> Result<SyncReport, AppError> {
             sync_project(
                 &self.store,
-                project_id,
-                &self.root,
+                &self.paths(),
                 &["claude".to_string(), "qoder".to_string()],
                 &allowed.iter().map(|dir| dir.to_string()).collect::<Vec<_>>(),
                 resolutions,
@@ -1288,13 +1278,18 @@ mod tests {
 
         /// 把真源写成指定内容（模拟用户在项目真源里编辑），并刷新台账里的真源基线。
         fn write_canonical(&self, skill_id: &str, body: &str) {
-            let dir = crate::domain::project::canonical_skill_dir(&self.root, skill_id).unwrap();
+            let dir = self.canonical(skill_id);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("SKILL.md"), body).unwrap();
         }
 
-        fn adopt(&self, project_id: &str, skill_id: &str, dir: &str) -> Result<SyncReport, AppError> {
-            adopt(&self.store, project_id, &self.root, skill_id, dir)
+        /// 某个 skill 的真源目录（v3 起在 store 下，不在项目仓库里）。
+        fn canonical(&self, skill_id: &str) -> PathBuf {
+            self.paths().canonical_skill_dir(skill_id).unwrap()
+        }
+
+        fn adopt(&self, _project_id: &str, skill_id: &str, dir: &str) -> Result<SyncReport, AppError> {
+            adopt(&self.store, &self.paths(), skill_id, dir)
         }
     }
 
@@ -1543,7 +1538,7 @@ mod tests {
         let rendered = fixture.root.join(".claude/skills/a/SKILL.md");
         assert_eq!(std::fs::read_to_string(&rendered).unwrap(), "---\nname: a\n---\n真源内容\n");
 
-        let ledger = project_scan::load_ledger(&fixture.root).unwrap();
+        let ledger = project_scan::load_ledger(&fixture.paths()).unwrap();
         assert!(ledger.skills["a"].dirs["claude"].present);
         assert_eq!(
             ledger.skills["a"].dirs["claude"].tree_hash,
@@ -1585,7 +1580,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            std::fs::read_to_string(fixture.root.join(".ccswitchx/skills/a/SKILL.md")).unwrap(),
+            std::fs::read_to_string(fixture.canonical("a").join("SKILL.md")).unwrap(),
             "用户的手改\n"
         );
         assert_eq!(
@@ -1639,13 +1634,13 @@ mod tests {
         // 取消所有渲染目标：副本被删，但真源和条目都还在，否则真源成了孤儿。
         fixture.set_targets(&view.id, "a", &[]);
         fixture.remove_copy(&view.id, "a", "claude");
-        let ledger = project_scan::load_ledger(&fixture.root).unwrap();
+        let ledger = project_scan::load_ledger(&fixture.paths()).unwrap();
         assert!(
             ledger.skills.contains_key("a"),
             "真源还在就不能移除条目"
         );
         assert!(ledger.skills["a"].canonical.present);
-        assert!(fixture.root.join(".ccswitchx/skills/a/SKILL.md").is_file());
+        assert!(fixture.canonical("a").join("SKILL.md").is_file());
         assert!(!fixture.root.join(".claude/skills/a").exists());
     }
 
@@ -1658,11 +1653,11 @@ mod tests {
         fixture.sync(&view.id, &[]).unwrap();
 
         fixture.uninstall(&view.id, "a");
-        assert!(!fixture.root.join(".ccswitchx/skills/a").exists());
+        assert!(!fixture.canonical("a").exists());
         assert!(!fixture.root.join(".claude/skills/a").exists());
         assert!(!fixture.root.join(".qoder/skills/a").exists());
         assert!(
-            project_scan::load_ledger(&fixture.root)
+            project_scan::load_ledger(&fixture.paths())
                 .unwrap()
                 .skills
                 .is_empty()
@@ -1677,12 +1672,12 @@ mod tests {
         let view = fixture.add_project(&["claude".into(), "qoder".into()]);
 
         fixture.adopt(&view.id, "mine", "claude").unwrap();
-        let canonical = fixture.root.join(".ccswitchx/skills/mine/SKILL.md");
+        let canonical = fixture.canonical("mine").join("SKILL.md");
         assert_eq!(
             std::fs::read_to_string(&canonical).unwrap(),
             std::fs::read_to_string(fixture.root.join(".claude/skills/mine/SKILL.md")).unwrap()
         );
-        let ledger = project_scan::load_ledger(&fixture.root).unwrap();
+        let ledger = project_scan::load_ledger(&fixture.paths()).unwrap();
         assert!(ledger.skills["mine"].canonical.present);
         assert!(ledger.skills["mine"].targets.is_empty(), "采纳不改变渲染目标");
     }
@@ -1694,7 +1689,7 @@ mod tests {
         fixture.write_canonical("a", "真源内容\n");
         fixture.mark_targets("a", &["claude", "qoder"]);
         fixture.sync(&view.id, &[]).unwrap();
-        std::fs::remove_dir_all(fixture.root.join(".ccswitchx/skills/a")).unwrap();
+        std::fs::remove_dir_all(fixture.canonical("a")).unwrap();
 
         // 自动同步绝不代用户决定删副本。
         let report = fixture.sync(&view.id, &[]).unwrap();
@@ -1715,7 +1710,7 @@ mod tests {
         assert!(!fixture.root.join(".claude/skills/a").exists());
         assert!(!fixture.root.join(".qoder/skills/a").exists());
         assert!(
-            project_scan::load_ledger(&fixture.root)
+            project_scan::load_ledger(&fixture.paths())
                 .unwrap()
                 .skills
                 .is_empty(),
@@ -1814,7 +1809,7 @@ mod tests {
             before_claude
         );
         assert_eq!(
-            std::fs::read_to_string(fixture.root.join(".ccswitchx/skills/a/SKILL.md")).unwrap(),
+            std::fs::read_to_string(fixture.canonical("a").join("SKILL.md")).unwrap(),
             "真源 v1\n",
             "冲突期间真源也不能被自动改写"
         );
@@ -1904,7 +1899,7 @@ mod tests {
         fixture.mark_targets("a", &["claude", "qoder"]);
         fixture.sync(&view.id, &[]).unwrap();
 
-        let path = fixture.root.join(".ccswitchx").join("skills.json");
+        let path = fixture.paths().ledger_path().to_path_buf();
         let before = std::fs::read(&path).unwrap();
         let report = fixture.sync(&view.id, &[]).unwrap();
         assert!(report.outcomes.is_empty());
@@ -1939,5 +1934,51 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, AppError::Project(_)));
         assert!(!fixture.root.join(".qoder/skills/a").exists());
+    }
+
+    /// v2 → v3 搬迁后的第一轮同步必须是空跑：台账里的渲染基线只记目录内相对路径，
+    /// 与「真源住在哪」无关，搬家不该让任何格子被判成 edited 或需要重渲染。
+    #[test]
+    fn a_relocated_v2_project_syncs_without_any_work() {
+        let fixture = project_fixture();
+        let body = "---\nname: demo\n---\n真源内容\n";
+        let rendered = fixture.root.join(".claude/skills/demo");
+        let canonical = fixture.root.join(".ccswitchx/skills/demo");
+        for dir in [&rendered, &canonical] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), body).unwrap();
+        }
+
+        let mut entry = ProjectSkillEntry::default();
+        entry.targets = vec!["claude".to_string()];
+        entry.canonical = project_scan::tree_state(&canonical).unwrap();
+        entry
+            .dirs
+            .insert("claude".to_string(), project_scan::tree_state(&rendered).unwrap());
+        let mut ledger = ProjectLedger {
+            version: 2,
+            updated_at: String::new(),
+            skills: BTreeMap::new(),
+        };
+        ledger.skills.insert("demo".to_string(), entry);
+        std::fs::create_dir_all(fixture.root.join(".ccswitchx")).unwrap();
+        std::fs::write(
+            fixture.root.join(".ccswitchx/skills.json"),
+            serde_json::to_vec_pretty(&ledger).unwrap(),
+        )
+        .unwrap();
+
+        // 登记项目会触发自动搬迁（复制真源与台账、删旧目录）。
+        let view = fixture.add_project(&["claude".into(), "qoder".into()]);
+        assert!(!fixture.root.join(".ccswitchx").exists(), "旧目录应已清理");
+        assert!(fixture.canonical("demo").join("SKILL.md").is_file());
+
+        let report = fixture.sync(&view.id, &[]).unwrap();
+        assert!(report.outcomes.is_empty(), "{:?}", report.outcomes);
+        assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+        assert_eq!(
+            std::fs::read_to_string(rendered.join("SKILL.md")).unwrap(),
+            body
+        );
     }
 }

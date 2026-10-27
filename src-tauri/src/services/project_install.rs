@@ -6,9 +6,7 @@
 //! 2. 写台账条目（`targets`、`source` 来源、`canonical` 基线）；
 //! 3. 渲染交给 `project_sync::sync_project`，本模块不自己复制目录 —— 部署的唯一入口永远是同步。
 
-use crate::domain::project::{
-    canonical_skill_dir, ProjectLedger, ProjectSkillOp, ProjectSkillSource,
-};
+use crate::domain::project::{ProjectLedger, ProjectPaths, ProjectSkillOp, ProjectSkillSource};
 use crate::error::AppError;
 use crate::import::mcp::ConflictPolicy;
 use crate::net::archive;
@@ -43,13 +41,13 @@ fn assert_targets_allowed(targets: &[String], allowed_dirs: &[String]) -> Result
 /// 安装后写台账：真源基线取磁盘现状，`dirs` 留给同步刷新。
 fn upsert(
     ledger: &mut ProjectLedger,
-    project_root: &Path,
+    paths: &ProjectPaths,
     id: &str,
     targets: &[String],
     source: Option<ProjectSkillSource>,
     action: &str,
 ) -> Result<(), AppError> {
-    let canonical = project_scan::tree_state(&canonical_skill_dir(project_root, id)?)?;
+    let canonical = project_scan::tree_state(&paths.canonical_skill_dir(id)?)?;
     if !canonical.present {
         return Err(AppError::Project(format!(
             "{id} 的真源写入后找不到 SKILL.md"
@@ -107,8 +105,7 @@ fn provenance(
 /// 这里只做「按选择落盘」，与中央库的安装流程一致。
 pub fn install_project_skill(
     store: &Store,
-    project_id: &str,
-    project_root: &Path,
+    paths: &ProjectPaths,
     input: &SkillSourceInput,
     staging_id: Option<&str>,
     selections: &[InstallSelection],
@@ -125,8 +122,7 @@ pub fn install_project_skill(
     let report = skill_source::install(
         SkillSink::Project {
             store,
-            project_root,
-            project_id,
+            paths,
             timestamp,
         },
         input,
@@ -135,18 +131,18 @@ pub fn install_project_skill(
         policy,
     )?;
 
-    let mut ledger = project_scan::load_ledger(project_root)?;
+    let mut ledger = project_scan::load_ledger(paths)?;
     let mut installed = Vec::new();
     for outcome in report.outcomes {
         if outcome.status != "installed" && outcome.status != "overwritten" {
             installed.push(outcome);
             continue;
         }
-        let canonical = canonical_skill_dir(project_root, &outcome.id)?;
+        let canonical = paths.canonical_skill_dir(&outcome.id)?;
         let source = provenance(input, &outcome.name, &canonical);
         upsert(
             &mut ledger,
-            project_root,
+            paths,
             &outcome.id,
             targets,
             source,
@@ -155,12 +151,11 @@ pub fn install_project_skill(
         installed.push(outcome);
     }
     ledger.updated_at = chrono::Utc::now().to_rfc3339();
-    project_scan::save_ledger(project_root, &ledger)?;
+    project_scan::save_ledger(paths, &ledger)?;
 
     let render = render_now(
         store,
-        project_id,
-        project_root,
+        paths,
         enabled_agent_ids,
         allowed_dirs,
         resolutions,
@@ -176,8 +171,7 @@ pub fn install_project_skill(
 /// 与 `install_project_skill` 的差别只是没有前端预览句柄，定位候选的规矩完全一样。
 pub fn install_discovered_project_skill<F: crate::net::RepoFetcher>(
     store: &Store,
-    project_id: &str,
-    project_root: &Path,
+    paths: &ProjectPaths,
     fetcher: &F,
     repo: &str,
     branch: Option<String>,
@@ -194,8 +188,7 @@ pub fn install_discovered_project_skill<F: crate::net::RepoFetcher>(
     let outcome = skill_source::install_discovered(
         SkillSink::Project {
             store,
-            project_root,
-            project_id,
+            paths,
             timestamp,
         },
         fetcher,
@@ -207,28 +200,27 @@ pub fn install_discovered_project_skill<F: crate::net::RepoFetcher>(
         policy,
     )?;
     // 只有真落盘了才动台账；跳过或失败的安装不该留下任何项目记录。
-    let mut ledger = project_scan::load_ledger(project_root)?;
+    let mut ledger = project_scan::load_ledger(paths)?;
     if outcome.status == "installed" || outcome.status == "overwritten" {
         let input = SkillSourceInput::Github {
             repo: repo.to_string(),
             branch,
         };
-        let canonical = canonical_skill_dir(project_root, &outcome.id)?;
+        let canonical = paths.canonical_skill_dir(&outcome.id)?;
         upsert(
             &mut ledger,
-            project_root,
+            paths,
             &outcome.id,
             targets,
             provenance(&input, &outcome.name, &canonical),
             "render",
         )?;
         ledger.updated_at = chrono::Utc::now().to_rfc3339();
-        project_scan::save_ledger(project_root, &ledger)?;
+        project_scan::save_ledger(paths, &ledger)?;
     }
     let render = render_now(
         store,
-        project_id,
-        project_root,
+        paths,
         enabled_agent_ids,
         allowed_dirs,
         &[],
@@ -243,8 +235,7 @@ pub fn install_discovered_project_skill<F: crate::net::RepoFetcher>(
 /// 从本地文件夹导入一个 skill 目录到项目真源（已存在同名则拒绝，不覆盖）。
 pub fn import_project_skill_dir(
     store: &Store,
-    project_id: &str,
-    project_root: &Path,
+    paths: &ProjectPaths,
     source: &Path,
     targets: &[String],
     allowed_dirs: &[String],
@@ -261,7 +252,7 @@ pub fn import_project_skill_dir(
         .and_then(|name| name.to_str())
         .ok_or_else(|| AppError::InvalidInput("无法从路径得到 skill 名称".into()))?
         .to_string();
-    let canonical = canonical_skill_dir(project_root, &id)?;
+    let canonical = paths.canonical_skill_dir(&id)?;
     if canonical.exists() {
         return Err(AppError::Project(format!(
             "项目真源里已经有 {id}；要更新请走更新，或先卸载"
@@ -277,23 +268,22 @@ pub fn import_project_skill_dir(
         return Err(AppError::Project("导入后回读校验与来源不一致".into()));
     }
 
-    let mut ledger = project_scan::load_ledger(project_root)?;
+    let mut ledger = project_scan::load_ledger(paths)?;
     let source_info = provenance(&SkillSourceInput::Directory { path: source.into() }, ".", &canonical);
     upsert(
         &mut ledger,
-        project_root,
+        paths,
         &id,
         targets,
         source_info,
         "render",
     )?;
     ledger.updated_at = chrono::Utc::now().to_rfc3339();
-    project_scan::save_ledger(project_root, &ledger)?;
+    project_scan::save_ledger(paths, &ledger)?;
 
     let render = render_now(
         store,
-        project_id,
-        project_root,
+        paths,
         enabled_agent_ids,
         allowed_dirs,
         &[],
@@ -315,8 +305,7 @@ pub fn import_project_skill_dir(
 /// 在项目真源里新建一个 skill（正文由表单渲染好传进来）。
 pub fn create_project_skill(
     store: &Store,
-    project_id: &str,
-    project_root: &Path,
+    paths: &ProjectPaths,
     id: &str,
     content: &str,
     targets: &[String],
@@ -324,7 +313,7 @@ pub fn create_project_skill(
     enabled_agent_ids: &[String],
 ) -> Result<ProjectInstallReport, AppError> {
     assert_targets_allowed(targets, allowed_dirs)?;
-    let canonical = canonical_skill_dir(project_root, id)?;
+    let canonical = paths.canonical_skill_dir(id)?;
     if canonical.exists() {
         return Err(AppError::Project(format!("项目真源里已经有 {id}")));
     }
@@ -337,15 +326,14 @@ pub fn create_project_skill(
         return Err(AppError::Project("新建真源的回读与提交内容不一致".into()));
     }
 
-    let mut ledger = project_scan::load_ledger(project_root)?;
-    upsert(&mut ledger, project_root, id, targets, None, "render")?;
+    let mut ledger = project_scan::load_ledger(paths)?;
+    upsert(&mut ledger, paths, id, targets, None, "render")?;
     ledger.updated_at = chrono::Utc::now().to_rfc3339();
-    project_scan::save_ledger(project_root, &ledger)?;
+    project_scan::save_ledger(paths, &ledger)?;
 
     let render = render_now(
         store,
-        project_id,
-        project_root,
+        paths,
         enabled_agent_ids,
         allowed_dirs,
         &[],
@@ -367,16 +355,14 @@ pub fn create_project_skill(
 /// 渲染只走同步引擎；`resolutions` 留给界面在冲突时再调一次同步用。
 fn render_now(
     store: &Store,
-    project_id: &str,
-    project_root: &Path,
+    paths: &ProjectPaths,
     enabled_agent_ids: &[String],
     allowed_dirs: &[String],
     resolutions: &[Resolution],
 ) -> Result<SyncReport, AppError> {
     project_sync::sync_project(
         store,
-        project_id,
-        project_root,
+        paths,
         enabled_agent_ids,
         allowed_dirs,
         resolutions,
@@ -451,6 +437,17 @@ mod tests {
         path
     }
 
+    /// v3 的落点：真源与台账在 store 的 `local/projects/<id>/` 下，渲染产物才在项目里。
+    /// 测试固定用 `app-1` 这个 ID，与安装入口原本传的 `project_id` 保持一致。
+    fn paths(fx: &Fixture) -> ProjectPaths {
+        ProjectPaths::resolve(fx.store.root(), "app-1", &fx.root).unwrap()
+    }
+
+    /// 某个 skill 的真源目录。
+    fn canonical_dir(fx: &Fixture, id: &str) -> PathBuf {
+        paths(fx).canonical_skill_dir(id).unwrap()
+    }
+
     fn install_dir(
         fx: &Fixture,
         source: &Path,
@@ -460,8 +457,7 @@ mod tests {
     ) -> Result<ProjectInstallReport, AppError> {
         install_project_skill(
             &fx.store,
-            "app-1",
-            &fx.root,
+            &paths(fx),
             &SkillSourceInput::Directory { path: source.to_path_buf() },
             None,
             &[InstallSelection {
@@ -493,7 +489,7 @@ mod tests {
         );
         assert_eq!(report.render.outcomes.len(), 2, "两个目标都该被渲染");
 
-        let canonical = canonical_skill_dir(&fx.root, "demo").unwrap();
+        let canonical = canonical_dir(&fx, "demo");
         assert!(canonical.join("SKILL.md").is_file());
         assert!(canonical.join("references/a.md").is_file(), "整目录复制");
         for dir in [".claude", ".qoder"] {
@@ -503,7 +499,7 @@ mod tests {
             );
         }
 
-        let ledger = project_scan::load_ledger(&fx.root).unwrap();
+        let ledger = project_scan::load_ledger(&paths(&fx)).unwrap();
         let entry = &ledger.skills["demo"];
         assert!(entry.canonical.present);
         assert_eq!(entry.targets, vec!["claude".to_string(), "qoder".to_string()]);
@@ -520,12 +516,11 @@ mod tests {
         let source = source_dir(&fx, "demo", "---\nname: Demo\n---\n内容\n");
         install_dir(&fx, &source, "demo", &["claude"], &fx.allowed).unwrap();
 
-        let canonical = canonical_skill_dir(&fx.root, "demo").unwrap();
+        let canonical = canonical_dir(&fx, "demo");
         assert!(
             !canonical.join(".meta.json").exists(),
-            "项目真源不写 .meta.json：它随仓库提交，且会让每次检查更新都改变目录指纹"
+            "项目真源不写 .meta.json：来源已记在台账里，再写一份会让每次检查更新都改变目录指纹"
         );
-        // 中央库那边照旧带 meta，说明差别只在 sink，不在流程。
         assert!(canonical.join("SKILL.md").is_file());
     }
 
@@ -571,13 +566,10 @@ mod tests {
             "中央库照旧带来源元数据"
         );
         assert!(
-            !canonical_skill_dir(&fx.root, "demo")
-                .unwrap()
-                .join(".meta.json")
-                .exists(),
+            !canonical_dir(&fx, "demo").join(".meta.json").exists(),
             "项目真源不写 .meta.json"
         );
-        let leftovers = std::fs::read_dir(crate::domain::project::canonical_root(&fx.root))
+        let leftovers = std::fs::read_dir(paths(&fx).canonical_root())
             .unwrap()
             .flatten()
             .filter(|entry| {
@@ -587,24 +579,37 @@ mod tests {
                     .starts_with(".staging-")
             })
             .count();
-        assert_eq!(leftovers, 0, "项目暂存目录用完要清掉");
+        assert_eq!(leftovers, 0, "暂存目录用完要清掉，不能留在真源旁边");
     }
 
+    /// v3 起项目真源就在 store 卷上，暂存与目的同卷是**结构保证**，
+    /// 不再需要把临时目录塞进目的目录内部（那会在真源旁边留垃圾）。
     #[test]
-    fn project_staging_lives_inside_the_canonical_root() {
+    fn project_staging_shares_the_store_volume_with_the_canonical_root() {
         let fx = fixture();
+        let project_paths = paths(&fx);
         let sink = SkillSink::Project {
             store: &fx.store,
-            project_root: &fx.root,
-            project_id: "app-1",
+            paths: &project_paths,
             timestamp: 1234,
         };
         let staging = sink.staging("install-0").unwrap();
         assert!(
-            staging.starts_with(crate::domain::project::canonical_root(&fx.root)),
-            "暂存必须与目的同卷，否则项目在另一块盘时 rename 会失败：{staging:?}"
+            staging.starts_with(fx.store.root().join("state").join("staging")),
+            "暂存落在 store 的 staging 区：{staging:?}"
         );
-        assert!(staging.file_name().unwrap().to_string_lossy().starts_with(".staging-"));
+        assert!(
+            staging.starts_with(fx.store.root())
+                && project_paths.canonical_root().starts_with(fx.store.root()),
+            "暂存与真源同在 store 根下，rename 换目录不会跨卷"
+        );
+        assert!(
+            staging
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("install-0-")
+        );
         let _ = std::fs::remove_dir_all(&staging);
     }
 
@@ -617,7 +622,7 @@ mod tests {
         let error = install_dir(&fx, &source, "demo", &["claude", "agents"], &fx.allowed).unwrap_err();
         assert!(error.to_string().contains("未改动任何文件"), "{error}");
         assert!(
-            !canonical_skill_dir(&fx.root, "demo").unwrap().exists(),
+            !canonical_dir(&fx, "demo").exists(),
             "校验发生在写入之前"
         );
         assert!(!fx.root.join(".claude/skills/demo").exists());
@@ -630,9 +635,9 @@ mod tests {
 
         let report = install_dir(&fx, &source, "demo", &[], &[]).unwrap();
         assert!(report.render.outcomes.is_empty());
-        assert!(canonical_skill_dir(&fx.root, "demo").unwrap().is_dir());
+        assert!(canonical_dir(&fx, "demo").is_dir());
         assert!(!fx.root.join(".claude/skills/demo").exists());
-        let ledger = project_scan::load_ledger(&fx.root).unwrap();
+        let ledger = project_scan::load_ledger(&paths(&fx)).unwrap();
         assert!(ledger.skills["demo"].canonical.present);
         assert!(ledger.skills["demo"].targets.is_empty());
     }
@@ -642,8 +647,7 @@ mod tests {
         let fx = fixture();
         create_project_skill(
             &fx.store,
-            "app-1",
-            &fx.root,
+            &paths(&fx),
             "demo",
             "---\nname: Demo\n---\n",
             &["claude".to_string()],
@@ -654,8 +658,7 @@ mod tests {
 
         let again = create_project_skill(
             &fx.store,
-            "app-1",
-            &fx.root,
+            &paths(&fx),
             "demo",
             "---\nname: Other\n---\n",
             &["claude".to_string()],
@@ -665,7 +668,7 @@ mod tests {
         assert!(again.is_err(), "同名真源已存在时不覆盖");
         assert_eq!(
             std::fs::read_to_string(
-                canonical_skill_dir(&fx.root, "demo").unwrap().join("SKILL.md")
+                canonical_dir(&fx, "demo").join("SKILL.md")
             )
             .unwrap(),
             "---\nname: Demo\n---\n"
@@ -674,8 +677,7 @@ mod tests {
         let source = source_dir(&fx, "demo", "外来内容");
         let imported = import_project_skill_dir(
             &fx.store,
-            "app-1",
-            &fx.root,
+            &paths(&fx),
             &source,
             &["claude".to_string()],
             &["claude".to_string()],
@@ -710,8 +712,7 @@ mod tests {
 
         let report = install_discovered_project_skill(
             &fx.store,
-            "app-1",
-            &fx.root,
+            &paths(&fx),
             &FakeFetcher { fixture: repo },
             "acme/demo",
             None,
@@ -726,11 +727,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.installed[0].status, "installed");
-        assert!(canonical_skill_dir(&fx.root, "acme-demo-skills-demo")
-            .unwrap()
+        assert!(canonical_dir(&fx, "acme-demo-skills-demo")
             .join("SKILL.md")
             .is_file());
-        let ledger = project_scan::load_ledger(&fx.root).unwrap();
+        let ledger = project_scan::load_ledger(&paths(&fx)).unwrap();
         let entry = ledger.skills.values().next().unwrap();
         let source = entry.source.as_ref().unwrap();
         assert_eq!(source.kind, "github");

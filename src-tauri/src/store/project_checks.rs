@@ -1,8 +1,8 @@
 //! 项目 skill 的「检查更新」状态缓存。
 //!
-//! 为什么不写进 `<project>/.ccswitchx/skills.json`：那个文件随仓库提交，而
-//! `lastCheckedAt` / `updateAvailable` 是每次检查都会变的机器局部状态，写进去会把
-//! 用户的 git diff 刷成噪音，也会在两台机器间来回打架。所以真源与台账保持干净，
+//! 为什么不写进项目台账 `local/projects/<id>/skills.json`：台账是真源的一部分，
+//! 而 `lastCheckedAt` / `updateAvailable` 是每次检查都会变的机器局部状态，写进去会让
+//! 备份与台账本身反复变动、也会在两台机器间互相覆盖。所以真源与台账保持干净，
 //! 易变状态只存本机 `local/`（store 的 .gitignore 已覆盖，不同步、不进备份快照）。
 //!
 //! 它是纯派生数据（与 `index.db` 同类）：缺失或损坏都按空表处理，下次检查自然重建。

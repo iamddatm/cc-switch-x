@@ -1,9 +1,9 @@
-//! 真机端到端验证：用**临时 store** 把本仓库当作一个真实项目，跑通
+//! 真机端到端验证：**临时 store + 临时项目**跑通
 //! 注册 → 扫描 → 基线 → 能力闸 → 勾选目标 → 同步 → 删除传播 + 备份 的完整链路。
 //!
-//! 只在 `cargo test -- --ignored` 时运行；它会在这台机器上读写
-//! `.claude/skills/`、`.qoder/skills/` 与项目里的 `.ccswitchx/skills.json`，
-//! 并在结束时清掉本次运行创建的文件。
+//! 只在 `cargo test -- --ignored` 时运行。项目根与 store 都在 `tempfile` 目录里，
+//! 随 tempdir 一起回收，绝不把本仓库当作项目根；真实 `~/.claude`、`~/.qoder-cn` 等
+//! 用户级配置根只读对照，绝不写入。
 //!
 //! 用法（仓库根目录）：
 //! ```bash
@@ -24,13 +24,6 @@ const PROBE: &str = "zz-ccswitchx-probe";
 /// 已实测的两个项目级目录；未实测的 `.agents/skills` 不在其中。
 const ENABLED_AGENTS: [&str; 2] = ["claude", "qoder-cn"];
 
-fn project_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("src-tauri 的上一级就是仓库根")
-        .to_path_buf()
-}
-
 fn probe_dir(root: &Path, dir: &str) -> PathBuf {
     root.join(dir).join(PROBE)
 }
@@ -44,75 +37,17 @@ fn write_probe(dir: &Path) {
     .unwrap();
 }
 
-/// 只删除「本次运行前不存在」的路径，避免把用户原有的东西一起清掉。
-struct Restore {
-    path: PathBuf,
-    existed_before: bool,
-}
-
-impl Drop for Restore {
-    fn drop(&mut self) {
-        if self.existed_before || !self.path.exists() {
-            return;
-        }
-        let result = if self.path.is_dir() {
-            std::fs::remove_dir_all(&self.path)
-        } else {
-            std::fs::remove_file(&self.path)
-        };
-        if result.is_err() {
-            eprintln!("清理探针失败，请手动删除：{}", self.path.display());
-        }
-    }
-}
-
-/// keepBoth 落败副本的名字由后端挑（`-copy`、`-copy-2`…），运行前猜不到，
-/// 所以记下运行前已有的名字，Drop 时只删本次新增的那些。
-struct KeptCopies {
-    skills_dir: PathBuf,
-    prefix: String,
-    before: Vec<String>,
-}
-
-impl KeptCopies {
-    fn snapshot(skills_dir: &Path, prefix: &str) -> Self {
-        Self {
-            skills_dir: skills_dir.to_path_buf(),
-            prefix: prefix.to_string(),
-            before: names_in(skills_dir, prefix),
-        }
-    }
-}
-
-impl Drop for KeptCopies {
-    fn drop(&mut self) {
-        for name in names_in(&self.skills_dir, &self.prefix) {
-            if self.before.contains(&name) {
-                continue;
-            }
-            let path = self.skills_dir.join(&name);
-            if std::fs::remove_dir_all(&path).is_err() {
-                eprintln!("清理落败副本失败，请手动删除：{}", path.display());
-            }
-        }
-    }
-}
-
 fn names_in(dir: &Path, prefix: &str) -> Vec<String> {
-    std::fs::read_dir(dir)
+    let mut names: Vec<String> = std::fs::read_dir(dir)
         .map(|read| {
             read.flatten()
                 .map(|item| item.file_name().to_string_lossy().to_string())
                 .filter(|name| name.starts_with(prefix))
                 .collect()
         })
-        .unwrap_or_default()
-}
-
-fn sorted(names: &[String]) -> Vec<String> {
-    let mut sorted = names.to_vec();
-    sorted.sort();
-    sorted
+        .unwrap_or_default();
+    names.sort();
+    names
 }
 
 /// 真实 home 里用户级的配置与 skills 目录清单。项目级同步只许写 `<项目>/…`，
@@ -181,51 +116,29 @@ fn enabled_agents() -> Vec<AgentStatus> {
 }
 
 #[test]
-#[ignore = "真机验证：会临时写本仓库的项目目录，需要能访问这台机器的 agent 配置根"]
+#[ignore = "真机验证：需要能访问这台机器的真实 agent 用户级配置根做只读对照"]
 fn project_skills_render_from_the_project_canonical() {
-    let root = project_root();
+    // v3：真源与台账住在 store 里，渲染产物仍写在项目里。
+    // 项目是临时目录，整个现场随 tempdir 一起回收，绝不碰本仓库。
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::init(temp.path().join("store")).unwrap();
+    let root = temp.path().join("work/app");
+    std::fs::create_dir_all(&root).unwrap();
+    let paths = cc_switch_x_lib::domain::project::ProjectPaths::resolve(
+        store.root(),
+        &project_registry::project_id(&root),
+        &root,
+    )
+    .unwrap();
     let claude_dir = probe_dir(&root, ".claude/skills");
     let qoder_dir = probe_dir(&root, ".qoder/skills");
-    let canonical_dir = cc_switch_x_lib::domain::project::canonical_skill_dir(&root, PROBE).unwrap();
-    let canonical_root = cc_switch_x_lib::domain::project::canonical_root(&root);
-    let ledger_path = project_scan::ledger_path(&root);
-    // keepBoth 裁决会把落败的手改另存成未跟踪副本；它同样只属于本次运行，必须清掉。
     let qoder_skills = root.join(".qoder/skills");
-    let preexisting_copies = sorted(&names_in(&qoder_skills, &format!("{PROBE}-copy")));
-    let kept_copies = KeptCopies::snapshot(&qoder_skills, &format!("{PROBE}-copy"));
-
-    let restores = [
-        Restore {
-            path: claude_dir.clone(),
-            // `.claude/` 不在 .gitignore 里，不清理就会在仓库里留下未跟踪目录。
-            existed_before: claude_dir.exists(),
-        },
-        Restore {
-            path: qoder_dir.clone(),
-            existed_before: qoder_dir.exists(),
-        },
-        Restore {
-            path: canonical_dir.clone(),
-            existed_before: canonical_dir.exists(),
-        },
-        Restore {
-            path: canonical_root.clone(),
-            existed_before: canonical_root.exists(),
-        },
-        Restore {
-            path: ledger_path.clone(),
-            existed_before: ledger_path.exists(),
-        },
-    ];
-    assert!(
-        !claude_dir.exists() && !qoder_dir.exists() && !canonical_dir.exists(),
-        "探针目录已存在，无法判断是不是本次生成的；请先手动删除"
-    );
+    let canonical_dir = paths.canonical_skill_dir(PROBE).unwrap();
+    let canonical_root = paths.canonical_root().to_path_buf();
+    let ledger_path = paths.ledger_path().to_path_buf();
 
     write_probe(&claude_dir);
 
-    let temp = tempfile::tempdir().unwrap();
-    let store = Store::init(temp.path().join("store")).unwrap();
     let home = dirs::home_dir().expect("需要真实 home 才能校验用户级配置根");
     let user_before = user_state(&home);
     assert!(
@@ -235,24 +148,21 @@ fn project_skills_render_from_the_project_canonical() {
     let enabled_ids: Vec<String> = ENABLED_AGENTS.iter().map(|id| id.to_string()).collect();
     let agents = enabled_agents();
     let selectable = project_registry::selectable_dir_keys(&agents);
-    // 1. 注册项目：项目根就是本仓库；`~/.claude` 与 store 都在它之外，路径校验必须放行。
+    // 1. 注册项目：项目根在临时目录里；`~/.claude` 与 store 都在它之外，路径校验必须放行。
     let view = project_registry::add_project(&store, &home, &root, &enabled_ids)
         .expect("添加项目失败");
     assert!(view.exists);
     let view_id = view.id.clone();
     let sync = |resolutions: &[project_sync::Resolution]| {
-        project_sync::sync_project(
-            &store,
-            &view_id,
-            &root,
-            &enabled_ids,
-            &selectable,
-            resolutions,
-        )
+        project_sync::sync_project(&store, &paths, &enabled_ids, &selectable, resolutions)
     };
 
-    assert!(ledger_path.is_file(), "添加项目必须写入 .ccswitchx/skills.json");
-    let ledger: ProjectLedger = project_scan::load_ledger(&root).unwrap();
+    assert!(
+        ledger_path.is_file(),
+        "添加项目必须在 store 里写出台账：{}",
+        ledger_path.display()
+    );
+    let ledger: ProjectLedger = project_scan::load_ledger(&paths).unwrap();
     assert_eq!(
         ledger.version,
         cc_switch_x_lib::domain::project::PROJECT_LEDGER_VERSION
@@ -273,7 +183,7 @@ fn project_skills_render_from_the_project_canonical() {
         "dirs 只记渲染基线，观察到的现状不能写进去"
     );
     assert!(!qoder_dir.exists(), "首次添加绝不能复制内容");
-    assert!(!canonical_dir.exists(), "首次添加不该在仓库里建真源目录");
+    assert!(!canonical_dir.exists(), "首次添加不该建出真源目录");
 
     // 2. 能力闸按真实 agent 现状判定：已实测的两个目录可勾选，未取证的 `.agents/skills` 不行。
     assert!(
@@ -287,7 +197,7 @@ fn project_skills_render_from_the_project_canonical() {
 
     // 3. 收进真源：把 Claude 侧的探针变成项目真源，原目录一个字节都不动。
     let before = std::fs::read(claude_dir.join("SKILL.md")).unwrap();
-    project_sync::adopt(&store, &view_id, &root, PROBE, "claude").expect("收进真源失败");
+    project_sync::adopt(&store, &paths, PROBE, "claude").expect("收进真源失败");
     assert_eq!(
         std::fs::read(claude_dir.join("SKILL.md")).unwrap(),
         before,
@@ -295,12 +205,12 @@ fn project_skills_render_from_the_project_canonical() {
     );
     assert!(
         canonical_dir.join("SKILL.md").is_file(),
-        "真源必须落在 .ccswitchx/skills/{PROBE}"
+        "真源必须落在 store 的 local/projects/<id>/skills/{PROBE}"
     );
 
     // 4. 勾选目标：只记账本，不写盘。
     project_sync::set_targets(
-        &root,
+        &paths,
         PROBE,
         &["claude".to_string(), "qoder".to_string()],
         &selectable,
@@ -326,7 +236,7 @@ fn project_skills_render_from_the_project_canonical() {
         qoder_dir.join("SKILL.md").is_file(),
         "同步后 Qoder 项目目录里必须有 {PROBE}"
     );
-    let after: ProjectLedger = project_scan::load_ledger(&root).unwrap();
+    let after: ProjectLedger = project_scan::load_ledger(&paths).unwrap();
     let after_entry = after.skills.get(PROBE).unwrap();
     assert!(after_entry.dirs["qoder"].present, "qoder 基线应已写入");
     assert_eq!(
@@ -373,7 +283,7 @@ fn project_skills_render_from_the_project_canonical() {
         std::fs::read(canonical_dir.join("SKILL.md")).unwrap(),
         "被改副本要按真源重渲染"
     );
-    let copies = sorted(&names_in(&qoder_skills, &format!("{PROBE}-copy")));
+    let copies = names_in(&qoder_skills, &format!("{PROBE}-copy"));
     assert!(
         copies
             .iter()
@@ -382,7 +292,7 @@ fn project_skills_render_from_the_project_canonical() {
     );
 
     // 8. 卸载：真源与全部副本一起删除，且都先留了备份；条目随之移除。
-    project_sync::uninstall(&store, &view_id, &root, PROBE).expect("卸载失败");
+    project_sync::uninstall(&store, &paths, PROBE).expect("卸载失败");
     assert!(!canonical_dir.exists(), "卸载必须删除项目真源");
     assert!(!claude_dir.exists(), "Claude 侧副本应被删除");
     assert!(!qoder_dir.exists(), "Qoder 侧副本应被删除");
@@ -401,32 +311,26 @@ fn project_skills_render_from_the_project_canonical() {
     );
 
     // 8b. 未跟踪的落败副本不归本项目管，卸载不得顺手删掉它。
-    let mut after_uninstall = names_in(&qoder_skills, &format!("{PROBE}-copy"));
-    after_uninstall.sort();
     assert_eq!(
-        after_uninstall, copies,
+        names_in(&qoder_skills, &format!("{PROBE}-copy")),
+        copies,
         "卸载只清 tracked 副本，未跟踪副本必须原样留着"
     );
 
-    let final_ledger = project_scan::load_ledger(&root).unwrap();
+    let final_ledger = project_scan::load_ledger(&paths).unwrap();
     assert!(
         !final_ledger.skills.contains_key(PROBE),
         "真源与所有 target 都不存在时应移除条目"
     );
+    // 9. 项目里不该留下任何属于我们自己的文件（只剩 agent 渲染目录的痕迹）。
+    assert!(
+        !root.join(".ccswitchx").exists(),
+        "v3 不该在项目里留下 .ccswitchx"
+    );
+    assert!(!canonical_root.starts_with(&root), "真源必须住在 store 里");
 
-    // 9. 用户级配置一个字节都没碰：真实 home 下的 agent 配置与 skills 目录内容必须逐字相同。
+    // 10. 用户级配置一个字节都没碰：真实 home 下的 agent 配置与 skills 目录内容必须逐字相同。
     for (path, before) in &user_before {
         assert_eq!(before, &record(path), "项目级同步改动了用户级配置：{path:?}");
     }
-
-    for restore in restores {
-        std::mem::drop(restore);
-    }
-    std::mem::drop(kept_copies);
-    // 清理只针对本次运行新建的东西；跑之前就在的（上一轮留下的）副本不归本测试管。
-    assert_eq!(
-        sorted(&names_in(&qoder_skills, &format!("{PROBE}-copy"))),
-        preexisting_copies,
-        "本次运行产生的未跟踪副本必须被清理掉"
-    );
 }

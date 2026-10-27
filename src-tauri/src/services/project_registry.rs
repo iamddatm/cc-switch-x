@@ -1,8 +1,8 @@
 use crate::adapters::paths::expand_root;
 use crate::domain::agent::builtin_agents;
 use crate::domain::project::{
-    dir_spec, ProjectDirState, ProjectEntry, ProjectSkillDirKey, ProjectSkillOp, ProjectSkillSource,
-    PROJECT_SKILL_DIRS,
+    dir_spec, ProjectDirState, ProjectEntry, ProjectLayoutStatus, ProjectPaths, ProjectSkillDirKey,
+    ProjectSkillOp, ProjectSkillSource, PROJECT_SKILL_DIRS,
 };
 use crate::error::AppError;
 use crate::services::agents::AgentStatus;
@@ -31,6 +31,8 @@ pub struct ProjectDirMeta {
     pub label: String,
     pub relative_path: String,
     pub agents: Vec<String>,
+    /// 映射到这个物理目录的 agent id。前端按 agent 展开矩阵列，需要从目录反查 id。
+    pub agent_ids: Vec<String>,
     pub verified: bool,
 }
 
@@ -41,6 +43,7 @@ pub struct ProjectDirView {
     pub label: String,
     pub relative_path: String,
     pub agents: Vec<String>,
+    pub agent_ids: Vec<String>,
     pub verified: bool,
     /// present | absent | different | untracked | unavailable
     pub state: String,
@@ -56,7 +59,7 @@ pub struct ProjectSkillView {
     pub dirs: BTreeMap<String, ProjectDirView>,
     pub source: Option<ProjectSkillSource>,
     pub last_op: Option<ProjectSkillOp>,
-    /// 项目真源是否已落地（`.ccswitchx/skills/<id>/` 有 SKILL.md）。
+    /// 项目真源是否已落地（客户端数据目录里的 `skills/<id>/` 有 SKILL.md）。
     pub canonical: bool,
     /// 账本记着有真源、磁盘上却没有：只能由显式 purge 处置。
     pub canonical_missing: bool,
@@ -74,6 +77,9 @@ pub struct ProjectSkillsView {
     pub conflict_count: usize,
     /// v1 台账的迁移计划；已经是 v2 或无事可做时为 None。只读计算，不落盘。
     pub migration: Option<crate::services::project_migrate::ProjectMigrationPlan>,
+    /// 项目数据布局。`Hybrid` / `Foreign` 时面板顶部要给出显式提示，
+    /// `Unsupported` 时所有命令都会先报错，面板根本走不到这里。
+    pub layout: ProjectLayoutStatus,
 }
 
 pub fn project_id(path: &Path) -> String {
@@ -130,6 +136,13 @@ pub fn add_project(
         .position(|entry| entry.path == canonical)
     {
         registry.projects[index].last_opened_at = now;
+        // 重新打开也要先处理旧布局：从 v2 升级回来的项目第一次被打开时正是这里。
+        let paths = ProjectPaths::resolve(
+            store.root(),
+            &registry.projects[index].id,
+            &registry.projects[index].path,
+        )?;
+        crate::services::project_relocate::auto(store, &paths)?;
         let view = project_view(&registry.projects[index]);
         crate::store::projects::save(store, &registry)?;
         return Ok(view);
@@ -149,15 +162,24 @@ pub fn add_project(
     };
 
     let keys = enabled_dir_keys(enabled_agent_ids);
-    let scan = project_scan::scan(&canonical, &keys)?;
-    project_scan::ensure_baseline(&canonical, &scan)?;
+    let paths = ProjectPaths::resolve(store.root(), &entry.id, &canonical)?;
+    // 存量项目（v2 把真源放在仓库里）在登记时先搬进 store，删旧目录的三重闸在搬迁模块里。
+    let relocation = crate::services::project_relocate::auto(store, &paths)?;
+    // 两边都有数据且内容分歧：先登记，由面板横幅让人裁决；此时写空台账会丢归属。
+    let disputed = matches!(relocation.status, ProjectLayoutStatus::Hybrid { .. })
+        && !paths.ledger_path().exists();
+    if !disputed {
+        let scan = project_scan::scan(&paths, &keys)?;
+        project_scan::ensure_baseline(&paths, &scan)?;
+    }
 
     registry.projects.push(entry.clone());
     crate::store::projects::save(store, &registry)?;
     Ok(project_view(&entry))
 }
 
-/// 只从客户端移除项目，不删除项目文件，也不删除 `.ccswitchx/skills.json`。
+/// 只从客户端注册表移除项目：不动用户仓库里的任何文件，也不删 `local/projects/<id>/`
+/// 里的真源与台账（留着，重新添加同一个项目就能接上；要清理请显式删目录）。
 pub fn remove_project(store: &Store, id: &str) -> Result<(), AppError> {
     let mut registry = crate::store::projects::load(store)?;
     registry.projects.retain(|entry| entry.id != id);
@@ -197,6 +219,21 @@ fn key_from_str(value: &str) -> Option<ProjectSkillDirKey> {
         .map(|spec| spec.key)
 }
 
+/// 项目级渲染只认「启用且 Skill 能力成立」的 agent：档位 OFF 的 agent
+/// 不该造出一个永远没有列的目录，扫描与基线也就能少跑一遍。
+pub fn skill_enabled_ids(agents: &[AgentStatus]) -> Vec<String> {
+    agents
+        .iter()
+        .filter(|agent| {
+            agent.enabled
+                && agent.capabilities.iter().any(|capability| {
+                    capability.kind == crate::domain::AssetKind::Skill && capability.supported
+                })
+        })
+        .map(|agent| agent.id.clone())
+        .collect()
+}
+
 /// 该物理目录能否作为同步目标（能力闸）：项目级落点自己已实测，
 /// 且映射到它并启用的每个 agent 都已实测过 skill 落点。未通过的列 UI 显示「待实测」，
 /// `set_project_skill_targets` 也会直接拒绝。
@@ -225,10 +262,13 @@ pub fn selectable_dir_keys(agents: &[AgentStatus]) -> Vec<String> {
 fn dir_meta(key: ProjectSkillDirKey, agents: &[AgentStatus]) -> ProjectDirMeta {
     let spec = dir_spec(key);
     // 列名带上所有映射到该目录的 agent（含已停用的）：已停用的列也要显示名字，用户才认得出那是自己勾过的目标。
-    let names: Vec<String> = spec
+    let mapped: Vec<&AgentStatus> = spec
         .agent_ids
         .iter()
         .filter_map(|id| agents.iter().find(|agent| agent.id == *id))
+        .collect();
+    let names: Vec<String> = mapped
+        .iter()
         .map(|agent| agent.display_name.clone())
         .collect();
     ProjectDirMeta {
@@ -236,6 +276,7 @@ fn dir_meta(key: ProjectSkillDirKey, agents: &[AgentStatus]) -> ProjectDirMeta {
         label: names.join(" / "),
         relative_path: spec.relative_path.to_string(),
         agents: names,
+        agent_ids: mapped.iter().map(|agent| agent.id.clone()).collect(),
         verified: selectable_dir_keys(agents).iter().any(|k| k == spec.key.as_str()),
     }
 }
@@ -243,7 +284,7 @@ fn dir_meta(key: ProjectSkillDirKey, agents: &[AgentStatus]) -> ProjectDirMeta {
 /// 列表展示的名称与描述：优先读项目真源，其次按启用目录的顺序读渲染产物。
 /// 真源是唯一可编辑副本，所以它一旦存在就以它为准；未迁移/未采纳时才回落到副本。
 fn describe_skill(
-    project_root: &Path,
+    paths: &ProjectPaths,
     id: &str,
     scan: &ProjectScan,
     keys: &[ProjectSkillDirKey],
@@ -253,9 +294,7 @@ fn describe_skill(
         .get(id)
         .is_some_and(|state| state.present && !scan.blocks_canonical(id))
     {
-        let path = crate::domain::project::canonical_root(project_root)
-            .join(id)
-            .join("SKILL.md");
+        let path = paths.canonical_root().join(id).join("SKILL.md");
         if let Ok(text) = std::fs::read_to_string(path) {
             let meta = crate::domain::skill::parse_metadata(&text);
             return (meta.name.unwrap_or_else(|| id.to_string()), meta.description);
@@ -269,10 +308,7 @@ fn describe_skill(
         if !state.is_some_and(|state| state.present) {
             continue;
         }
-        let path = project_root
-            .join(dir_spec(*key).relative_path)
-            .join(id)
-            .join("SKILL.md");
+        let path = paths.render_dir(*key).join(id).join("SKILL.md");
         if let Ok(text) = std::fs::read_to_string(path) {
             let meta = crate::domain::skill::parse_metadata(&text);
             return (meta.name.unwrap_or_else(|| id.to_string()), meta.description);
@@ -339,17 +375,17 @@ pub fn list_project_skills(
             skills: Vec::new(),
             conflict_count: 0,
             migration: None,
+            layout: ProjectLayoutStatus::Native,
         });
     }
 
-    let enabled_ids: Vec<String> = agents
-        .iter()
-        .filter(|agent| agent.enabled)
-        .map(|agent| agent.id.clone())
-        .collect();
+    let enabled_ids = skill_enabled_ids(agents);
     let keys = enabled_dir_keys(&enabled_ids);
-    let scan = project_scan::scan(&entry.path, &keys)?;
-    let ledger = project_scan::load_ledger(&entry.path)?;
+    let paths = ProjectPaths::resolve(store.root(), &entry.id, &entry.path)?;
+    // 打开面板时补完/清理旧布局：否则 v2 项目在这里会显示成空表。
+    let relocation = crate::services::project_relocate::auto(store, &paths)?;
+    let scan = project_scan::scan(&paths, &keys)?;
+    let ledger = project_scan::load_ledger(&paths)?;
     // 能力闸允许的渲染目标：格子的「不可用」状态与写入侧校验共用同一份判定。
     let allowed = selectable_dir_keys(agents);
     let checks = crate::store::project_checks::ProjectCheckCache::load(store, project_id);
@@ -420,6 +456,7 @@ pub fn list_project_skills(
                     label: meta.label,
                     relative_path: meta.relative_path,
                     agents: meta.agents,
+                    agent_ids: meta.agent_ids,
                     verified: meta.verified,
                     state: state.to_string(),
                 },
@@ -432,7 +469,7 @@ pub fn list_project_skills(
             conflicts += 1;
         }
 
-        let (name, description) = describe_skill(&entry.path, &id, &scan, &keys);
+        let (name, description) = describe_skill(&paths, &id, &scan, &keys);
         let check = checks.get(&id).cloned();
         skills.push(ProjectSkillView {
             id,
@@ -464,6 +501,7 @@ pub fn list_project_skills(
         skills,
         conflict_count,
         migration,
+        layout: relocation.status,
     })
 }
 
@@ -571,7 +609,15 @@ mod tests {
             "注册表与 UI 必须是可读路径：{:?}",
             first.path
         );
-        assert!(project.join(".ccswitchx/skills.json").is_file());
+        assert!(
+            !project.join(".ccswitchx").exists(),
+            "v3 起项目里不再留任何属于我们的文件"
+        );
+        assert!(store
+            .project_dir(&first.id)
+            .unwrap()
+            .join("skills.json")
+            .is_file());
         let ids_before = list_projects(&store).unwrap().len();
 
         let second = add_project(&store, &home, &project, &["claude".into()]).unwrap();
@@ -600,7 +646,10 @@ mod tests {
     #[test]
     fn describe_skill_prefers_the_canonical_copy() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
+        let store_root = dir.path().join("store");
+        let root = dir.path().join("home/work/app");
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = ProjectPaths::resolve(&store_root, "app-1", &root).unwrap();
         let write_skill = |path: std::path::PathBuf, name: &str| {
             std::fs::create_dir_all(&path).unwrap();
             std::fs::write(
@@ -612,12 +661,12 @@ mod tests {
         write_skill(root.join(".claude/skills/a"), "副本名");
         let keys = [ProjectSkillDirKey::Claude];
 
-        let scan = project_scan::scan(root, &keys).unwrap();
-        assert_eq!(describe_skill(root, "a", &scan, &keys).0, "副本名");
+        let scan = project_scan::scan(&paths, &keys).unwrap();
+        assert_eq!(describe_skill(&paths, "a", &scan, &keys).0, "副本名");
 
-        write_skill(crate::domain::project::canonical_skill_dir(root, "a").unwrap(), "真源名");
-        let scan = project_scan::scan(root, &keys).unwrap();
-        let (name, description) = describe_skill(root, "a", &scan, &keys);
+        write_skill(paths.canonical_skill_dir("a").unwrap(), "真源名");
+        let scan = project_scan::scan(&paths, &keys).unwrap();
+        let (name, description) = describe_skill(&paths, "a", &scan, &keys);
         assert_eq!(name, "真源名");
         assert_eq!(description.as_deref(), Some("真源名 的描述"));
     }
@@ -631,7 +680,7 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         seed_skill(&project.join(".claude/skills"), "a");
         let view = add_project(&store, &home, &project, &["claude".into()]).unwrap();
-        let agents = vec![agent_status("claude", true), agent_status("qoder", true)];
+        let agents = vec![agent_with_capabilities("claude", true), agent_with_capabilities("qoder", true)];
         let skills = list_project_skills(&store, &view.id, &agents).unwrap();
         assert_eq!(skills.skills[0].id, "a");
         assert!(skills.skills[0].targets.is_empty());
@@ -678,12 +727,13 @@ mod tests {
         seed_skill(&project.join(".claude/skills"), "a");
         let view = add_project(&store, &home, &project, &["claude".into()]).unwrap();
 
-        let mut ledger = project_scan::load_ledger(&project).unwrap();
+        let paths = ProjectPaths::resolve(store.root(), &view.id, &project).unwrap();
+        let mut ledger = project_scan::load_ledger(&paths).unwrap();
         ledger.skills.get_mut("a").unwrap().targets =
             vec!["claude".to_string(), "qoder".to_string()];
-        project_scan::save_ledger(&project, &ledger).unwrap();
+        project_scan::save_ledger(&paths, &ledger).unwrap();
 
-        let agents = vec![agent_status("claude", true), agent_status("qoder", false)];
+        let agents = vec![agent_with_capabilities("claude", true), agent_with_capabilities("qoder", false)];
         let skills = list_project_skills(&store, &view.id, &agents).unwrap();
         assert!(skills
             .dirs
@@ -703,7 +753,7 @@ mod tests {
         std::fs::remove_dir_all(&project).unwrap();
 
         let skills =
-            list_project_skills(&store, &view.id, &[agent_status("claude", true)]).unwrap();
+            list_project_skills(&store, &view.id, &[agent_with_capabilities("claude", true)]).unwrap();
         assert!(!skills.project.exists);
         assert!(skills.skills.is_empty());
     }
@@ -717,8 +767,9 @@ mod tests {
         let home = dir.path().join("home");
         let project = home.join("work/app");
         std::fs::create_dir_all(&project).unwrap();
-        seed_skill(&project.join(".ccswitchx/skills"), "demo");
         let view = add_project(&store, &home, &project, &["claude".into()]).unwrap();
+        let paths = ProjectPaths::resolve(store.root(), &view.id, &project).unwrap();
+        seed_skill(paths.canonical_root(), "demo");
 
         // 台账条目由安装/迁移/收进真源写入；这里直接造出「已跟踪且有 GitHub 来源」的现状。
         let mut ledger = ProjectLedger {
@@ -740,7 +791,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        project_scan::save_ledger(&project, &ledger).unwrap();
+        project_scan::save_ledger(&paths, &ledger).unwrap();
 
         let mut cache = crate::store::project_checks::ProjectCheckCache::default();
         cache.record(
@@ -755,7 +806,7 @@ mod tests {
         );
         cache.save(&store, &view.id).unwrap();
 
-        let skills = list_project_skills(&store, &view.id, &[agent_status("claude", true)]).unwrap();
+        let skills = list_project_skills(&store, &view.id, &[agent_with_capabilities("claude", true)]).unwrap();
         let check = skills.skills[0]
             .check
             .as_ref()
@@ -765,9 +816,9 @@ mod tests {
         assert_eq!(skills.skills[0].source.as_ref().unwrap().repo.as_deref(), Some("acme/demo"));
 
         // 没检查过的行不带检查状态，界面据此显示「未检查」而不是「已最新」。
-        seed_skill(&project.join(".ccswitchx/skills"), "never-checked");
+        seed_skill(paths.canonical_root(), "never-checked");
         let refreshed =
-            list_project_skills(&store, &view.id, &[agent_status("claude", true)]).unwrap();
+            list_project_skills(&store, &view.id, &[agent_with_capabilities("claude", true)]).unwrap();
         assert!(refreshed
             .skills
             .iter()

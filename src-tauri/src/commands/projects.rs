@@ -1,5 +1,5 @@
 use crate::commands::backup::open_directory;
-use crate::domain::project::ProjectSkillDirKey;
+use crate::domain::project::{ProjectPaths, ProjectSkillDirKey};
 use crate::error::AppError;
 use crate::import::mcp::ConflictPolicy;
 use crate::net::HttpFetcher;
@@ -9,6 +9,7 @@ use crate::services::project_migrate::{self, MigrationDecision, ProjectMigration
 use crate::services::project_registry::{
     self, ProjectSkillsView, ProjectSkillView, ProjectView,
 };
+use crate::services::project_relocate::{self, LayoutChoice, ProjectRelocationReport};
 use crate::services::project_scan;
 use crate::services::project_sync::{self, Resolution, SyncReport};
 use crate::services::skill_source::{InstallSelection, SkillSourceInput};
@@ -61,7 +62,7 @@ pub async fn add_project(
     let store = state.store.clone();
     let home = state.home.clone();
     let project_ops = state.project_ops.clone();
-    let enabled = enabled_agent_ids(&enabled_agents(state.inner())?);
+    let enabled = project_registry::skill_enabled_ids(&enabled_agents(state.inner())?);
     run_blocking(move || {
         let _guard = project_ops
             .lock()
@@ -117,6 +118,35 @@ pub async fn set_project_auto_sync(
     .await
 }
 
+/// 两边都有项目数据且内容不一致时的人工裁决：被覆盖的一侧会先整份备份。
+#[tauri::command]
+pub async fn resolve_project_layout(
+    app: AppHandle,
+    project_id: String,
+    choice: String,
+) -> Result<ProjectRelocationReport, AppError> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let _project_guard = state
+            .project_ops
+            .lock()
+            .map_err(|_| AppError::Project("项目锁失败".into()))?;
+        let choice = match choice.as_str() {
+            "store" => LayoutChoice::Store,
+            "legacy" => LayoutChoice::Legacy,
+            other => {
+                return Err(AppError::InvalidInput(format!(
+                    "未知的布局裁决选项：{other}"
+                )))
+            }
+        };
+        let _write = state.enter_write()?;
+        let paths = registered_project_paths(state.inner(), &project_id)?;
+        project_relocate::resolve(&state.store, &paths, choice)
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn list_project_skills(
     state: State<'_, AppState>,
@@ -149,7 +179,9 @@ pub fn reveal_project_folder(
 }
 
 /// 项目必须在注册表里且路径真实存在；所有写命令都先过这一关。
-fn registered_project_root(state: &AppState, project_id: &str) -> Result<PathBuf, AppError> {
+/// 这里是 `project_id → ProjectPaths` 的**唯一**解析点：真源与台账在 store 里，
+/// 渲染产物在项目里，两条路径一起给出，调用方不再自己拼任何一边。
+fn registered_project_paths(state: &AppState, project_id: &str) -> Result<ProjectPaths, AppError> {
     let registry = crate::store::projects::load(&state.store)?;
     let entry = registry
         .projects
@@ -162,7 +194,10 @@ fn registered_project_root(state: &AppState, project_id: &str) -> Result<PathBuf
             entry.path.display()
         )));
     }
-    Ok(entry.path.clone())
+    let paths = ProjectPaths::resolve(&state.store.root(), &entry.id, &entry.path)?;
+    // 所有项目命令的统一前置：旧布局先搬进 store 再继续，避免读到一个空的 store 侧。
+    crate::services::project_relocate::auto(&state.store, &paths)?;
+    Ok(paths)
 }
 
 #[tauri::command]
@@ -180,11 +215,10 @@ pub async fn sync_project_skills(
         let _write = state.enter_write()?;
         let agents = enabled_agents(state.inner())?;
         let enabled = enabled_agent_ids(&agents);
-        let root = registered_project_root(state.inner(), &project_id)?;
+        let paths = registered_project_paths(state.inner(), &project_id)?;
         project_sync::sync_project(
             &state.store,
-            &project_id,
-            &root,
+            &paths,
             &enabled,
             &project_registry::selectable_dir_keys(&agents),
             &resolutions,
@@ -208,9 +242,9 @@ pub async fn set_project_skill_targets(
             .map_err(|_| AppError::Project("项目锁失败".into()))?;
         let _write = state.enter_write()?;
         let agents = enabled_agents(state.inner())?;
-        let root = registered_project_root(state.inner(), &project_id)?;
+        let paths = registered_project_paths(state.inner(), &project_id)?;
         project_sync::set_targets(
-            &root,
+            &paths,
             &skill_id,
             &targets,
             &project_registry::selectable_dir_keys(&agents),
@@ -238,8 +272,8 @@ pub async fn remove_project_skill_copy(
             .lock()
             .map_err(|_| AppError::Project("项目锁失败".into()))?;
         let _write = state.enter_write()?;
-        let root = registered_project_root(state.inner(), &project_id)?;
-        project_sync::remove_copy(&state.store, &project_id, &root, &skill_id, &dir)
+        let paths = registered_project_paths(state.inner(), &project_id)?;
+        project_sync::remove_copy(&state.store, &paths, &skill_id, &dir)
     })
     .await
 }
@@ -257,8 +291,8 @@ pub async fn uninstall_project_skill(
             .lock()
             .map_err(|_| AppError::Project("项目锁失败".into()))?;
         let _write = state.enter_write()?;
-        let root = registered_project_root(state.inner(), &project_id)?;
-        project_sync::uninstall(&state.store, &project_id, &root, &skill_id)
+        let paths = registered_project_paths(state.inner(), &project_id)?;
+        project_sync::uninstall(&state.store, &paths, &skill_id)
     })
     .await
 }
@@ -278,8 +312,8 @@ pub async fn adopt_project_skill(
             .lock()
             .map_err(|_| AppError::Project("项目锁失败".into()))?;
         let _write = state.enter_write()?;
-        let root = registered_project_root(state.inner(), &project_id)?;
-        project_sync::adopt(&state.store, &project_id, &root, &skill_id, &dir)
+        let paths = registered_project_paths(state.inner(), &project_id)?;
+        project_sync::adopt(&state.store, &paths, &skill_id, &dir)
     })
     .await
 }
@@ -293,8 +327,8 @@ pub async fn read_project_skill_body(
 ) -> Result<String, AppError> {
     run_blocking(move || {
         let state = app.state::<AppState>();
-        let root = registered_project_root(state.inner(), &project_id)?;
-        project_sync::read_body(&root, &skill_id)
+        let paths = registered_project_paths(state.inner(), &project_id)?;
+        project_sync::read_body(&paths, &skill_id)
     })
     .await
 }
@@ -314,8 +348,8 @@ pub async fn write_project_skill_body(
             .lock()
             .map_err(|_| AppError::Project("项目锁失败".into()))?;
         let _write = state.enter_write()?;
-        let root = registered_project_root(state.inner(), &project_id)?;
-        project_sync::write_body(&state.store, &project_id, &root, &skill_id, &content)
+        let paths = registered_project_paths(state.inner(), &project_id)?;
+        project_sync::write_body(&state.store, &paths, &skill_id, &content)
     })
     .await
 }
@@ -340,15 +374,14 @@ pub async fn check_project_skill_updates(
             .lock()
             .map_err(|_| AppError::Project("项目锁失败".into()))?;
         let _write = state.enter_write()?;
-        let root = registered_project_root(state.inner(), &project_id)?;
-        let mut ledger = project_scan::load_ledger(&root)?;
+        let paths = registered_project_paths(state.inner(), &project_id)?;
+        let mut ledger = project_scan::load_ledger(&paths)?;
         let mut cache = ProjectCheckCache::load(&store, &project_id);
         let fetcher = HttpFetcher::new(Some(&proxy))?;
         skill_update::check(
             skill_update::UpdateSink::Project {
                 store: &store,
-                project_id: &project_id,
-                project_root: &root,
+                paths: &paths,
                 timestamp: chrono::Utc::now().timestamp_millis(),
                 ledger: &mut ledger,
                 cache: &mut cache,
@@ -360,7 +393,7 @@ pub async fn check_project_skill_updates(
     .await
 }
 
-/// 更新项目真源：只换 `.ccswitchx/skills/<id>/`，渲染产物留给下一次同步。
+/// 更新项目真源：只换客户端数据目录里的 `skills/<id>/`，渲染产物留给下一次同步。
 #[tauri::command]
 pub async fn update_project_skills(
     app: AppHandle,
@@ -379,16 +412,15 @@ pub async fn update_project_skills(
             .lock()
             .map_err(|_| AppError::Project("项目锁失败".into()))?;
         let _write = state.enter_write()?;
-        let root = registered_project_root(state.inner(), &project_id)?;
-        let mut ledger = project_scan::load_ledger(&root)?;
+        let paths = registered_project_paths(state.inner(), &project_id)?;
+        let mut ledger = project_scan::load_ledger(&paths)?;
         let mut cache = ProjectCheckCache::load(&store, &project_id);
         let fetcher = HttpFetcher::new(Some(&proxy))?;
         // 一批共用一个时间戳：备份才会全部落在 `backups/projects/<pid>/<ts>/canonical/` 下。
         skill_update::update(
             skill_update::UpdateSink::Project {
                 store: &store,
-                project_id: &project_id,
-                project_root: &root,
+                paths: &paths,
                 timestamp: chrono::Utc::now().timestamp_millis(),
                 ledger: &mut ledger,
                 cache: &mut cache,
@@ -416,17 +448,10 @@ pub async fn migrate_project_skills(
             .lock()
             .map_err(|_| AppError::Project("项目锁失败".into()))?;
         let _write = state.enter_write()?;
-        let root = registered_project_root(state.inner(), &project_id)?;
-        let ledger = project_scan::load_ledger(&root)?;
-        let scan = project_scan::scan(&root, &ProjectSkillDirKey::ALL)?;
-        project_migrate::apply_migration(
-            &state.store,
-            &project_id,
-            &root,
-            &ledger,
-            &scan,
-            &decisions,
-        )
+        let paths = registered_project_paths(state.inner(), &project_id)?;
+        let ledger = project_scan::load_ledger(&paths)?;
+        let scan = project_scan::scan(&paths, &ProjectSkillDirKey::ALL)?;
+        project_migrate::apply_migration(&state.store, &paths, &ledger, &scan, &decisions)
     })
     .await
 }
@@ -456,11 +481,10 @@ pub async fn install_project_skill(
         let _write = state.enter_write()?;
         let agents = enabled_agents(state.inner())?;
         let enabled = enabled_agent_ids(&agents);
-        let root = registered_project_root(state.inner(), &project_id)?;
+        let paths = registered_project_paths(state.inner(), &project_id)?;
         project_install::install_project_skill(
             &store,
-            &project_id,
-            &root,
+            &paths,
             &input,
             staging_id.as_deref(),
             &selections,
@@ -498,12 +522,11 @@ pub async fn install_discovered_project_skill(
         let _write = state.enter_write()?;
         let agents = enabled_agents(state.inner())?;
         let enabled = enabled_agent_ids(&agents);
-        let root = registered_project_root(state.inner(), &project_id)?;
+        let paths = registered_project_paths(state.inner(), &project_id)?;
         let fetcher = HttpFetcher::new(Some(&proxy))?;
         project_install::install_discovered_project_skill(
             &store,
-            &project_id,
-            &root,
+            &paths,
             &fetcher,
             &input.repo,
             input.branch,
@@ -539,11 +562,10 @@ pub async fn import_project_skill_dir(
         let _write = state.enter_write()?;
         let agents = enabled_agents(state.inner())?;
         let enabled = enabled_agent_ids(&agents);
-        let root = registered_project_root(state.inner(), &project_id)?;
+        let paths = registered_project_paths(state.inner(), &project_id)?;
         project_install::import_project_skill_dir(
             &store,
-            &project_id,
-            &root,
+            &paths,
             &source,
             &targets,
             &project_registry::selectable_dir_keys(&agents),
@@ -574,11 +596,10 @@ pub async fn create_project_skill(
         let _write = state.enter_write()?;
         let agents = enabled_agents(state.inner())?;
         let enabled = enabled_agent_ids(&agents);
-        let root = registered_project_root(state.inner(), &project_id)?;
+        let paths = registered_project_paths(state.inner(), &project_id)?;
         project_install::create_project_skill(
             &store,
-            &project_id,
-            &root,
+            &paths,
             &skill_id,
             &content,
             &targets,

@@ -148,6 +148,7 @@ pub fn run() {
             commands::projects::read_project_skill_body,
             commands::projects::remove_project,
             commands::projects::remove_project_skill_copy,
+            commands::projects::resolve_project_layout,
             commands::projects::reveal_project_folder,
             commands::projects::set_project_auto_sync,
             commands::projects::set_project_skill_targets,

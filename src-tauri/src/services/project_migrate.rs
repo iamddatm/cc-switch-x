@@ -1,7 +1,8 @@
-//! v1「对等副本」台账 → v2「项目内真源」的显式迁移。
+//! v1「对等副本」台账 → 当前真源模型的显式迁移。
 //!
 //! 三条纪律决定了这个模块的写法：
-//! 1. **只新建文件**：迁移把某个目录的现有字节复制进 `.ccswitchx/skills/<id>/`，
+//! 1. **只新建文件**：迁移把某个目录的现有字节复制进项目真源
+//!    （`<storeRoot>/local/projects/<pid>/skills/<id>/`），
 //!    绝不改动任何 agent 目录 —— 那些是用户的 git 内容。
 //! 2. **读路径不写盘**：计划由 `plan_migration` 纯计算得出，落盘只发生在
 //!    `apply_migration`，且必须由用户在界面上确认过 `pending_writes`。
@@ -9,17 +10,16 @@
 //!    一律列为冲突要求人工裁决；未裁决整体拒绝，不做部分写入。
 
 use crate::domain::project::{
-    canonical_root, canonical_skill_dir, ProjectDirState, ProjectLedger, PROJECT_LEDGER_VERSION,
-    PROJECT_SKILL_DIRS,
+    ProjectDirState, ProjectLedger, ProjectPaths, PROJECT_LEDGER_VERSION, PROJECT_SKILL_DIRS,
 };
 use crate::error::AppError;
 use crate::services::project_scan::{self, ProjectScan};
 use crate::store::{copy_dir, Store};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-/// 会把字节新建进真源的采纳来源；`files` 已经是相对项目根的完整路径。
+/// 会把字节新建进真源的采纳来源；`files` 已经是相对**项目数据根**的完整路径。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrationItem {
@@ -73,7 +73,7 @@ impl ProjectMigrationPlan {
             && self.drops.is_empty()
     }
 
-    /// 确认之前必须给用户看的清单：会在你仓库里新建/重写哪些文件。
+    /// 确认之前必须给用户看的清单：会往客户端的项目数据目录里新建/重写哪些文件。
     pub fn pending_writes(&self) -> Vec<String> {
         if self.is_empty() {
             return Vec::new();
@@ -82,7 +82,7 @@ impl ProjectMigrationPlan {
         for proposal in self.proposals.iter().filter(|item| item.default_adopt) {
             writes.extend(proposal.item.files.clone());
         }
-        writes.push(project_scan::LEDGER_RELATIVE.to_string());
+        writes.push(project_scan::LEDGER_DISPLAY.to_string());
         writes.sort();
         writes
     }
@@ -121,12 +121,13 @@ fn relative_of(key: &str) -> Option<&'static str> {
         .map(|spec| spec.relative_path)
 }
 
-/// 采纳后将在真源里出现的文件（相对项目根）。
+/// 采纳后将在真源里出现的文件（相对**项目数据根** `<storeRoot>/local/projects/<pid>/`，
+/// 不是用户仓库里的路径）。
 fn canonical_files_of(id: &str, state: &ProjectDirState) -> Vec<String> {
     state
         .files
         .keys()
-        .map(|file| format!("{}/{id}/{file}", project_scan::CANONICAL_RELATIVE, id = id))
+        .map(|file| format!("{}/{id}/{file}", project_scan::CANONICAL_DISPLAY, id = id))
         .collect()
 }
 
@@ -237,22 +238,13 @@ pub fn plan_migration(ledger: &ProjectLedger, scan: &ProjectScan) -> ProjectMigr
     plan
 }
 
-fn backup_ledger(
-    store: &Store,
-    project_id: &str,
-    timestamp: i64,
-    project_root: &Path,
-) -> Result<Option<PathBuf>, AppError> {
-    let source = project_scan::ledger_path(project_root);
+fn backup_ledger(store: &Store, paths: &ProjectPaths, timestamp: i64) -> Result<Option<PathBuf>, AppError> {
+    let source = paths.ledger_path();
     if !source.is_file() {
         return Ok(None);
     }
     let target = store
-        .root()
-        .join("backups")
-        .join("projects")
-        .join(project_id)
-        .join(timestamp.to_string())
+        .project_backup_dir(&paths.id, timestamp)?
         .join("ledger")
         .join("skills.json");
     if let Some(parent) = target.parent() {
@@ -263,7 +255,7 @@ fn backup_ledger(
 }
 
 /// 删除本次新建的真源目录并从备份还原台账。agent 目录从头到尾没被碰过，无需还原。
-fn rollback(created: &[PathBuf], backup: &Option<PathBuf>, project_root: &Path) {
+fn rollback(created: &[PathBuf], backup: &Option<PathBuf>, paths: &ProjectPaths) {
     for path in created {
         if path.is_dir() {
             let _ = std::fs::remove_dir_all(path);
@@ -271,10 +263,7 @@ fn rollback(created: &[PathBuf], backup: &Option<PathBuf>, project_root: &Path) 
     }
     if let Some(backup) = backup {
         if let Ok(bytes) = std::fs::read(backup) {
-            let _ = crate::store::atomic::write_atomic(
-                &project_scan::ledger_path(project_root),
-                &bytes,
-            );
+            let _ = crate::store::atomic::write_atomic(paths.ledger_path(), &bytes);
         }
     }
 }
@@ -282,8 +271,7 @@ fn rollback(created: &[PathBuf], backup: &Option<PathBuf>, project_root: &Path) 
 /// 落盘迁移。调用方必须已经让用户看过 `pending_writes` 并确认。
 pub fn apply_migration(
     store: &Store,
-    project_id: &str,
-    project_root: &Path,
+    paths: &ProjectPaths,
     ledger: &ProjectLedger,
     scan: &ProjectScan,
     decisions: &[MigrationDecision],
@@ -376,13 +364,13 @@ pub fn apply_migration(
     let mut created: Vec<PathBuf> = Vec::new();
 
     let result = (|| -> Result<(), AppError> {
-        report.ledger_backup = backup_ledger(store, project_id, timestamp, project_root)?;
+        report.ledger_backup = backup_ledger(store, paths, timestamp)?;
         let mut next = ledger.clone();
 
         for (id, from_dir, targets) in &wanted {
             let relative = relative_of(from_dir)
                 .ok_or_else(|| AppError::Project(format!("未知的项目目录：{from_dir}")))?;
-            let source = project_root.join(relative).join(id);
+            let source = paths.root.join(relative).join(id);
             if project_scan::is_link(&source) {
                 return Err(AppError::Project(format!(
                     "拒绝迁移符号链接目录：{}",
@@ -395,7 +383,7 @@ pub fn apply_migration(
                     source.display()
                 )));
             }
-            let target = canonical_skill_dir(project_root, id)?;
+            let target = paths.canonical_skill_dir(id)?;
             let source_state = project_scan::tree_state(&source)?;
             if target.exists() {
                 // 幂等靠这一支：内容相同当作已采纳；不同则拒绝，绝不覆盖已有真源。
@@ -408,7 +396,7 @@ pub fn apply_migration(
                     )));
                 }
             } else {
-                let root = canonical_root(project_root);
+                let root = paths.canonical_root();
                 std::fs::create_dir_all(&root)?;
                 let staging = root.join(format!(".staging-{}-{}", timestamp, std::process::id()));
                 if staging.exists() {
@@ -448,11 +436,11 @@ pub fn apply_migration(
 
         next.version = PROJECT_LEDGER_VERSION;
         next.updated_at = chrono::Utc::now().to_rfc3339();
-        project_scan::save_ledger(project_root, &next)?;
+        project_scan::save_ledger(paths, &next)?;
 
         // 回读：台账写坏了就等于丢掉用户的归属信息，必须当场发现。
         // 按序列化后的形态比，`mtime` 之类不持久化的字段才不会造成假阴性。
-        let read_back = project_scan::load_ledger(project_root)?;
+        let read_back = project_scan::load_ledger(paths)?;
         let same = serde_json::to_value(&read_back.skills)? == serde_json::to_value(&next.skills)?;
         if read_back.version != PROJECT_LEDGER_VERSION || !same {
             return Err(AppError::Project("迁移后的台账回读不一致".into()));
@@ -461,7 +449,7 @@ pub fn apply_migration(
     })();
 
     if let Err(error) = result {
-        rollback(&created, &report.ledger_backup, project_root);
+        rollback(&created, &report.ledger_backup, paths);
         return Err(AppError::Project(format!(
             "{error}；迁移已回滚，未改动任何 agent 目录"
         )));
@@ -500,6 +488,16 @@ mod tests {
         }
     }
 
+    /// 真源与台账在 store 的 `local/projects/<id>/` 下（ID 固定 app-1，与 apply 传的一致）。
+    fn paths(fx: &Fixture) -> ProjectPaths {
+        ProjectPaths::resolve(fx.store.root(), "app-1", &fx.root).unwrap()
+    }
+
+    /// 某个 skill 的真源目录。
+    fn canonical_dir(fx: &Fixture, id: &str) -> PathBuf {
+        paths(fx).canonical_skill_dir(id).unwrap()
+    }
+
     /// 一个 skill 目录：SKILL.md + 一个附件，用来验证整目录复制。
     fn seed(dir: &Path, body: &str) {
         std::fs::create_dir_all(dir.join("references")).unwrap();
@@ -521,7 +519,7 @@ mod tests {
 
     /// 手工造 v1 台账：targets 与 dirs 基线按当前磁盘状态填。
     fn write_v1_ledger(fx: &Fixture, entries: &[(&str, &[&str])]) {
-        let scan = project_scan::scan(&fx.root, &ProjectSkillDirKey::ALL).unwrap();
+        let scan = project_scan::scan(&paths(&fx), &ProjectSkillDirKey::ALL).unwrap();
         let mut ledger = ProjectLedger {
             version: 1,
             updated_at: String::new(),
@@ -543,18 +541,18 @@ mod tests {
                 },
             );
         }
-        project_scan::save_ledger(&fx.root, &ledger).unwrap();
+        project_scan::save_ledger(&paths(&fx), &ledger).unwrap();
     }
 
     fn plan(fx: &Fixture) -> ProjectMigrationPlan {
-        let ledger = project_scan::load_ledger(&fx.root).unwrap();
-        let scan = project_scan::scan(&fx.root, &ProjectSkillDirKey::ALL).unwrap();
+        let ledger = project_scan::load_ledger(&paths(&fx)).unwrap();
+        let scan = project_scan::scan(&paths(&fx), &ProjectSkillDirKey::ALL).unwrap();
         plan_migration(&ledger, &scan)
     }
 
     fn apply(fx: &Fixture, decisions: &[(&str, &str)]) -> Result<ProjectMigrationReport, AppError> {
-        let ledger = project_scan::load_ledger(&fx.root).unwrap();
-        let scan = project_scan::scan(&fx.root, &ProjectSkillDirKey::ALL).unwrap();
+        let ledger = project_scan::load_ledger(&paths(&fx)).unwrap();
+        let scan = project_scan::scan(&paths(&fx), &ProjectSkillDirKey::ALL).unwrap();
         let decisions: Vec<MigrationDecision> = decisions
             .iter()
             .map(|(skill_id, dir)| MigrationDecision {
@@ -562,7 +560,7 @@ mod tests {
                 dir: dir.to_string(),
             })
             .collect();
-        apply_migration(&fx.store, "app-1", &fx.root, &ledger, &scan, &decisions)
+        apply_migration(&fx.store, &paths(&fx), &ledger, &scan, &decisions)
     }
 
     fn tree_hash(path: &Path) -> Option<String> {
@@ -585,7 +583,7 @@ mod tests {
         );
         assert!(plan.adopts[0]
             .files
-            .contains(&".ccswitchx/skills/a/references/a.md".to_string()));
+            .contains(&"skills/a/references/a.md".to_string()));
     }
 
     #[test]
@@ -612,10 +610,10 @@ mod tests {
 
         let error = apply(&fx, &[]).unwrap_err();
         assert!(error.to_string().contains("未裁决"), "{error}");
-        assert!(!canonical_root(&fx.root).exists(), "整体拒绝时不能留下半个真源");
+        assert!(!paths(&fx).canonical_root().to_path_buf().exists(), "整体拒绝时不能留下半个真源");
         assert_eq!(tree_hash(&source), before);
         assert_eq!(
-            project_scan::load_ledger(&fx.root).unwrap().version,
+            project_scan::load_ledger(&paths(&fx)).unwrap().version,
             1,
             "台账不能被改动"
         );
@@ -633,7 +631,7 @@ mod tests {
         assert_eq!(report.adopted, vec!["a".to_string()]);
         assert_eq!(report.version, PROJECT_LEDGER_VERSION);
 
-        let canonical = canonical_skill_dir(&fx.root, "a").unwrap();
+        let canonical = canonical_dir(&fx, "a");
         assert_eq!(tree_hash(&canonical), before.0, "真源必须等于采纳来源");
         assert_eq!(
             (tree_hash(&claude_dir), tree_hash(&qoder_dir)),
@@ -642,7 +640,7 @@ mod tests {
         );
         assert!(canonical.join("references/a.md").is_file(), "整目录复制，附件也要在");
 
-        let ledger = project_scan::load_ledger(&fx.root).unwrap();
+        let ledger = project_scan::load_ledger(&paths(&fx)).unwrap();
         assert_eq!(ledger.version, PROJECT_LEDGER_VERSION);
         assert!(ledger.skills["a"].canonical.present);
         // 基线取真源：不一致的目录会被判成 edited 要求人工裁决，而不是被覆盖。
@@ -678,7 +676,7 @@ mod tests {
         let created: Vec<String> = p
             .pending_writes()
             .into_iter()
-            .filter(|write| write.starts_with(&format!("{}/", project_scan::CANONICAL_RELATIVE)))
+            .filter(|write| write.starts_with(&format!("{}/", project_scan::CANONICAL_DISPLAY)))
             .collect();
         assert!(
             created.is_empty(),
@@ -687,7 +685,7 @@ mod tests {
 
         // 勾选采纳才落地。
         apply(&fx, &[("a", "claude")]).unwrap();
-        assert!(canonical_skill_dir(&fx.root, "a").unwrap().is_dir());
+        assert!(canonical_dir(&fx, "a").is_dir());
     }
 
     #[test]
@@ -701,13 +699,13 @@ mod tests {
         assert!(p.proposals[0].default_adopt);
         assert!(p
             .pending_writes()
-            .contains(&".ccswitchx/skills/a/SKILL.md".to_string()));
+            .contains(&"skills/a/SKILL.md".to_string()));
         assert!(p
             .pending_writes()
-            .contains(&project_scan::LEDGER_RELATIVE.to_string()));
+            .contains(&project_scan::LEDGER_DISPLAY.to_string()));
 
         apply(&fx, &[]).unwrap();
-        assert!(canonical_skill_dir(&fx.root, "a").unwrap().is_dir());
+        assert!(canonical_dir(&fx, "a").is_dir());
     }
 
     #[test]
@@ -721,10 +719,10 @@ mod tests {
         assert_eq!(report.dropped, vec!["gone".to_string()]);
         assert!(report.adopted.is_empty());
         assert!(
-            !canonical_root(&fx.root).exists(),
+            !paths(&fx).canonical_root().to_path_buf().exists(),
             "无事可做时不该在仓库里建目录"
         );
-        assert!(project_scan::load_ledger(&fx.root)
+        assert!(project_scan::load_ledger(&paths(&fx))
             .unwrap()
             .skills
             .is_empty());
@@ -738,7 +736,7 @@ mod tests {
         write_v1_ledger(&fx, &[("a", &["claude"]), ("b", &["claude"])]);
         // b 的真源位置被用户手建了一个没有 SKILL.md 的目录：扫描不算它存在，
         // 计划里会有 b，落盘时才发现会覆盖别人的内容 —— 必须拒绝并回滚 a。
-        let blocked = canonical_skill_dir(&fx.root, "b").unwrap();
+        let blocked = canonical_dir(&fx, "b");
         std::fs::create_dir_all(&blocked).unwrap();
         std::fs::write(blocked.join("README.md"), "用户自己的东西").unwrap();
 
@@ -746,12 +744,12 @@ mod tests {
         assert!(error.to_string().contains("回滚"), "{error}");
         assert!(error.to_string().contains("拒绝覆盖"), "{error}");
         assert_eq!(
-            project_scan::load_ledger(&fx.root).unwrap().version,
+            project_scan::load_ledger(&paths(&fx)).unwrap().version,
             1,
             "失败必须把台账还原"
         );
         assert!(
-            !canonical_skill_dir(&fx.root, "a").unwrap().exists(),
+            !canonical_dir(&fx, "a").exists(),
             "本次新建的真源目录必须被删掉"
         );
         assert!(
@@ -789,7 +787,7 @@ mod tests {
     fn plan_skips_entries_whose_canonical_already_exists() {
         let fx = fixture();
         claude(&fx, "a", "内容");
-        seed(&canonical_skill_dir(&fx.root, "a").unwrap(), "内容");
+        seed(&canonical_dir(&fx, "a"), "内容");
         write_v1_ledger(&fx, &[("a", &["claude"])]);
 
         assert!(plan(&fx).is_empty());
@@ -800,8 +798,8 @@ mod tests {
         let fx = fixture();
         claude(&fx, "a", "内容");
         write_v1_ledger(&fx, &[("a", &["claude"])]);
-        let ledger = project_scan::load_ledger(&fx.root).unwrap();
-        let mut scan = project_scan::scan(&fx.root, &ProjectSkillDirKey::ALL).unwrap();
+        let ledger = project_scan::load_ledger(&paths(&fx)).unwrap();
+        let mut scan = project_scan::scan(&paths(&fx), &ProjectSkillDirKey::ALL).unwrap();
         scan.unresolved_canonical.push("a".to_string());
 
         let p = plan_migration(&ledger, &scan);

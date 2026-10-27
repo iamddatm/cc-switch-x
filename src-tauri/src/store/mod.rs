@@ -27,6 +27,9 @@ pub const SKILL_BACKUP_KEEP: usize = 20;
 
 impl Store {
     /// 在 root 下补齐真源目录布局，并把不可同步的条目合并进 .gitignore。
+    ///
+    /// `local/projects/` 是项目级真源与台账的落点，靠 `local/` 这一行保持**不被同步**；
+    /// 拉取或恢复带回旧版 .gitignore 时，`git_sync::ensure_layout` 会重新走这个函数补回来。
     pub fn init(root: PathBuf) -> Result<Self, StoreError> {
         for name in ["mcp", "skills", "prompts", "rules", "subagents", "hooks"] {
             fs::create_dir_all(root.join("assets").join(name))?;
@@ -34,6 +37,7 @@ impl Store {
         for name in [
             "agents",
             "local/agents",
+            "local/projects",
             "state",
             "state/staging",
             "backups",
@@ -77,6 +81,33 @@ impl Store {
     /// `agents/<id>.json`（启用矩阵）的路径。id 只来自内置注册表，不是用户输入。
     pub fn agent_config_path(&self, agent_id: &str) -> PathBuf {
         self.root.join("agents").join(format!("{agent_id}.json"))
+    }
+
+    /// `<storeRoot>/local/projects/`：各项目真源与台账的公共父目录。
+    /// 刻意放在 `local/` 子树下 —— `.gitignore` 必需条目覆盖它，
+    /// `backup::collect_files` 又是白名单收集，所以这份真源不参与任何跨设备同步。
+    pub fn projects_root(&self) -> PathBuf {
+        self.root.join("local").join("projects")
+    }
+
+    /// 单个项目的数据目录。项目 ID 由我们自己生成，仍过一遍 ID 安全，
+    /// 免得哪天把外部字符串当 id 传进来就变成路径穿越。
+    pub fn project_dir(&self, project_id: &str) -> Result<PathBuf, StoreError> {
+        if !is_safe_id(project_id) {
+            return Err(StoreError::InvalidId(project_id.to_string()));
+        }
+        Ok(self.projects_root().join(project_id))
+    }
+
+    /// `backups/projects/<project-id>/<timestamp>`：一次项目级操作的备份根。
+    /// 槽位名由调用方在其下再分（`canonical/`、`ledger/`、`<dir-key>/`、`legacy/`）。
+    pub fn project_backup_dir(&self, project_id: &str, timestamp: i64) -> Result<PathBuf, StoreError> {
+        Ok(self
+            .root
+            .join("backups")
+            .join("projects")
+            .join(project_id)
+            .join(timestamp.to_string()))
     }
 
     pub fn entry_path(&self, asset_type: AssetType, id: &str) -> Result<PathBuf, StoreError> {

@@ -9,7 +9,7 @@
 //!   （`.meta.json` 不能进仓库：它污染提交内容，还会让每次检查都改变目录指纹、
 //!   把全部渲染目标刷成「待更新」），铺开交给同步引擎，更新本身不写渲染产物。
 
-use crate::domain::project::{canonical_skill_dir, ProjectLedger};
+use crate::domain::project::{ProjectLedger, ProjectPaths};
 use crate::domain::skill::parse_metadata;
 use crate::domain::skill_meta::{read_meta, write_meta, SkillMeta};
 use crate::domain::AssetType;
@@ -226,7 +226,7 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
 ///
 /// 下载、定位上游目录、算哈希、备份、换目录全部共用；差别只在来源与检查状态的存法
 /// （`Provenance` + `record_check`）、更新后谁铺开（`SkillSink::after_write`），
-/// 以及暂存/备份的落点（复用 `SkillSink` 的「与目的同卷」规则）。
+/// 以及暂存/备份的落点（复用 `SkillSink`，两侧都在 store 卷上）。
 pub enum UpdateSink<'a> {
     Store {
         store: &'a Store,
@@ -234,13 +234,12 @@ pub enum UpdateSink<'a> {
     },
     Project {
         store: &'a Store,
-        project_id: &'a str,
-        project_root: &'a Path,
+        paths: &'a ProjectPaths,
         /// 同一批更新共用一个时间戳，备份才会落在同一个目录里。
         timestamp: i64,
         /// 来源真源：读 `source` 定位上游，更新后刷 `source`。
         ledger: &'a mut ProjectLedger,
-        /// 易变的检查状态：只落本机 `local/`，不进仓库。
+        /// 易变的检查状态：只落本机 `local/`，不进台账。
         cache: &'a mut ProjectCheckCache,
     },
 }
@@ -252,14 +251,12 @@ impl<'a> UpdateSink<'a> {
             UpdateSink::Store { store, home } => SkillSink::Store { store, home },
             UpdateSink::Project {
                 store,
-                project_root,
-                project_id,
+                paths,
                 timestamp,
                 ..
             } => SkillSink::Project {
                 store,
-                project_root,
-                project_id,
+                paths,
                 timestamp: *timestamp,
             },
         }
@@ -268,11 +265,7 @@ impl<'a> UpdateSink<'a> {
     fn load(&self, ids: Option<&[String]>) -> Result<LoadReport, AppError> {
         match self {
             UpdateSink::Store { store, .. } => load_store_targets(store, ids),
-            UpdateSink::Project {
-                project_root,
-                ledger,
-                ..
-            } => load_project_targets(ledger, project_root, ids),
+            UpdateSink::Project { paths, ledger, .. } => load_project_targets(ledger, paths, ids),
         }
     }
 
@@ -298,7 +291,7 @@ impl<'a> UpdateSink<'a> {
                 Ok(())
             }
             // 这次探测到的分支与上游路径**不**回填台账：一次只读的「检查更新」
-            // 不该在用户的仓库里留下 diff。真更新时才由 after_update 回写。
+            // 不该在台账里留下无谓的写入。真更新时才由 after_update 回写。
             UpdateSink::Project { cache, .. } => {
                 Self::merge_check(cache, &target.id, latest_hash, update_available, error);
                 Ok(())
@@ -354,21 +347,17 @@ impl<'a> UpdateSink<'a> {
             UpdateSink::Store { .. } => Ok(()),
             UpdateSink::Project {
                 store,
-                project_id,
+                paths,
                 cache,
                 ..
-            } => cache.save(store, project_id),
+            } => cache.save(store, &paths.id),
         }
     }
 
     fn flush_ledger(&mut self) -> Result<(), AppError> {
         match self {
             UpdateSink::Store { .. } => Ok(()),
-            UpdateSink::Project {
-                project_root,
-                ledger,
-                ..
-            } => project_scan::save_ledger(project_root, ledger),
+            UpdateSink::Project { paths, ledger, .. } => project_scan::save_ledger(paths, ledger),
         }
     }
 }
@@ -456,7 +445,7 @@ fn load_store_targets(store: &Store, ids: Option<&[String]>) -> Result<LoadRepor
 /// 等于替用户决定这个项目该有什么。
 fn load_project_targets(
     ledger: &ProjectLedger,
-    project_root: &Path,
+    paths: &ProjectPaths,
     ids: Option<&[String]>,
 ) -> Result<LoadReport, AppError> {
     let requested: Option<BTreeSet<&str>> =
@@ -483,7 +472,7 @@ fn load_project_targets(
         {
             continue;
         }
-        let dir = match canonical_skill_dir(project_root, id) {
+        let dir = match paths.canonical_skill_dir(id) {
             Ok(path) => path,
             Err(error) => {
                 failures.push(SkillItemFailure {
@@ -1033,7 +1022,7 @@ fn update_one(
 mod tests {
     use super::*;
     use crate::domain::project::{
-        canonical_skill_dir, ProjectLedger, ProjectSkillEntry, ProjectSkillSource,
+        ProjectLedger, ProjectPaths, ProjectSkillEntry, ProjectSkillSource,
         PROJECT_LEDGER_VERSION,
     };
     use crate::domain::skill_meta::{SkillMeta, SkillSourceKind};
@@ -1218,9 +1207,15 @@ mod tests {
         UpdateSink::Store { store, home }
     }
 
-    /// 项目场景：`.ccswitchx/skills/demo` 是项目真源，台账里记着 GitHub 来源。
-    fn seed_project(root: &Path, version: &str, source: ProjectSkillSource) {
-        let canonical = canonical_skill_dir(root, "demo").unwrap();
+    /// v3 的落点：真源与台账在 store 的 `local/projects/app-1/` 下，ID 与 sink 传的一致。
+    fn project_paths(store: &Store, root: &Path) -> ProjectPaths {
+        ProjectPaths::resolve(store.root(), "app-1", root).unwrap()
+    }
+
+    /// 项目场景：`local/projects/app-1/skills/demo` 是项目真源，台账里记着 GitHub 来源。
+    fn seed_project(store: &Store, root: &Path, version: &str, source: ProjectSkillSource) {
+        let paths = project_paths(store, root);
+        let canonical = paths.canonical_skill_dir("demo").unwrap();
         fs::create_dir_all(canonical.join("references")).unwrap();
         fs::write(
             canonical.join("SKILL.md"),
@@ -1241,7 +1236,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        project_scan::save_ledger(root, &ledger).unwrap();
+        project_scan::save_ledger(&paths, &ledger).unwrap();
     }
 
     fn github_source() -> ProjectSkillSource {
@@ -1256,35 +1251,35 @@ mod tests {
 
     fn project_sink<'a>(
         store: &'a Store,
-        root: &'a Path,
+        paths: &'a ProjectPaths,
         ledger: &'a mut ProjectLedger,
         cache: &'a mut ProjectCheckCache,
     ) -> UpdateSink<'a> {
         UpdateSink::Project {
             store,
-            project_id: "app-1",
-            project_root: root,
+            paths,
             timestamp: 7_000,
             ledger,
             cache,
         }
     }
 
-    /// 检查更新是只读动作：仓库里的台账与真源一个字节都不能变，结果只落本机缓存。
+    /// 检查更新是只读动作：台账与真源一个字节都不能变，结果只落本机缓存。
     #[test]
     fn project_check_writes_only_the_local_cache() {
         let dir = tempdir().unwrap();
         let store = Store::init(dir.path().join("store")).unwrap();
         let root = dir.path().join("home/work/app");
-        seed_project(&root, "v1", github_source());
-        let ledger_file = project_scan::ledger_path(&root);
+        let paths = project_paths(&store, &root);
+        seed_project(&store, &root, "v1", github_source());
+        let ledger_file = paths.ledger_path().to_path_buf();
         let ledger_before = fs::read(&ledger_file).unwrap();
         let fetcher = FakeFetcher::new(remote_fixture(&dir.path().join("remote"), "v2"));
-        let mut ledger = project_scan::load_ledger(&root).unwrap();
+        let mut ledger = project_scan::load_ledger(&paths).unwrap();
         let mut cache = ProjectCheckCache::default();
 
         let report = check(
-            project_sink(&store, &root, &mut ledger, &mut cache),
+            project_sink(&store, &paths, &mut ledger, &mut cache),
             &fetcher,
             None,
         )
@@ -1296,15 +1291,15 @@ mod tests {
         assert_eq!(
             fs::read(&ledger_file).unwrap(),
             ledger_before,
-            "检查更新不能碰随仓库提交的台账"
+            "检查更新不能碰台账"
         );
-        let canonical = canonical_skill_dir(&root, "demo").unwrap();
+        let canonical = paths.canonical_skill_dir("demo").unwrap();
         assert!(fs::read_to_string(canonical.join("SKILL.md"))
             .unwrap()
             .contains("v1"));
         assert!(
             !canonical.join(".meta.json").exists(),
-            "项目真源不写 .meta.json：它进仓库，且会让每次检查都改变目录指纹"
+            "项目真源不写 .meta.json：来源已在台账里，再写会让每次检查都改变目录指纹"
         );
 
         let mut cached = ProjectCheckCache::load(&store, "app-1");
@@ -1321,8 +1316,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::init(dir.path().join("store")).unwrap();
         let root = dir.path().join("home/work/app");
-        seed_project(&root, "v1", github_source());
-        let before = project_scan::load_ledger(&root)
+        let paths = project_paths(&store, &root);
+        seed_project(&store, &root, "v1", github_source());
+        let before = project_scan::load_ledger(&paths)
             .unwrap()
             .skills["demo"]
             .canonical
@@ -1331,12 +1327,12 @@ mod tests {
         fs::create_dir_all(&rendered).unwrap();
         fs::write(rendered.join("SKILL.md"), "旧的渲染产物").unwrap();
         let fetcher = FakeFetcher::new(remote_fixture(&dir.path().join("remote"), "v2"));
-        let canonical = canonical_skill_dir(&root, "demo").unwrap();
+        let canonical = paths.canonical_skill_dir("demo").unwrap();
 
-        let mut ledger = project_scan::load_ledger(&root).unwrap();
+        let mut ledger = project_scan::load_ledger(&paths).unwrap();
         let mut cache = ProjectCheckCache::default();
         let report = update(
-            project_sink(&store, &root, &mut ledger, &mut cache),
+            project_sink(&store, &paths, &mut ledger, &mut cache),
             &fetcher,
             &["demo".to_string()],
         )
@@ -1365,7 +1361,7 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().to_string())
             .filter(|name| name.starts_with(".staging-"))
             .collect();
-        assert!(leftovers.is_empty(), "更新完要清掉同卷暂存：{leftovers:?}");
+        assert!(leftovers.is_empty(), "暂存在 store 的 staging 区，真源旁边不该留任何东西");
 
         let backup = PathBuf::from(report.outcomes[0].backup_path.as_ref().unwrap());
         assert!(backup.starts_with(store.root().join("backups").join("projects").join("app-1")));
@@ -1373,7 +1369,7 @@ mod tests {
             .unwrap()
             .contains("v1"));
 
-        let saved = project_scan::load_ledger(&root).unwrap();
+        let saved = project_scan::load_ledger(&paths).unwrap();
         let entry = &saved.skills["demo"];
         let source = entry.source.as_ref().unwrap();
         assert_eq!(source.branch.as_deref(), Some("main"));
@@ -1392,10 +1388,10 @@ mod tests {
             .unwrap()
             .update_available);
 
-        let mut ledger = project_scan::load_ledger(&root).unwrap();
+        let mut ledger = project_scan::load_ledger(&paths).unwrap();
         let mut cache = ProjectCheckCache::default();
         let second = update(
-            project_sink(&store, &root, &mut ledger, &mut cache),
+            project_sink(&store, &paths, &mut ledger, &mut cache),
             &fetcher,
             &["demo".to_string()],
         )
@@ -1408,7 +1404,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::init(dir.path().join("store")).unwrap();
         let root = dir.path().join("home/work/app");
+        let paths = project_paths(&store, &root);
         seed_project(
+            &store,
             &root,
             "v1",
             ProjectSkillSource {
@@ -1419,13 +1417,13 @@ mod tests {
                 tree_hash: None,
             },
         );
-        let ledger_file = project_scan::ledger_path(&root);
+        let ledger_file = paths.ledger_path().to_path_buf();
         let ledger_before = fs::read(&ledger_file).unwrap();
-        let mut ledger = project_scan::load_ledger(&root).unwrap();
+        let mut ledger = project_scan::load_ledger(&paths).unwrap();
         let mut cache = ProjectCheckCache::default();
 
         let report = check(
-            project_sink(&store, &root, &mut ledger, &mut cache),
+            project_sink(&store, &paths, &mut ledger, &mut cache),
             &FakeFetcher::new(remote_fixture(&dir.path().join("remote"), "v2")),
             None,
         )
@@ -1446,13 +1444,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::init(dir.path().join("store")).unwrap();
         let root = dir.path().join("home/work/app");
-        seed_project(&root, "v1", github_source());
-        fs::remove_dir_all(canonical_skill_dir(&root, "demo").unwrap()).unwrap();
-        let mut ledger = project_scan::load_ledger(&root).unwrap();
+        let paths = project_paths(&store, &root);
+        seed_project(&store, &root, "v1", github_source());
+        fs::remove_dir_all(paths.canonical_skill_dir("demo").unwrap()).unwrap();
+        let mut ledger = project_scan::load_ledger(&paths).unwrap();
         let mut cache = ProjectCheckCache::default();
 
         let report = update(
-            project_sink(&store, &root, &mut ledger, &mut cache),
+            project_sink(&store, &paths, &mut ledger, &mut cache),
             &FakeFetcher::new(remote_fixture(&dir.path().join("remote"), "v2")),
             &["demo".to_string()],
         )
@@ -1460,7 +1459,7 @@ mod tests {
 
         assert_eq!(report.outcomes[0].status, "failed");
         assert!(
-            !canonical_skill_dir(&root, "demo").unwrap().exists(),
+            !paths.canonical_skill_dir("demo").unwrap().exists(),
             "跳过意味着一个字都不写"
         );
     }
@@ -1470,12 +1469,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::init(dir.path().join("store")).unwrap();
         let root = dir.path().join("home/work/app");
-        seed_project(&root, "v1", github_source());
-        let mut ledger = project_scan::load_ledger(&root).unwrap();
+        let paths = project_paths(&store, &root);
+        seed_project(&store, &root, "v1", github_source());
+        let mut ledger = project_scan::load_ledger(&paths).unwrap();
         let mut cache = ProjectCheckCache::default();
 
         let report = update(
-            project_sink(&store, &root, &mut ledger, &mut cache),
+            project_sink(&store, &paths, &mut ledger, &mut cache),
             &FakeFetcher::new(remote_fixture(&dir.path().join("remote"), "v2")),
             &["ghost".to_string()],
         )
@@ -1493,21 +1493,22 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::init(dir.path().join("store")).unwrap();
         let root = dir.path().join("home/work/app");
-        seed_project(&root, "v1", github_source());
+        let paths = project_paths(&store, &root);
+        seed_project(&store, &root, "v1", github_source());
         let allowed = vec!["claude".to_string()];
         let enabled = vec!["claude".to_string()];
         let rendered = root.join(".claude/skills/demo");
 
-        project_sync::set_targets(&root, "demo", &allowed, &allowed).unwrap();
-        project_sync::sync_project(&store, "app-1", &root, &enabled, &allowed, &[]).unwrap();
+        project_sync::set_targets(&paths, "demo", &allowed, &allowed).unwrap();
+        project_sync::sync_project(&store, &paths, &enabled, &allowed, &[]).unwrap();
         assert!(fs::read_to_string(rendered.join("SKILL.md"))
             .unwrap()
             .contains("v1"));
 
-        let mut ledger = project_scan::load_ledger(&root).unwrap();
+        let mut ledger = project_scan::load_ledger(&paths).unwrap();
         let mut cache = ProjectCheckCache::default();
         update(
-            project_sink(&store, &root, &mut ledger, &mut cache),
+            project_sink(&store, &paths, &mut ledger, &mut cache),
             &FakeFetcher::new(remote_fixture(&dir.path().join("remote"), "v2")),
             &["demo".to_string()],
         )
@@ -1519,7 +1520,7 @@ mod tests {
             "更新不越权渲染"
         );
 
-        let report = project_sync::sync_project(&store, "app-1", &root, &enabled, &allowed, &[]);
+        let report = project_sync::sync_project(&store, &paths, &enabled, &allowed, &[]);
         let report = report.unwrap();
         assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
         assert!(
