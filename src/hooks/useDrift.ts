@@ -23,46 +23,34 @@ export function useDrift() {
   const [drifts, setDrifts] = useState<DriftRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // 首轮清单还没到手时不能报「一致」，否则启动瞬间会先闪一个错误的绿灯
+  const [loading, setLoading] = useState(true);
 
-  const refresh = useCallback(async () => {
+  const run = useCallback(async (fetch: () => Promise<DriftRecord[]>) => {
     setBusy(true);
     try {
-      setDrifts(await api.listDrifts());
+      setDrifts(await fetch());
       setError(null);
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
+      setLoading(false);
     }
   }, []);
 
-  const rescan = useCallback(async () => {
-    setBusy(true);
-    try {
-      setDrifts(await rescanDriftEverywhere());
-      setError(null);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, []);
+  const refresh = useCallback(() => run(api.listDrifts), [run]);
+  const rescan = useCallback(() => run(rescanDriftEverywhere), [run]);
 
   const resolve = useCallback(
     async (drift: DriftRecord, action: ResolveAction) => {
-      setBusy(true);
-      try {
+      await run(async () => {
         await api.resolveDrift(drift.id, action, drift.agentId);
         // 处置完以磁盘为准重新算一遍：解决了一条也可能暴露另一条
-        setDrifts(await rescanDriftEverywhere());
-        setError(null);
-      } catch (e) {
-        setError(String(e));
-      } finally {
-        setBusy(false);
-      }
+        return rescanDriftEverywhere();
+      });
     },
-    [],
+    [run],
   );
 
   useEffect(() => {
@@ -71,8 +59,10 @@ export function useDrift() {
 
   // 别处（状态条或另一个面板）重扫过，本地清单要跟上，否则两处数字会各说各话
   useEffect(() => {
-    const onRescanned = (event: Event) =>
+    const onRescanned = (event: Event) => {
       setDrifts((event as CustomEvent<DriftRecord[]>).detail);
+      setLoading(false);
+    };
     window.addEventListener(DRIFT_RESCAN_EVENT, onRescanned);
     return () => window.removeEventListener(DRIFT_RESCAN_EVENT, onRescanned);
   }, []);
@@ -83,5 +73,5 @@ export function useDrift() {
     [drifts],
   );
 
-  return { drifts, error, busy, refresh, rescan, resolve, forAsset };
+  return { drifts, error, busy, loading, refresh, rescan, resolve, forAsset };
 }

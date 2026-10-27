@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { BookOpen, Pencil, Plus } from "lucide-react";
 import { AgentGlyph } from "../components/agents/AgentGlyph";
 import { AssetRow } from "../components/assets/AssetRow";
@@ -33,7 +33,10 @@ export function PromptsPanel() {
   const { items, error, loading, refresh } = useAssets("prompt");
   const { enabledAgents, refresh: refreshAgents } = useAgents();
   const drift = useDrift();
-  const promptAgents = enabledAgents.filter((agent) => supported(agent, "prompt"));
+  const promptAgents = useMemo(
+    () => enabledAgents.filter((agent) => supported(agent, "prompt")),
+    [enabledAgents],
+  );
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<Editing | null>(null);
@@ -66,15 +69,13 @@ export function PromptsPanel() {
     void drift.refresh();
   };
 
-  const normalized = query.trim().toLowerCase();
-  const visible = items.filter(
-    (item) =>
-      !normalized ||
-      [item.name, item.id, item.description ?? ""]
-        .join(" ")
-        .toLowerCase()
-        .includes(normalized),
-  );
+  const visible = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return items;
+    return items.filter((item) =>
+      [item.name, item.id, item.description ?? ""].join(" ").toLowerCase().includes(normalized),
+    );
+  }, [items, query]);
 
   const openEdit = async (item: AssetSummary) => {
     setLoadingEdit(true);
@@ -93,6 +94,15 @@ export function PromptsPanel() {
     setEditing({ mode: "create", form: EMPTY_FORM });
   };
 
+  /**
+   * 整文件接管被未解决漂移挡住时，光留一串错误文本没法处置：
+   * 立刻重扫一次，让处置横幅当场出现。activate 与 takeover 两条路径同一口径。
+   */
+  const reportWriteError = (e: unknown) => {
+    setActionError(String(e));
+    void drift.rescan();
+  };
+
   const activate = async (promptId: string) => {
     if (!selectedAgentId) return;
     setBusy(promptId);
@@ -109,9 +119,7 @@ export function PromptsPanel() {
         refreshAll();
       }
     } catch (e) {
-      setActionError(String(e));
-      // 被漂移挡住时立刻重扫，让处置横幅当场出现，而不是只留一串错误文本
-      void drift.rescan();
+      reportWriteError(e);
     } finally {
       setBusy(null);
     }
@@ -134,8 +142,7 @@ export function PromptsPanel() {
       setMessage(`已写入 ${outcome.path}`);
       refreshAll();
     } catch (e) {
-      setActionError(String(e));
-      void drift.rescan();
+      reportWriteError(e);
     } finally {
       setBusy(null);
     }
