@@ -3,7 +3,7 @@ import { FolderPlus, Sparkles } from "lucide-react";
 import type { Pane, ProjectScope, Theme } from "../../types";
 import { api } from "../../lib/api";
 import { useProjects } from "../../hooks/useProjects";
-import { useTheme } from "../../hooks/useTheme";
+import { readStoredTheme, useTheme } from "../../hooks/useTheme";
 import { useUpdate } from "../../hooks/useUpdate";
 import { Button } from "../ui/Button";
 import { EmptyState } from "../ui/EmptyState";
@@ -48,7 +48,9 @@ function ProjectEmptyState({ onAdd }: { onAdd: () => void }) {
 
 export function AppShell() {
   const [pane, setPane] = useState<Pane>("mcp");
-  const [theme, setTheme] = useState<Theme>("system");
+  // 初值取 localStorage 镜像（与 index.html 的预帧脚本同源），保证首帧就是用户上次看到的主题；
+  // settings.json 回来后再校正一次，相同值不会触发重渲染。
+  const [theme, setTheme] = useState<Theme>(() => readStoredTheme());
   const [scope, setScopeState] = useState<ProjectScope>(() =>
     localStorage.getItem(SCOPE_STORAGE_KEY) === "project" ? "project" : "global",
   );
@@ -68,7 +70,7 @@ export function AppShell() {
     void api
       .getSettings()
       .then((value) => setTheme(value.theme))
-      .catch((e) => console.warn("读取设置失败，主题保持跟随系统：", e));
+      .catch((e) => console.warn("读取设置失败，主题沿用本机缓存的偏好：", e));
   }, []);
   useTheme(theme);
   const update = useUpdate();

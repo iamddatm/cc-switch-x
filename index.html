@@ -5,9 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CC Switch X</title>
     <script>
-      // 首屏先按系统偏好铺底色，避免暗色系统下启动闪白；保存的设置随后由 AppShell 覆盖。
+      // 预帧按「已保存的主题偏好」铺底色。真源是 settings.json，但读它是异步 IPC，
+      // 首帧等不到；这个 localStorage 镜像由 src/hooks/useTheme.ts 写入，键名必须与此一致。
+      // 只有 system（或缓存缺失/非法）才回落系统偏好，避免显式深色被首帧画成浅色再跳一次。
       try {
-        if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
+        var theme = localStorage.getItem("ccswitchx.theme") || "system";
+        var dark =
+          theme === "dark" ||
+          (theme !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        if (dark) {
           document.documentElement.classList.add("dark");
         }
       } catch {}
