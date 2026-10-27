@@ -1,21 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  ArchiveRestore,
-  Cloud,
-  Eye,
-  EyeOff,
-  GitBranch,
-  HardDrive,
-  RefreshCw,
-} from "lucide-react";
+import { ArchiveRestore, HardDrive } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
-import { Checkbox } from "../components/ui/Checkbox";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { Dialog } from "../components/ui/Dialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Field } from "../components/ui/Field";
-import { IconButton } from "../components/ui/IconButton";
 import { Input } from "../components/ui/Input";
 import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -24,16 +14,12 @@ import {
   type SegmentedItem,
 } from "../components/ui/SegmentedControl";
 import { Select } from "../components/ui/Select";
+import { CloudSection } from "../components/backups/CloudSection";
+import { GitSection } from "../components/backups/GitSection";
 import { useBackups } from "../hooks/useBackups";
 import { api } from "../lib/api";
 import { formatBytes, formatRelativeTime } from "../lib/format";
-import type {
-  BackupSettings,
-  CloudStatus,
-  GitCommit,
-  GitStatus,
-  SnapshotKind,
-} from "../types";
+import type { BackupSettings, GitCommit, SnapshotKind } from "../types";
 
 const INTERVALS = [0, 6, 12, 24, 48, 168];
 const RETAINS = [3, 5, 10, 15, 20, 30, 50];
@@ -61,46 +47,10 @@ function withCurrent(options: number[], current: number): number[] {
     : [...options, current].sort((left, right) => left - right);
 }
 
-function gitStateTone(git: GitStatus): "neutral" | "success" | "warning" | "danger" {
-  switch (git.state) {
-    case "idle":
-      return "success";
-    case "paused":
-      return "warning";
-    case "error":
-      return "danger";
-    default:
-      return "neutral";
-  }
-}
-
-function gitStateLabel(git: GitStatus): string {
-  switch (git.state) {
-    case "unavailable":
-      return "未安装 Git";
-    case "disabled":
-      return git.initialized ? "已停用" : "未初始化";
-    case "idle":
-      return "已就绪";
-    case "syncing":
-      return "同步中";
-    case "paused":
-      return "冲突暂停";
-    case "error":
-      return "上次同步失败";
-  }
-}
-
-function cloudState(status: CloudStatus | null): {
-  label: string;
-  tone: "neutral" | "success" | "warning" | "danger";
-} {
-  if (!status?.configured) return { label: "未配置", tone: "neutral" };
-  if (status.remoteError) return { label: "连接失败", tone: "danger" };
-  if (status.remote?.exists) return { label: "云端有备份", tone: "success" };
-  return { label: "已配置", tone: "neutral" };
-}
-
+/**
+ * 备份面板：容器持有数据、动作与确认对话框；
+ * Git 与云两块字段多、形态复杂，各自拆到 components/backups/ 下。
+ */
 export function BackupsPanel() {
   const {
     snapshots,
@@ -402,7 +352,6 @@ export function BackupsPanel() {
 
   const interval = settings?.intervalHours ?? 24;
   const retain = settings?.retainCount ?? 10;
-  const cloudBadge = cloudState(cloudStatus);
   const cloudRemotePath = cloudBaseUrl.trim()
     ? `${cloudBaseUrl.trim().replace(/\/+$/, "")}/${cloudRemoteDir
         .trim()
@@ -702,412 +651,59 @@ export function BackupsPanel() {
             )}
           </section>
 
-          <section className="rounded-panel border border-border bg-surface">
-            <div className="flex items-center gap-2 border-b border-border px-4 py-3">
-              <GitBranch size={15} className="text-fg-3" aria-hidden />
-              <h3 className="text-strong text-fg-1">Git 备份</h3>
-              {git && <Badge tone={gitStateTone(git)}>{gitStateLabel(git)}</Badge>}
-              {git?.initialized && (
-                <Badge tone={git.remoteVerified ? "success" : "warning"}>
-                  {git.remoteVerified ? "远端已验证" : "远端未验证"}
-                </Badge>
-              )}
-            </div>
+          <GitSection
+            git={git}
+            settings={settings}
+            commits={commits}
+            busy={busy}
+            remoteInput={remoteInput}
+            branchInput={branchInput}
+            onRemoteInputChange={setRemoteInput}
+            onBranchInputChange={setBranchInput}
+            onInit={() =>
+              void act("git-init", () => api.gitInit(), "Git 备份已初始化")
+            }
+            onSaveRemote={saveRemote}
+            onVerifyRemote={() => void verifyRemote()}
+            onToggle={saveGitToggle}
+            onCommit={() =>
+              void act("commit", () => api.gitCommitNow(), "已提交当前真源")
+            }
+            onPull={() => void pullNow()}
+            onPush={() => void act("push", () => api.gitPushNow(), "已推送到远端")}
+            onRestoreCommit={setGitRestoreTarget}
+            onResolveConflict={setConflictAction}
+            onRevealStore={() =>
+              void act("reveal", () => api.revealBackupLocation("store"))
+            }
+          />
 
-            {!git ? (
-              <p className="px-4 py-3 text-caption text-fg-3">正在读取 Git 状态…</p>
-            ) : !git.available ? (
-              <div className="px-4 py-3">
-                <Notice tone="warning">
-                  未检测到 Git。请安装 Git 并加入 PATH；其余备份功能不受影响。
-                </Notice>
-              </div>
-            ) : !git.initialized ? (
-              <div className="space-y-3 px-4 py-3">
-                <p className="text-body text-fg-2">
-                  在存储目录初始化 Git 仓库；之后填写并验证远端，才能启用自动同步。
-                </p>
-                <Button
-                  variant="primary"
-                  loading={busy === "git-init"}
-                  onClick={() =>
-                    void act("git-init", () => api.gitInit(), "Git 备份已初始化")
-                  }
-                >
-                  初始化 Git 备份
-                </Button>
-              </div>
-            ) : (
-              <>
-                <div className="grid grid-cols-2 gap-3 border-b border-border px-4 py-3 sm:grid-cols-4">
-                  <div>
-                    <p className="text-caption text-fg-3">分支</p>
-                    <p className="text-body text-fg-1">{git.branch ?? "—"}</p>
-                  </div>
-                  <div className="min-w-0">
-                    <p className="text-caption text-fg-3">远端</p>
-                    <p className="truncate text-body text-fg-1" title={git.remote ?? ""}>
-                      {git.remote ?? "未配置"}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-caption text-fg-3">未提交</p>
-                    <p className="text-body text-fg-1">{git.dirty} 个文件</p>
-                  </div>
-                  <div>
-                    <p className="text-caption text-fg-3">领先 / 落后</p>
-                    <p className="text-body text-fg-1">
-                      {git.ahead} / {git.behind}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-caption text-fg-3">上次提交</p>
-                    <p className="text-body text-fg-1">
-                      {git.lastCommitAt ? formatRelativeTime(git.lastCommitAt) : "—"}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-caption text-fg-3">上次拉取</p>
-                    <p className="text-body text-fg-1">
-                      {git.lastPullAt ? formatRelativeTime(git.lastPullAt) : "—"}
-                    </p>
-                  </div>
-                </div>
-
-                {settings?.git.enabled && !git.remoteVerified && (
-                  <div className="px-4 pt-3">
-                    <Notice tone="warning">
-                      远端地址已变更或尚未验证，自动同步已暂停；请重新验证远端后再启用。
-                    </Notice>
-                  </div>
-                )}
-
-                {git.lastError && git.conflictFiles.length === 0 && (
-                  <div className="px-4 pt-3">
-                    <Notice tone="danger">{git.lastError}</Notice>
-                  </div>
-                )}
-
-                {git.conflictFiles.length > 0 && (
-                  <div className="space-y-2 border-b border-border px-4 py-3">
-                    <Notice tone="warning">
-                      自动同步已暂停。冲突文件：{git.conflictFiles.join("、")}
-                    </Notice>
-                    <div className="flex flex-wrap gap-2">
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        onClick={() => setConflictAction("keepLocal")}
-                      >
-                        保留本地（强推）
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        onClick={() => setConflictAction("keepRemote")}
-                      >
-                        保留远端（覆盖本地）
-                      </Button>
-                      <Button
-                        size="sm"
-                        onClick={() =>
-                          void act("reveal", () => api.revealBackupLocation("store"))
-                        }
-                      >
-                        打开仓库目录手动处理
-                      </Button>
-                    </div>
-                  </div>
-                )}
-
-                <div className="space-y-3 border-b border-border px-4 py-3">
-                  <div className="flex flex-wrap items-center gap-4">
-                    <Checkbox
-                      id="git-auto-commit"
-                      label="写操作后自动提交"
-                      checked={settings?.git.autoCommit ?? true}
-                      onChange={(event) =>
-                        saveGitToggle({ autoCommit: event.target.checked })
-                      }
-                    />
-                    <Checkbox
-                      id="git-auto-pull"
-                      label="启动/定时拉取"
-                      checked={settings?.git.autoPull ?? true}
-                      onChange={(event) =>
-                        saveGitToggle({ autoPull: event.target.checked })
-                      }
-                    />
-                  </div>
-                  <div className="flex flex-wrap items-end gap-2">
-                    <Field label="远端地址" htmlFor="git-remote" className="min-w-[280px] flex-1">
-                      <Input
-                        id="git-remote"
-                        className="font-mono"
-                        placeholder="git@github.com:me/assets.git 或 https://…"
-                        value={remoteInput}
-                        onChange={(event) => setRemoteInput(event.target.value)}
-                      />
-                    </Field>
-                    <Field label="分支" htmlFor="git-branch" className="w-36">
-                      <Input
-                        id="git-branch"
-                        className="font-mono"
-                        value={branchInput}
-                        onChange={(event) => setBranchInput(event.target.value)}
-                      />
-                    </Field>
-                    <Button
-                      className="mb-0.5"
-                      loading={busy === "git-remote"}
-                      onClick={saveRemote}
-                    >
-                      保存远端
-                    </Button>
-                    <Button
-                      className="mb-0.5"
-                      loading={busy === "git-verify"}
-                      disabled={!remoteInput.trim() || !git.initialized}
-                      onClick={() => void verifyRemote()}
-                    >
-                      验证远端
-                    </Button>
-                  </div>
-                  <p className="text-caption text-fg-3">
-                    凭据交给系统 Git（credential helper / SSH agent），应用不会保存 token；验证远端后才能在上方启用 Git 备份。
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      loading={busy === "commit"}
-                      onClick={() =>
-                        void act("commit", () => api.gitCommitNow(), "已提交当前真源")
-                      }
-                    >
-                      立即提交
-                    </Button>
-                    <Button loading={busy === "pull"} onClick={() => void pullNow()}>
-                      立即拉取
-                    </Button>
-                    <Button
-                      loading={busy === "push"}
-                      onClick={() =>
-                        void act("push", () => api.gitPushNow(), "已推送到远端")
-                      }
-                    >
-                      立即推送
-                    </Button>
-                  </div>
-                </div>
-
-                <div className="border-b border-border px-4 py-3">
-                  <h4 className="mb-2 text-caption font-medium text-fg-2">提交历史</h4>
-                  {commits.length === 0 ? (
-                    <p className="text-caption text-fg-3">还没有提交。</p>
-                  ) : (
-                    <div className="max-h-72 overflow-auto">
-                      {commits.map((commit) => (
-                        <div
-                          key={commit.hash}
-                          className="flex items-center gap-2 border-t border-border py-2 first:border-t-0"
-                        >
-                          <Badge mono>{commit.shortHash}</Badge>
-                          <span className="min-w-0 flex-1 truncate text-body text-fg-1" title={commit.message}>
-                            {commit.message}
-                          </span>
-                          <span className="shrink-0 text-caption text-fg-3">
-                            {formatRelativeTime(commit.timestamp)}
-                          </span>
-                          <Button
-                            size="sm"
-                            disabled={!!busy}
-                            onClick={() => setGitRestoreTarget(commit)}
-                          >
-                            恢复
-                          </Button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </>
-            )}
-          </section>
-
-          <section className="rounded-panel border border-border bg-surface">
-            <div className="flex items-center gap-2 border-b border-border px-4 py-3">
-              <Cloud size={15} className="text-fg-3" aria-hidden />
-              <h3 className="text-strong text-fg-1">云备份（WebDAV）</h3>
-              <Badge tone={cloudBadge.tone}>{cloudBadge.label}</Badge>
-              <span className="ml-auto flex gap-1.5">
-                <IconButton
-                  label="刷新云状态"
-                  disabled={loading}
-                  onClick={() => void refreshCloudStatus()}
-                >
-                  <RefreshCw size={13} aria-hidden />
-                </IconButton>
-              </span>
-            </div>
-
-            {!cloud ? (
-              <p className="px-4 py-3 text-caption text-fg-3">正在读取云备份设置…</p>
-            ) : (
-              <>
-                <div className="space-y-3 border-b border-border px-4 py-3">
-                  {cloudBaseUrl.startsWith("http://") && (
-                    <Notice tone="warning">
-                      HTTP 会明文传输凭据，仅建议在内网使用。
-                    </Notice>
-                  )}
-                  <div className="flex flex-wrap items-end gap-2">
-                    <Field
-                      label="WebDAV 地址"
-                      htmlFor="cloud-base-url"
-                      className="min-w-[280px] flex-1"
-                    >
-                      <Input
-                        id="cloud-base-url"
-                        className="font-mono"
-                        placeholder="https://dav.example.com/dav"
-                        value={cloudBaseUrl}
-                        onChange={(event) => setCloudBaseUrl(event.target.value)}
-                      />
-                    </Field>
-                    <Field label="用户名" htmlFor="cloud-username" className="w-40">
-                      <Input
-                        id="cloud-username"
-                        value={cloudUsername}
-                        onChange={(event) => setCloudUsername(event.target.value)}
-                      />
-                    </Field>
-                  </div>
-                  <div className="flex flex-wrap items-end gap-2">
-                    <Field label="密码" htmlFor="cloud-password" className="w-56">
-                      <div className="flex items-center gap-1">
-                        <Input
-                          id="cloud-password"
-                          type={showCloudPassword ? "text" : "password"}
-                          placeholder={
-                            cloud.hasPassword && !cloudPasswordDirty
-                              ? "已保存，留空保持不变"
-                              : ""
-                          }
-                          value={cloudPassword}
-                          onChange={(event) => {
-                            setCloudPassword(event.target.value);
-                            setCloudPasswordDirty(true);
-                          }}
-                        />
-                        <IconButton
-                          label={showCloudPassword ? "隐藏密码" : "显示密码"}
-                          onClick={() => setShowCloudPassword((value) => !value)}
-                        >
-                          {showCloudPassword ? (
-                            <EyeOff size={14} aria-hidden />
-                          ) : (
-                            <Eye size={14} aria-hidden />
-                          )}
-                        </IconButton>
-                      </div>
-                    </Field>
-                    <Field label="远端目录" htmlFor="cloud-remote-dir" className="w-40">
-                      <Input
-                        id="cloud-remote-dir"
-                        className="font-mono"
-                        value={cloudRemoteDir}
-                        onChange={(event) => setCloudRemoteDir(event.target.value)}
-                      />
-                    </Field>
-                  </div>
-                  <p className="text-caption text-fg-3">
-                    在页面顶部选择「WebDAV 云备份」后，每次自动快照都会上传；与 Git 备份互斥。
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      onClick={() => void testCloud()}
-                      loading={busy === "cloud-test"}
-                      disabled={!cloudBaseUrl.trim() || (!!busy && busy !== "cloud-test")}
-                    >
-                      测试连接
-                    </Button>
-                    <Button
-                      onClick={() => void saveCloud()}
-                      loading={busy === "cloud-save"}
-                      disabled={!!busy && busy !== "cloud-save"}
-                    >
-                      保存云备份
-                    </Button>
-                    <Button
-                      onClick={() => void uploadCloud()}
-                      loading={busy === "cloud-upload"}
-                      disabled={!cloudStatus?.configured || (!!busy && busy !== "cloud-upload")}
-                    >
-                      立即上传
-                    </Button>
-                    <Button
-                      variant="danger"
-                      disabled={!cloudStatus?.configured || !!busy}
-                      onClick={() => setCloudRestoreOpen(true)}
-                    >
-                      从云端恢复
-                    </Button>
-                  </div>
-                  <p className="text-caption text-fg-3">
-                    上传会把当前真源打包并覆盖云端唯一一份备份；恢复前会自动创建本地安全快照。
-                  </p>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3 px-4 py-3 sm:grid-cols-3">
-                  <div className="min-w-0">
-                    <p className="text-caption text-fg-3">远端对象</p>
-                    <p
-                      className="truncate font-mono text-caption text-fg-1"
-                      title={cloudRemotePath}
-                    >
-                      {cloudRemotePath}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-caption text-fg-3">远端大小</p>
-                    <p className="text-body text-fg-1">
-                      {cloudStatus?.remote?.sizeBytes != null
-                        ? formatBytes(cloudStatus.remote.sizeBytes)
-                        : "—"}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-caption text-fg-3">远端修改时间</p>
-                    <p className="text-body text-fg-1">
-                      {cloudStatus?.remote?.modifiedAt
-                        ? formatRelativeTime(cloudStatus.remote.modifiedAt)
-                        : "—"}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-caption text-fg-3">上次上传</p>
-                    <p className="text-body text-fg-1">
-                      {cloudStatus?.lastUploadAt
-                        ? formatRelativeTime(cloudStatus.lastUploadAt)
-                        : "—"}
-                    </p>
-                  </div>
-                </div>
-
-                {cloudStatus?.remoteError && (
-                  <div className="px-4 pb-3">
-                    <Notice tone="danger">{cloudStatus.remoteError}</Notice>
-                  </div>
-                )}
-                {cloudStatus?.lastError && (
-                  <div className="px-4 pb-3">
-                    <Notice tone="warning">
-                      上次上传失败：{cloudStatus.lastError}
-                    </Notice>
-                  </div>
-                )}
-              </>
-            )}
-          </section>
+          <CloudSection
+            cloud={cloud}
+            cloudStatus={cloudStatus}
+            loading={loading}
+            busy={busy}
+            baseUrl={cloudBaseUrl}
+            username={cloudUsername}
+            password={cloudPassword}
+            remoteDir={cloudRemoteDir}
+            passwordDirty={cloudPasswordDirty}
+            showPassword={showCloudPassword}
+            remotePath={cloudRemotePath}
+            onBaseUrlChange={setCloudBaseUrl}
+            onUsernameChange={setCloudUsername}
+            onPasswordChange={(value) => {
+              setCloudPassword(value);
+              setCloudPasswordDirty(true);
+            }}
+            onRemoteDirChange={setCloudRemoteDir}
+            onToggleShowPassword={() => setShowCloudPassword((value) => !value)}
+            onRefreshStatus={() => void refreshCloudStatus()}
+            onTest={() => void testCloud()}
+            onSave={() => void saveCloud()}
+            onUpload={() => void uploadCloud()}
+            onOpenRestore={() => setCloudRestoreOpen(true)}
+          />
         </div>
       </div>
 
