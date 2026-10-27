@@ -14,6 +14,13 @@ local/
 backups/
 logs/
 state/
+# 上面四条是无位置限定的兜底，目的是别让 store 数据入库；但它们也会连源码目录一起
+# 吞掉（src/components/backups/ 就曾被静默忽略到无法 add）。放行规则必须排在后面，
+# git 是后匹配的规则赢。
+!src/**/local/
+!src/**/backups/
+!src/**/logs/
+!src/**/state/
 # 发布产物、updater 签名私钥与本地联调配置
 release-assets/
 *.key
