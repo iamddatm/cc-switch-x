@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { ArchiveRestore, HardDrive } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
@@ -14,8 +14,8 @@ import {
   type SegmentedItem,
 } from "../components/ui/SegmentedControl";
 import { Select } from "../components/ui/Select";
-import { CloudSection } from "../components/backups/CloudSection";
-import { GitSection } from "../components/backups/GitSection";
+import { CloudSection, type CloudDraft } from "../components/backups/CloudSection";
+import { GitSection, type GitDraft } from "../components/backups/GitSection";
 import { useBackups } from "../hooks/useBackups";
 import { api } from "../lib/api";
 import { formatBytes, formatRelativeTime } from "../lib/format";
@@ -77,32 +77,7 @@ export function BackupsPanel() {
   const [conflictAction, setConflictAction] = useState<"keepLocal" | "keepRemote" | null>(
     null,
   );
-  const [remoteInput, setRemoteInput] = useState("");
-  const [branchInput, setBranchInput] = useState("main");
-  const [cloudBaseUrl, setCloudBaseUrl] = useState("");
-  const [cloudUsername, setCloudUsername] = useState("");
-  const [cloudPassword, setCloudPassword] = useState("");
-  const [cloudPasswordDirty, setCloudPasswordDirty] = useState(false);
-  const [showCloudPassword, setShowCloudPassword] = useState(false);
-  const [cloudRemoteDir, setCloudRemoteDir] = useState("ccswitchx");
   const [cloudRestoreOpen, setCloudRestoreOpen] = useState(false);
-  const inputsReady = useRef(false);
-  const cloudInputsReady = useRef(false);
-
-  useEffect(() => {
-    if (inputsReady.current || !settings) return;
-    setRemoteInput(settings.git.remote ?? "");
-    setBranchInput(settings.git.branch);
-    inputsReady.current = true;
-  }, [settings]);
-
-  useEffect(() => {
-    if (cloudInputsReady.current || !cloud) return;
-    setCloudBaseUrl(cloud.baseUrl);
-    setCloudUsername(cloud.username);
-    setCloudRemoteDir(cloud.remoteDir);
-    cloudInputsReady.current = true;
-  }, [cloud]);
 
   const act = async (key: string, action: () => Promise<unknown>, success?: string) => {
     setNotice(null);
@@ -133,27 +108,22 @@ export function BackupsPanel() {
     );
   };
 
-  const saveRemote = () => {
-    void act(
-      "git-remote",
-      () =>
-        api.gitSetRemote(
-          remoteInput.trim() ? remoteInput.trim() : null,
-          branchInput.trim() || "main",
-        ),
-      "远端设置已保存",
-    );
+  /** 空地址在后端语义是「清除远端」，草稿的裁剪与翻译只在这一处发生。 */
+  const gitEndpoint = (draft: GitDraft) => ({
+    remote: draft.remote.trim() || null,
+    branch: draft.branch.trim() || "main",
+  });
+
+  const saveRemote = (draft: GitDraft) => {
+    const { remote, branch } = gitEndpoint(draft);
+    void act("git-remote", () => api.gitSetRemote(remote, branch), "远端设置已保存");
   };
 
-  const verifyRemote = async () => {
+  const verifyRemote = async (draft: GitDraft) => {
+    const { remote, branch } = gitEndpoint(draft);
     setNotice(null);
     try {
-      await run("git-verify", () =>
-        api.gitVerifyRemote(
-          remoteInput.trim() ? remoteInput.trim() : null,
-          branchInput.trim() || "main",
-        ),
-      );
+      await run("git-verify", () => api.gitVerifyRemote(remote, branch));
       setNotice("远端验证通过，可以启用 Git 备份");
     } catch {
       // 错误已展示；验证失败时地址仍已保存，刷新一次让状态同步
@@ -279,41 +249,36 @@ export function BackupsPanel() {
     }
   };
 
-  const cloudPasswordValue = () => (cloudPasswordDirty ? cloudPassword : null);
-
-  const saveCloud = async () => {
+  /** 保存成功要把后端回读的配置交还给分区，让它把草稿与 dirty 标记收干净。 */
+  const saveCloud = async (draft: CloudDraft) => {
     setNotice(null);
     try {
       const saved = await run("cloud-save", () =>
         api.setCloudSettings({
-          baseUrl: cloudBaseUrl.trim(),
-          username: cloudUsername.trim(),
-          password: cloudPasswordValue(),
-          remoteDir: cloudRemoteDir.trim(),
+          baseUrl: draft.baseUrl.trim(),
+          username: draft.username.trim(),
+          password: draft.password,
+          remoteDir: draft.remoteDir.trim(),
           autoUpload: cloud?.autoUpload ?? false,
         }),
       );
-      setCloudBaseUrl(saved.baseUrl);
-      setCloudUsername(saved.username);
-      setCloudRemoteDir(saved.remoteDir);
-      setCloudPassword("");
-      setCloudPasswordDirty(false);
-      setShowCloudPassword(false);
       setNotice("云备份设置已保存");
+      return saved;
     } catch {
       // 错误已展示
+      return null;
     }
   };
 
-  const testCloud = async () => {
+  const testCloud = async (draft: CloudDraft) => {
     setNotice(null);
     try {
       const latency = await run("cloud-test", () =>
         api.testCloudConnection({
-          baseUrl: cloudBaseUrl.trim(),
-          username: cloudUsername.trim(),
-          password: cloudPasswordValue(),
-          remoteDir: cloudRemoteDir.trim(),
+          baseUrl: draft.baseUrl.trim(),
+          username: draft.username.trim(),
+          password: draft.password,
+          remoteDir: draft.remoteDir.trim(),
         }),
       );
       setNotice(`连接成功（${latency} ms）`);
@@ -352,11 +317,6 @@ export function BackupsPanel() {
 
   const interval = settings?.intervalHours ?? 24;
   const retain = settings?.retainCount ?? 10;
-  const cloudRemotePath = cloudBaseUrl.trim()
-    ? `${cloudBaseUrl.trim().replace(/\/+$/, "")}/${cloudRemoteDir
-        .trim()
-        .replace(/^\/+/, "")}/ccswitchx-backup.zip`
-    : "—";
 
   // 单选值由实际生效的配置推导：Git 必须已验证，否则即使 enabled 也不显示为选中。
   const method: BackupMethod =
@@ -656,15 +616,11 @@ export function BackupsPanel() {
             settings={settings}
             commits={commits}
             busy={busy}
-            remoteInput={remoteInput}
-            branchInput={branchInput}
-            onRemoteInputChange={setRemoteInput}
-            onBranchInputChange={setBranchInput}
             onInit={() =>
               void act("git-init", () => api.gitInit(), "Git 备份已初始化")
             }
             onSaveRemote={saveRemote}
-            onVerifyRemote={() => void verifyRemote()}
+            onVerifyRemote={(draft) => void verifyRemote(draft)}
             onToggle={saveGitToggle}
             onCommit={() =>
               void act("commit", () => api.gitCommitNow(), "已提交当前真源")
@@ -683,24 +639,9 @@ export function BackupsPanel() {
             cloudStatus={cloudStatus}
             loading={loading}
             busy={busy}
-            baseUrl={cloudBaseUrl}
-            username={cloudUsername}
-            password={cloudPassword}
-            remoteDir={cloudRemoteDir}
-            passwordDirty={cloudPasswordDirty}
-            showPassword={showCloudPassword}
-            remotePath={cloudRemotePath}
-            onBaseUrlChange={setCloudBaseUrl}
-            onUsernameChange={setCloudUsername}
-            onPasswordChange={(value) => {
-              setCloudPassword(value);
-              setCloudPasswordDirty(true);
-            }}
-            onRemoteDirChange={setCloudRemoteDir}
-            onToggleShowPassword={() => setShowCloudPassword((value) => !value)}
             onRefreshStatus={() => void refreshCloudStatus()}
-            onTest={() => void testCloud()}
-            onSave={() => void saveCloud()}
+            onTest={(draft) => void testCloud(draft)}
+            onSave={saveCloud}
             onUpload={() => void uploadCloud()}
             onOpenRestore={() => setCloudRestoreOpen(true)}
           />

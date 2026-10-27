@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import { GitBranch } from "lucide-react";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
@@ -7,6 +8,12 @@ import { Input } from "../ui/Input";
 import { Notice } from "../ui/Notice";
 import { formatRelativeTime } from "../../lib/format";
 import type { BackupSettings, GitCommit, GitStatus } from "../../types";
+
+/** 远端配置表单的草稿；空地址由容器翻译成「清除远端」。 */
+export interface GitDraft {
+  remote: string;
+  branch: string;
+}
 
 function gitStateTone(git: GitStatus): "neutral" | "success" | "warning" | "danger" {
   switch (git.state) {
@@ -47,10 +54,6 @@ export function GitSection({
   settings,
   commits,
   busy,
-  remoteInput,
-  branchInput,
-  onRemoteInputChange,
-  onBranchInputChange,
   onInit,
   onSaveRemote,
   onVerifyRemote,
@@ -66,13 +69,9 @@ export function GitSection({
   settings: BackupSettings | null;
   commits: GitCommit[];
   busy: string | null;
-  remoteInput: string;
-  branchInput: string;
-  onRemoteInputChange: (value: string) => void;
-  onBranchInputChange: (value: string) => void;
   onInit: () => void;
-  onSaveRemote: () => void;
-  onVerifyRemote: () => void;
+  onSaveRemote: (draft: GitDraft) => void;
+  onVerifyRemote: (draft: GitDraft) => void;
   onToggle: (patch: Partial<BackupSettings["git"]>) => void;
   onCommit: () => void;
   onPull: () => void;
@@ -81,6 +80,19 @@ export function GitSection({
   onResolveConflict: (action: "keepLocal" | "keepRemote") => void;
   onRevealStore: () => void;
 }) {
+  // 远端草稿归本区：容器只拿最终值，不再一路传 state + setter。
+  const [remote, setRemote] = useState("");
+  const [branch, setBranch] = useState("main");
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (seeded.current || !settings) return;
+    setRemote(settings.git.remote ?? "");
+    setBranch(settings.git.branch);
+    seeded.current = true;
+  }, [settings]);
+
+  const draft = (): GitDraft => ({ remote, branch });
+
   return (
     <section className="rounded-panel border border-border bg-surface">
       <div className="flex items-center gap-2 border-b border-border px-4 py-3">
@@ -202,26 +214,30 @@ export function GitSection({
                   id="git-remote"
                   className="font-mono"
                   placeholder="git@github.com:me/assets.git 或 https://…"
-                  value={remoteInput}
-                  onChange={(event) => onRemoteInputChange(event.target.value)}
+                  value={remote}
+                  onChange={(event) => setRemote(event.target.value)}
                 />
               </Field>
               <Field label="分支" htmlFor="git-branch" className="w-36">
                 <Input
                   id="git-branch"
                   className="font-mono"
-                  value={branchInput}
-                  onChange={(event) => onBranchInputChange(event.target.value)}
+                  value={branch}
+                  onChange={(event) => setBranch(event.target.value)}
                 />
               </Field>
-              <Button className="mb-0.5" loading={busy === "git-remote"} onClick={onSaveRemote}>
+              <Button
+                className="mb-0.5"
+                loading={busy === "git-remote"}
+                onClick={() => onSaveRemote(draft())}
+              >
                 保存远端
               </Button>
               <Button
                 className="mb-0.5"
                 loading={busy === "git-verify"}
-                disabled={!remoteInput.trim() || !git.initialized}
-                onClick={onVerifyRemote}
+                disabled={!remote.trim() || !git.initialized}
+                onClick={() => onVerifyRemote(draft())}
               >
                 验证远端
               </Button>

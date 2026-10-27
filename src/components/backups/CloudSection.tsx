@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import { Cloud, Eye, EyeOff, RefreshCw } from "lucide-react";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
@@ -7,6 +8,17 @@ import { Input } from "../ui/Input";
 import { Notice } from "../ui/Notice";
 import { formatBytes, formatRelativeTime } from "../../lib/format";
 import type { CloudSettingsView, CloudStatus } from "../../types";
+
+/**
+ * 云备份表单的草稿。`password` 为 null 表示「保持不变」——
+ * 后端里的密码只存在 secrets.local.json，页面留空不能被当成清空。
+ */
+export interface CloudDraft {
+  baseUrl: string;
+  username: string;
+  remoteDir: string;
+  password: string | null;
+}
 
 function cloudState(status: CloudStatus | null): {
   label: string;
@@ -20,25 +32,13 @@ function cloudState(status: CloudStatus | null): {
 
 /**
  * 云备份（WebDAV）区。密码只在本机 `secrets.local.json` 里，输入框留空表示保持不变，
- * 所以 dirty 标记要由容器决定何时把值发给后端。
+ * 所以草稿带着一个 dirty 标记，交给容器翻译成 `password: null`。
  */
 export function CloudSection({
   cloud,
   cloudStatus,
   loading,
   busy,
-  baseUrl,
-  username,
-  password,
-  remoteDir,
-  passwordDirty,
-  showPassword,
-  remotePath,
-  onBaseUrlChange,
-  onUsernameChange,
-  onPasswordChange,
-  onRemoteDirChange,
-  onToggleShowPassword,
   onRefreshStatus,
   onTest,
   onSave,
@@ -49,24 +49,52 @@ export function CloudSection({
   cloudStatus: CloudStatus | null;
   loading: boolean;
   busy: string | null;
-  baseUrl: string;
-  username: string;
-  password: string;
-  remoteDir: string;
-  passwordDirty: boolean;
-  showPassword: boolean;
-  remotePath: string;
-  onBaseUrlChange: (value: string) => void;
-  onUsernameChange: (value: string) => void;
-  onPasswordChange: (value: string) => void;
-  onRemoteDirChange: (value: string) => void;
-  onToggleShowPassword: () => void;
   onRefreshStatus: () => void;
-  onTest: () => void;
-  onSave: () => void;
+  onTest: (draft: CloudDraft) => void;
+  onSave: (draft: CloudDraft) => Promise<CloudSettingsView | null>;
   onUpload: () => void;
   onOpenRestore: () => void;
 }) {
+  // 连接草稿归本区：容器只负责存到后端并回报结果，不再一路传 state + setter。
+  const [baseUrl, setBaseUrl] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [passwordDirty, setPasswordDirty] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [remoteDir, setRemoteDir] = useState("ccswitchx");
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (seeded.current || !cloud) return;
+    setBaseUrl(cloud.baseUrl);
+    setUsername(cloud.username);
+    setRemoteDir(cloud.remoteDir);
+    seeded.current = true;
+  }, [cloud]);
+
+  const draft = (): CloudDraft => ({
+    baseUrl,
+    username,
+    remoteDir,
+    password: passwordDirty ? password : null,
+  });
+
+  const applySaved = (saved: CloudSettingsView) => {
+    setBaseUrl(saved.baseUrl);
+    setUsername(saved.username);
+    setRemoteDir(saved.remoteDir);
+    setPassword("");
+    setPasswordDirty(false);
+    setShowPassword(false);
+  };
+
+  const save = async () => {
+    const saved = await onSave(draft());
+    if (saved) applySaved(saved);
+  };
+
+  const remotePath = baseUrl.trim()
+    ? `${baseUrl.trim().replace(/\/+$/, "")}/${remoteDir.trim().replace(/^\/+/, "")}/ccswitchx-backup.zip`
+    : "—";
   const badge = cloudState(cloudStatus);
 
   return (
@@ -103,14 +131,14 @@ export function CloudSection({
                   className="font-mono"
                   placeholder="https://dav.example.com/dav"
                   value={baseUrl}
-                  onChange={(event) => onBaseUrlChange(event.target.value)}
+                  onChange={(event) => setBaseUrl(event.target.value)}
                 />
               </Field>
               <Field label="用户名" htmlFor="cloud-username" className="w-40">
                 <Input
                   id="cloud-username"
                   value={username}
-                  onChange={(event) => onUsernameChange(event.target.value)}
+                  onChange={(event) => setUsername(event.target.value)}
                 />
               </Field>
             </div>
@@ -124,11 +152,14 @@ export function CloudSection({
                       cloud.hasPassword && !passwordDirty ? "已保存，留空保持不变" : ""
                     }
                     value={password}
-                    onChange={(event) => onPasswordChange(event.target.value)}
+                    onChange={(event) => {
+                      setPassword(event.target.value);
+                      setPasswordDirty(true);
+                    }}
                   />
                   <IconButton
                     label={showPassword ? "隐藏密码" : "显示密码"}
-                    onClick={onToggleShowPassword}
+                    onClick={() => setShowPassword((value) => !value)}
                   >
                     {showPassword ? <EyeOff size={14} aria-hidden /> : <Eye size={14} aria-hidden />}
                   </IconButton>
@@ -139,7 +170,7 @@ export function CloudSection({
                   id="cloud-remote-dir"
                   className="font-mono"
                   value={remoteDir}
-                  onChange={(event) => onRemoteDirChange(event.target.value)}
+                  onChange={(event) => setRemoteDir(event.target.value)}
                 />
               </Field>
             </div>
@@ -148,14 +179,14 @@ export function CloudSection({
             </p>
             <div className="flex flex-wrap gap-2">
               <Button
-                onClick={onTest}
+                onClick={() => onTest(draft())}
                 loading={busy === "cloud-test"}
                 disabled={!baseUrl.trim() || (!!busy && busy !== "cloud-test")}
               >
                 测试连接
               </Button>
               <Button
-                onClick={onSave}
+                onClick={() => void save()}
                 loading={busy === "cloud-save"}
                 disabled={!!busy && busy !== "cloud-save"}
               >
