@@ -581,3 +581,66 @@ test("source filter hides skills from other origins", async () => {
   expect(screen.getByRole("button", { name: "查看 demo" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "查看 other" })).not.toBeInTheDocument();
 });
+
+test("updating clears both the selection and the discovered update list", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([
+    {
+      assetType: "skill",
+      id: "demo",
+      name: "demo",
+      updatedAt: 1,
+      hash: "h",
+      origin: { kind: "github", repo: "acme/demo", updateAvailable: true, updatable: true },
+    },
+  ]);
+  vi.mocked(api.checkSkillUpdates).mockResolvedValue({
+    checkedAt: Date.now(),
+    updates: [
+      { id: "demo", name: "demo", currentHash: "h", remoteHash: "h2", missingLocal: false },
+    ],
+    upToDate: [],
+    skipped: [],
+    repoFailures: [],
+    skillFailures: [],
+  });
+  vi.mocked(api.updateSkills).mockResolvedValue({
+    outcomes: [
+      { id: "demo", name: "demo", status: "updated", warnings: [] },
+    ],
+  });
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("checkbox", { name: "选择 demo" }));
+  const bar = screen.getByText("已选 1 个").parentElement as HTMLElement;
+
+  fireEvent.click(within(bar).getByRole("button", { name: "检查更新" }));
+  const dialog = await screen.findByRole("alertdialog");
+  fireEvent.click(within(dialog).getByRole("button", { name: "更新 1 个" }));
+  await waitFor(() => expect(api.updateSkills).toHaveBeenCalledWith(["demo"]));
+
+  // 更新成功后两笔账都要清：勾选（批量条）与「发现 N 个可更新」（全部更新按钮）。
+  expect(screen.queryByText("已选 1 个")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /^全部更新/ })).not.toBeInTheDocument();
+});
+
+test("deleting one selected skill keeps the others selected", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([
+    { assetType: "skill", id: "demo", name: "demo", updatedAt: 1, hash: "h" },
+    { assetType: "skill", id: "other", name: "other", updatedAt: 1, hash: "h" },
+  ]);
+  vi.mocked(api.uninstallSkills).mockResolvedValue({
+    outcomes: [{ id: "demo", backupPath: null, disabledAgents: [], warnings: [] }],
+  });
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("checkbox", { name: "选择 demo" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "选择 other" }));
+  expect(screen.getByText("已选 2 个")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "demo 的更多操作" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+  const dialog = await screen.findByRole("alertdialog");
+  fireEvent.click(within(dialog).getByRole("button", { name: "删除 Skill" }));
+  await waitFor(() => expect(api.uninstallSkills).toHaveBeenCalledWith(["demo"]));
+
+  // 只把删掉的那条从勾选里摘出去，剩下的还得能继续批量操作。
+  expect(screen.getByText("已选 1 个")).toBeInTheDocument();
+});
