@@ -11,14 +11,15 @@ import { SkillDiscoveryPanel } from "../components/skills/SkillDiscoveryPanel";
 import { SkillFormSheet } from "../components/skills/SkillFormSheet";
 import { SkillInstallSheet } from "../components/skills/SkillInstallSheet";
 import { SkillSourceBadge } from "../components/skills/SkillSourceBadge";
-import { NO_REPO_KEY } from "../components/skills/skillFilters";
+import { SkillRepoFilter } from "../components/skills/SkillRepoFilter";
+import { SkillViewTabs } from "../components/skills/SkillViewTabs";
 import { useSkillFilters } from "../components/skills/useSkillFilters";
 import { projectRow, projectScope } from "../components/skills/skillScope";
+import { checkFailureLines } from "../components/skills/skillFilters";
 import type { SkillDeployTarget } from "../components/skills/skillScope";
 import { Badge, type BadgeTone } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Checkbox } from "../components/ui/Checkbox";
-import { CheckOption, CheckPopover } from "../components/ui/CheckPopover";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Menu, type MenuItem } from "../components/ui/Menu";
@@ -546,12 +547,7 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
     return menu;
   };
 
-  const checkFailures = checkReport
-    ? [
-        ...checkReport.repoFailures.map((failure) => `${failure.repo}：${failure.error}`),
-        ...checkReport.skillFailures.map((failure) => `${failure.id}：${failure.error}`),
-      ]
-    : [];
+  const checkFailures = checkFailureLines(checkReport);
   const updateEntries = (updateTargets ?? []).map((id) => {
     const info = checkReport?.updates.find((update) => update.id === id);
     const row = rows.find((entry) => entry.id === id);
@@ -642,42 +638,14 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
         }
       />
 
-      <div
-        role="tablist"
-        aria-label="Skills 视图"
-        className="flex h-10 shrink-0 items-center gap-1 border-b border-border px-6"
-      >
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === "installed"}
-          onClick={() => setView("installed")}
-          className={`relative flex h-full items-center gap-1.5 px-2 text-body transition-colors ${
-            view === "installed"
-              ? "font-medium text-fg-1 after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:bg-action"
-              : "text-fg-2 hover:text-fg-1"
-          }`}
-        >
-          已安装
-          <span className="text-caption text-fg-3">{rows.length}</span>
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === "discover"}
-          onClick={() => {
-            setView("discover");
-            setDiscoverMounted(true);
-          }}
-          className={`relative flex h-full items-center px-2 text-body transition-colors ${
-            view === "discover"
-              ? "font-medium text-fg-1 after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:bg-action"
-              : "text-fg-2 hover:text-fg-1"
-          }`}
-        >
-          发现
-        </button>
-      </div>
+      <SkillViewTabs
+        view={view}
+        installedCount={rows.length}
+        onSelect={(next) => {
+          setView(next);
+          if (next === "discover") setDiscoverMounted(true);
+        }}
+      />
 
       <div className={view === "installed" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
         <div className="flex h-12 shrink-0 items-center gap-2 px-6">
@@ -688,33 +656,13 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
             placeholder="搜索名称、描述、来源或仓库…"
             ariaLabel="搜索 Skill"
           />
-          {repoChoices.allKeys.length > 0 && (
-            <CheckPopover
-              label={
-                allReposSelected
-                  ? `仓库：全部（${repoChoices.allKeys.length}）`
-                  : `仓库：${activeRepoKeys.size}/${repoChoices.allKeys.length}`
-              }
-            >
-              <CheckOption label="全部仓库" checked={allReposSelected} onChange={toggleAllRepos} />
-              {repoChoices.repos.map((repo) => (
-                <CheckOption
-                  key={repo.key}
-                  mono
-                  label={repo.label}
-                  checked={activeRepoKeys.has(repo.key)}
-                  onChange={(checked) => toggleRepo(repo.key, checked)}
-                />
-              ))}
-              {repoChoices.hasNoRepo && (
-                <CheckOption
-                  label="无来源仓库"
-                  checked={activeRepoKeys.has(NO_REPO_KEY)}
-                  onChange={(checked) => toggleRepo(NO_REPO_KEY, checked)}
-                />
-              )}
-            </CheckPopover>
-          )}
+          <SkillRepoFilter
+            repoChoices={repoChoices}
+            repoKeys={activeRepoKeys}
+            allReposSelected={allReposSelected}
+            onToggleRepo={toggleRepo}
+            onToggleAllRepos={toggleAllRepos}
+          />
           <Select
             aria-label="按渲染目录筛选"
             value={dirFilter}

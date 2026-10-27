@@ -74,8 +74,13 @@ export function useSkillFilters<T extends AssetSummary>(items: T[]) {
 
   const clear = () => setSelected(new Set());
 
-  const selectedItems = items.filter((item) => selected.has(item.id));
-  const selectedIds = selectedItems.map((item) => item.id);
+  // 勾选集合变化时才重算这两项：否则每次搜索输入都要全表扫一遍，
+  // 项目级面板还会连带把依赖 selectedRows 的 enabledTargets 一起挤掉缓存。
+  const selectedItems = useMemo(
+    () => items.filter((item) => selected.has(item.id)),
+    [items, selected],
+  );
+  const selectedIds = useMemo(() => selectedItems.map((item) => item.id), [selectedItems]);
 
   return {
     query,

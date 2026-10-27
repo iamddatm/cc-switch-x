@@ -1,6 +1,6 @@
 // Skill 列表的筛选判定：全局作用域与项目作用域共用同一套搜索、来源、仓库维度。
 // 「启用/部署状态」这一轴在两个作用域里取值不同，留给各自的面板。
-import type { AssetSummary } from "../../types";
+import type { AssetSummary, SkillCheckReport } from "../../types";
 
 /** 仓库多选里「没有来源仓库」的桶：本地目录、无法识别来源的旧数据。 */
 export const NO_REPO_KEY = "__no_repo__";
@@ -85,4 +85,13 @@ export function filterByCommonFilters<T extends AssetSummary>(
     if (!repoKeys.has(repoKeyOf(item))) return false;
     return true;
   });
+}
+
+/** 检查报告的失败行：仓库级与单条级并成一串，两版面板的展示口径一致。 */
+export function checkFailureLines(report: SkillCheckReport | null): string[] {
+  if (!report) return [];
+  return [
+    ...report.repoFailures.map((failure) => `${failure.repo}：${failure.error}`),
+    ...report.skillFailures.map((failure) => `${failure.id}：${failure.error}`),
+  ];
 }

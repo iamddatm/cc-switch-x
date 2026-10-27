@@ -11,13 +11,14 @@ import { SkillDiscoveryPanel } from "../components/skills/SkillDiscoveryPanel";
 import { SkillInstallSheet } from "../components/skills/SkillInstallSheet";
 import { originRepoLabel, SkillSourceBadge } from "../components/skills/SkillSourceBadge";
 import { SkillFormSheet } from "../components/skills/SkillFormSheet";
-import { NO_REPO_KEY } from "../components/skills/skillFilters";
+import { SkillRepoFilter } from "../components/skills/SkillRepoFilter";
+import { SkillViewTabs } from "../components/skills/SkillViewTabs";
 import { useSkillFilters } from "../components/skills/useSkillFilters";
 import { storeScope } from "../components/skills/skillScope";
+import { checkFailureLines } from "../components/skills/skillFilters";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Checkbox } from "../components/ui/Checkbox";
-import { CheckOption, CheckPopover } from "../components/ui/CheckPopover";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Menu, type MenuItem } from "../components/ui/Menu";
@@ -78,7 +79,10 @@ export function SkillsPanel() {
     dropUpdates,
   } = skillCheck;
 
-  const agentsForType = enabledAgents.filter((agent) => supported(agent, "skill"));
+  const agentsForType = useMemo(
+    () => enabledAgents.filter((agent) => supported(agent, "skill")),
+    [enabledAgents],
+  );
   const scope = useMemo(() => storeScope(agentsForType), [agentsForType]);
   const {
     query,
@@ -120,16 +124,24 @@ export function SkillsPanel() {
     setUpdateTargets(checkReport?.updates.map((update) => update.id) ?? []);
   }, [checkPrompt, checkReport, consumePrompt]);
 
-  const statusAgents =
-    agentFilter === "all"
-      ? agentsForType
-      : agentsForType.filter((agent) => agent.id === agentFilter);
-  // 搜索 / 来源 / 仓库三轴在 useSkillFilters 里；「启用状态」这一轴是用户级特有的
-  const visible = matched.filter((item) => {
-    if (statusFilter === "all") return true;
-    const enabled = statusAgents.some((agent) => enabledFor(agent, "skill").includes(item.id));
-    return statusFilter === "on" ? enabled : !enabled;
-  });
+  const statusAgents = useMemo(
+    () =>
+      agentFilter === "all"
+        ? agentsForType
+        : agentsForType.filter((agent) => agent.id === agentFilter),
+    [agentFilter, agentsForType],
+  );
+  // 搜索 / 来源 / 仓库三轴在 useSkillFilters 里；「启用状态」这一轴是用户级特有的。
+  // 这条要 memo：每个搜索字符都会带着整张启用表重跑一遍谓词。
+  const visible = useMemo(
+    () =>
+      matched.filter((item) => {
+        if (statusFilter === "all") return true;
+        const enabled = statusAgents.some((agent) => enabledFor(agent, "skill").includes(item.id));
+        return statusFilter === "on" ? enabled : !enabled;
+      }),
+    [matched, statusAgents, statusFilter],
+  );
   const updateIds = checkReport?.updates.map((update) => update.id) ?? [];
   const updatesCount = updateIds.length;
 
@@ -309,9 +321,7 @@ export function SkillsPanel() {
     ? agents.filter((agent) => deleting.some((item) => agent.enabledSkills.includes(item.id)))
     : [];
 
-  const checkFailures = checkReport
-    ? [...checkReport.repoFailures.map((failure) => `${failure.repo}：${failure.error}`), ...checkReport.skillFailures.map((failure) => `${failure.id}：${failure.error}`)]
-    : [];
+  const checkFailures = checkFailureLines(checkReport);
 
   const updateEntries = (updateTargets ?? []).map((id) => {
     const info = checkReport?.updates.find((update) => update.id === id);
@@ -374,42 +384,14 @@ export function SkillsPanel() {
         }
       />
 
-      <div
-        role="tablist"
-        aria-label="Skills 视图"
-        className="flex h-10 shrink-0 items-center gap-1 border-b border-border px-6"
-      >
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === "installed"}
-          onClick={() => setView("installed")}
-          className={`relative flex h-full items-center gap-1.5 px-2 text-body transition-colors ${
-            view === "installed"
-              ? "font-medium text-fg-1 after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:bg-action"
-              : "text-fg-2 hover:text-fg-1"
-          }`}
-        >
-          已安装
-          <span className="text-caption text-fg-3">{items.length}</span>
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === "discover"}
-          onClick={() => {
-            setView("discover");
-            setDiscoverMounted(true);
-          }}
-          className={`relative flex h-full items-center px-2 text-body transition-colors ${
-            view === "discover"
-              ? "font-medium text-fg-1 after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:bg-action"
-              : "text-fg-2 hover:text-fg-1"
-          }`}
-        >
-          发现
-        </button>
-      </div>
+      <SkillViewTabs
+        view={view}
+        installedCount={items.length}
+        onSelect={(next) => {
+          setView(next);
+          if (next === "discover") setDiscoverMounted(true);
+        }}
+      />
 
       <div className={view === "installed" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
         <div className="flex h-12 shrink-0 items-center gap-2 px-6">
@@ -420,37 +402,13 @@ export function SkillsPanel() {
             placeholder="搜索名称、描述、来源或仓库…"
             ariaLabel="搜索 Skill"
           />
-          {repoChoices.allKeys.length > 0 && (
-            <CheckPopover
-              label={
-                allReposSelected
-                  ? `仓库：全部（${repoChoices.allKeys.length}）`
-                  : `仓库：${repoKeys.size}/${repoChoices.allKeys.length}`
-              }
-            >
-              <CheckOption
-                label="全部仓库"
-                checked={allReposSelected}
-                onChange={toggleAllRepos}
-              />
-              {repoChoices.repos.map((repo) => (
-                <CheckOption
-                  key={repo.key}
-                  mono
-                  label={repo.label}
-                  checked={repoKeys.has(repo.key)}
-                  onChange={(checked) => toggleRepo(repo.key, checked)}
-                />
-              ))}
-              {repoChoices.hasNoRepo && (
-                <CheckOption
-                  label="无来源仓库"
-                  checked={repoKeys.has(NO_REPO_KEY)}
-                  onChange={(checked) => toggleRepo(NO_REPO_KEY, checked)}
-                />
-              )}
-            </CheckPopover>
-          )}
+          <SkillRepoFilter
+            repoChoices={repoChoices}
+            repoKeys={repoKeys}
+            allReposSelected={allReposSelected}
+            onToggleRepo={toggleRepo}
+            onToggleAllRepos={toggleAllRepos}
+          />
           <Select
             aria-label="按 Agent 筛选"
             value={agentFilter}
