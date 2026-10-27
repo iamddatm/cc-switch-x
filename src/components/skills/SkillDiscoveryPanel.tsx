@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Download, RefreshCw, Sparkles } from "lucide-react";
 import { api } from "../../lib/api";
 import type {
@@ -20,7 +20,11 @@ import { SearchField } from "../ui/SearchField";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { RepoManagerSheet } from "./RepoManagerSheet";
 
-type Source = "repos" | "skillssh";
+/**
+ * 发现视图的三个页签。趋势榜单独占一个：它要真的去抓 skills.sh，
+ * 不能因为是「默认视图」就在用户只是想搜索时被拉一次。
+ */
+type Source = "repos" | "skillssh" | "trend";
 
 function repoKey(repo: SkillRepo): string {
   return `${repo.owner}/${repo.name}`.toLowerCase();
@@ -93,8 +97,6 @@ export function SkillDiscoveryPanel({
   const [shTrendingHasMore, setShTrendingHasMore] = useState(false);
   const [shTrendingLoading, setShTrendingLoading] = useState(false);
   const [shTrendingError, setShTrendingError] = useState<string | null>(null);
-  // 用 ref 而不是 state 做「只拉一次」的闸门：StrictMode 下 effect 双调用也不会重复请求。
-  const trendingRequested = useRef(false);
 
   const loadRepos = useCallback(async () => {
     setReposLoading(true);
@@ -140,12 +142,14 @@ export function SkillDiscoveryPanel({
     }
   }, []);
 
-  // 切到 skills.sh 时默认落在趋势榜，不要求先输入关键词。
-  useEffect(() => {
-    if (source !== "skillssh" || trendingRequested.current) return;
-    trendingRequested.current = true;
-    void loadTrending(0);
-  }, [source, loadTrending]);
+  /**
+   * 切页签。趋势榜只有点进来才抓：已有内容或正在抓的时候不重复发请求，
+   * 失败交给空态里的「重试」按钮，不自动重试轰炸。
+   */
+  const selectSource = (next: Source) => {
+    setSource(next);
+    if (next === "trend" && shTrending.length === 0 && !shTrendingLoading) void loadTrending(0);
+  };
 
   // 发现结果可能来自配置仓库之外的「已安装 Skill 来源仓库」，
   // 报告没回来之前先用配置列表兜底，避免筛选区闪烁。
@@ -201,16 +205,17 @@ export function SkillDiscoveryPanel({
       (value) => value.toLowerCase().includes(normalizedQuery),
     );
   });
-  const shSearching = shQueryDone !== null;
-  const visibleSh = (shSearching ? shResults : shTrending).filter(
+  // 趋势与搜索结果各归各的页签，不再用「有没有搜索过」决定画哪一份。
+  const showTrend = source === "trend";
+  const visibleSh = (showTrend ? shTrending : shResults).filter(
     (skill) => !onlyUninstalled || !shIsInstalled(skill),
   );
   const failures = report?.failures ?? [];
 
   const changeShQuery = (value: string) => {
     setQuery(value);
-    // 清空关键词就回到趋势榜，保留「搜索 → 清空 → 浏览」的自然路径。
-    if (shSearching && value.trim() === "") setShQueryDone(null);
+    // 清空关键词回到「请先搜索」的空态；趋势榜已经是独立页签，不作兜底。
+    if (value.trim() === "") setShQueryDone(null);
   };
 
   const submitSh = async (offset: number) => {
@@ -464,7 +469,7 @@ export function SkillDiscoveryPanel({
   };
 
   const renderShRows = () => {
-    if (!shSearching) {
+    if (showTrend) {
       if (shTrendingLoading && shTrending.length === 0) {
         return (
           <p className="py-12 text-center text-caption text-fg-3">正在读取 skills.sh 趋势榜…</p>
@@ -476,9 +481,7 @@ export function SkillDiscoveryPanel({
           <EmptyState
             icon={Sparkles}
             title={failed ? "趋势榜读取失败" : "趋势榜暂时为空"}
-            description={
-              failed ? (shTrendingError ?? "") : "稍后再试，或直接输入关键词搜索 skills.sh。"
-            }
+            description={failed ? (shTrendingError ?? "") : "skills.sh 这次没有返回条目，重新加载试试。"}
             actions={
               <Button onClick={() => void loadTrending(0)}>
                 {failed ? "重试" : "重新加载"}
@@ -503,6 +506,16 @@ export function SkillDiscoveryPanel({
           />
         );
       }
+      // 不再自动抓趋势榜，所以刚进 skills.sh 时是「等你输入关键词」，不是榜单兜底。
+      if (shQueryDone === null) {
+        return (
+          <EmptyState
+            icon={Sparkles}
+            title="搜索 skills.sh"
+            description="输入至少 2 个字符再搜索；想看热门排行，点旁边的「趋势」页签。"
+          />
+        );
+      }
     }
     if (visibleSh.length === 0) {
       return (
@@ -520,22 +533,22 @@ export function SkillDiscoveryPanel({
         />
       );
     }
-    const pager = shSearching
+    const pager = showTrend
       ? {
-          hasMore: shHasMore,
-          loading: shLoading,
-          count: shResults.length,
-          loadMore: () => void submitSh(shOffset + 20),
-        }
-      : {
           hasMore: shTrendingHasMore,
           loading: shTrendingLoading,
           count: shTrending.length,
           loadMore: () => void loadTrending(shTrendingPage + 1),
+        }
+      : {
+          hasMore: shHasMore,
+          loading: shLoading,
+          count: shResults.length,
+          loadMore: () => void submitSh(shOffset + 20),
         };
     return (
       <>
-        {!shSearching && (
+        {showTrend && (
           <div className="flex items-center justify-between border-b border-border px-4 py-2 text-caption text-fg-3">
             <span>skills.sh 趋势榜 · 近 24 小时</span>
             <span>
@@ -609,10 +622,11 @@ export function SkillDiscoveryPanel({
           ariaLabel="Skill 发现来源"
           size="sm"
           value={source}
-          onValueChange={setSource}
+          onValueChange={selectSource}
           items={[
             { value: "repos", label: `仓库 · ${enabledRepos.length}` },
             { value: "skillssh", label: "skills.sh" },
+            { value: "trend", label: "趋势" },
           ]}
         />
         {source === "repos" && (
@@ -677,25 +691,28 @@ export function SkillDiscoveryPanel({
             ))
           )}
         </CheckPopover>
-        <SearchField
-          className="w-[240px] shrink-0"
-          value={query}
-          onValueChange={changeShQuery}
-          placeholder={
-            source === "skillssh" ? "搜索 skills.sh…" : "搜索 Skill 或仓库…"
-          }
-          ariaLabel="搜索可发现的 Skill"
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && source === "skillssh") {
-              void submitSh(0);
+        {source !== "trend" && (
+          <SearchField
+            className="w-[240px] shrink-0"
+            value={query}
+            onValueChange={changeShQuery}
+            placeholder={
+              source === "skillssh" ? "搜索 skills.sh…" : "搜索 Skill 或仓库…"
             }
-          }}
-        />
-        {source === "skillssh" ? (
+            ariaLabel="搜索可发现的 Skill"
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && source === "skillssh") {
+                void submitSh(0);
+              }
+            }}
+          />
+        )}
+        {source === "skillssh" && (
           <Button size="sm" loading={shLoading} onClick={() => void submitSh(0)}>
             搜索
           </Button>
-        ) : (
+        )}
+        {source === "repos" && (
           <Button size="sm" onClick={() => setRepoManagerOpen(true)}>
             管理仓库
           </Button>
@@ -718,7 +735,7 @@ export function SkillDiscoveryPanel({
             {error}
           </Notice>
         )}
-        {source === "skillssh" && !shSearching && shTrendingError && shTrending.length > 0 && (
+        {showTrend && shTrendingError && shTrending.length > 0 && (
           <Notice tone="warning" className="mb-3">
             <p>加载更多趋势条目失败：{shTrendingError}</p>
             <div className="mt-2">

@@ -427,26 +427,42 @@ test("searches skills.sh and installs by skill id", async () => {
   );
 });
 
-test("shows the skills.sh trending list by default", async () => {
+test("点 skills.sh 只准备搜索，不抓趋势榜", async () => {
   render(<SkillsPanel />);
   fireEvent.click(await screen.findByRole("tab", { name: /发现/ }));
   await screen.findByText("pdf");
 
   fireEvent.click(screen.getByRole("button", { name: "skills.sh" }));
+  expect(await screen.findByText("搜索 skills.sh")).toBeInTheDocument();
+  expect(api.listSkillsShTrending).not.toHaveBeenCalled();
+
+  // 搜索 → 清空关键词回到「请先搜索」，不再把趋势榜当兜底。
+  const field = screen.getByLabelText("搜索可发现的 Skill");
+  fireEvent.change(field, { target: { value: "pdf" } });
+  fireEvent.keyDown(field, { key: "Enter" });
+  expect(await screen.findByText("skills.sh · pdf")).toBeInTheDocument();
+  fireEvent.change(field, { target: { value: "" } });
+  expect(await screen.findByText("搜索 skills.sh")).toBeInTheDocument();
+  expect(api.listSkillsShTrending).not.toHaveBeenCalled();
+});
+
+test("点「趋势」页签才请求趋势榜，且已有内容时不重复抓", async () => {
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("tab", { name: /发现/ }));
+  await screen.findByText("pdf");
+  expect(api.listSkillsShTrending).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("button", { name: "趋势" }));
   expect(await screen.findByText(/skills\.sh 趋势榜 · 近 24 小时/)).toBeInTheDocument();
   expect(await screen.findByText("trending-demo")).toBeInTheDocument();
   expect(api.listSkillsShTrending).toHaveBeenCalledWith(0);
 
-  // 清空搜索关键词回到趋势榜。
-  fireEvent.change(screen.getByLabelText("搜索可发现的 Skill"), {
-    target: { value: "pdf" },
-  });
-  fireEvent.keyDown(screen.getByLabelText("搜索可发现的 Skill"), { key: "Enter" });
-  expect(await screen.findByText("skills.sh · pdf")).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("搜索可发现的 Skill"), {
-    target: { value: "" },
-  });
-  expect(await screen.findByText("trending-demo")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "skills.sh" }));
+  fireEvent.click(screen.getByRole("button", { name: "趋势" }));
+  expect(api.listSkillsShTrending).toHaveBeenCalledTimes(1);
+
+  // 趋势页签没有搜索框：它只做榜单浏览。
+  expect(screen.queryByLabelText("搜索可发现的 Skill")).not.toBeInTheDocument();
 });
 
 test("selecting rows enables batch actions scoped to the selection", async () => {
