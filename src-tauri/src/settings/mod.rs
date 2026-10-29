@@ -6,7 +6,11 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
+    /// 缺该字段时取默认根：设置文件被外部改坏（只留下部分键）时，启动与保存都得继续可用，
+    /// 不能因为一个键把整机设置写入全部锁死。
+    #[serde(default = "default_store_root")]
     pub store_root: PathBuf,
+    #[serde(default = "default_theme")]
     pub theme: Theme,
     /// 全局启用的 agent；None = 全部启用（兼容旧设置文件）。
     #[serde(default)]
@@ -209,6 +213,10 @@ fn default_branch() -> String {
     "main".to_string()
 }
 
+fn default_theme() -> Theme {
+    Theme::System
+}
+
 fn default_true() -> bool {
     true
 }
@@ -364,6 +372,37 @@ mod tests {
         };
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path).unwrap(), settings);
+    }
+
+    #[test]
+    fn settings_file_missing_store_root_falls_back_to_default() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, br#"{"theme":"dark"}"#).unwrap();
+
+        let loaded = load_from(&path).unwrap();
+        assert_eq!(loaded.theme, Theme::Dark);
+        assert!(loaded.store_root.ends_with(".ccswitchx"));
+
+        // 读得出必须写得进：补全后的内容重新落盘，storeRoot 不再是空缺。
+        save_to(&path, &loaded).unwrap();
+        assert_eq!(load_from(&path).unwrap(), loaded);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("storeRoot"));
+    }
+
+    #[test]
+    fn settings_file_missing_theme_falls_back_to_system() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"storeRoot": dir.path().join("data")})).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(load_from(&path).unwrap().theme, Theme::System);
     }
 
     #[test]

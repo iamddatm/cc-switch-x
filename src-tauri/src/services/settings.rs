@@ -583,6 +583,30 @@ mod tests {
     }
 
     #[test]
+    fn proxy_save_survives_a_partial_settings_file() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let secrets_path = dir.path().join("secrets.local.json");
+        // 外部工具改坏设置文件（只留下 theme）时，网络面板的「保存」不能整体失效。
+        std::fs::write(&config, br#"{"theme":"dark"}"#).unwrap();
+
+        let (updated, _) = set_proxy_at(
+            &config,
+            &secrets_path,
+            "http://127.0.0.1:7890".into(),
+            String::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(updated.theme, Theme::Dark);
+        assert_eq!(updated.proxy.url.as_deref(), Some("http://127.0.0.1:7890"));
+        assert!(settings::load_from(&config)
+            .unwrap()
+            .store_root
+            .ends_with(".ccswitchx"));
+    }
+
+    #[test]
     fn skill_repos_are_normalized_and_deduplicated() {
         let dir = tempdir().unwrap();
         let config = dir.path().join("settings.json");
