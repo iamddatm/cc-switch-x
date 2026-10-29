@@ -20,6 +20,11 @@ pub const MAX_CLOUD_BYTES: u64 = 512 * 1024 * 1024;
 /// manifest 只描述一个包，正常只有几百字节；上限防止被别的应用塞进大文件。
 pub const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_REMOTE_DIR: &str = "ccswitchx";
+/// PROPFIND 应答只用来取几个属性，正常几百字节；超长说明响应异常，截断后按解析失败处理。
+const MAX_PROPINFO_BYTES: u64 = 64 * 1024;
+/// 只问 PROPFIND 要用到的属性，避免服务器回整份死属性集。
+const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:"><d:prop><d:getcontentlength/><d:getlastmodified/><d:getetag/></d:prop></d:propfind>"#;
 
 #[derive(Clone)]
 pub struct WebDavConfig {
@@ -115,7 +120,44 @@ impl WebDavClient {
         self.head_object(BACKUP_OBJECT)
     }
 
+    /// 读对象元数据：先 PROPFIND，服务器不支持时退回 HEAD。
+    ///
+    /// 坚果云对 HEAD 一律回 `Content-Length: 0`（哪怕对象有 13 MB），拿 HEAD 判大小
+    /// 会把正常上传误判成失败；`getcontentlength` 才是 WebDAV 规定的元数据来源。
     fn head_object(&self, name: &str) -> Result<RemoteObject, AppError> {
+        match self.propfind_object(name)? {
+            Some(remote) => Ok(remote),
+            None => self.head_object_via_head(name),
+        }
+    }
+
+    /// PROPFIND `Depth: 0`；`Ok(None)` 表示服务器不支持或应答无法解析，调用方回退 HEAD。
+    fn propfind_object(&self, name: &str) -> Result<Option<RemoteObject>, AppError> {
+        let response = self
+            .request(propfind_method(), self.remote_url(name)?)
+            .header("Depth", "0")
+            .header(CONTENT_TYPE, "application/xml; charset=utf-8")
+            .body(PROPFIND_BODY)
+            .send()
+            .map_err(transport_error("PROPFIND"))?;
+        let status = response.status();
+        match status.as_u16() {
+            // 个别实现用 200 代替 207 返回单条 response，解析逻辑一致。
+            200 | 207 => {}
+            404 | 409 => return Ok(Some(RemoteObject::missing())),
+            405 | 501 => return Ok(None),
+            401 | 403 => return Err(auth_error(status)),
+            _ => return Err(status_error("PROPFIND", status)),
+        }
+        let mut body = String::new();
+        response
+            .take(MAX_PROPINFO_BYTES)
+            .read_to_string(&mut body)
+            .map_err(|error| AppError::Cloud(format!("读取 PROPFIND 应答失败：{error}")))?;
+        Ok(remote_from_propfind(&body))
+    }
+
+    fn head_object_via_head(&self, name: &str) -> Result<RemoteObject, AppError> {
         let response = self
             .request(Method::HEAD, self.remote_url(name)?)
             .send()
@@ -401,6 +443,10 @@ fn move_method() -> Method {
     Method::from_bytes(b"MOVE").expect("MOVE is a valid method")
 }
 
+fn propfind_method() -> Method {
+    Method::from_bytes(b"PROPFIND").expect("PROPFIND is a valid method")
+}
+
 fn transport_error(operation: &'static str) -> impl Fn(reqwest::Error) -> AppError {
     move |error| AppError::Cloud(format!("WebDAV {operation} 请求失败：{error}"))
 }
@@ -447,6 +493,75 @@ fn remote_from_headers(
         modified_at,
         etag,
     }
+}
+
+/// 从 PROPFIND 的 multistatus 应答里取对象元数据；一个字段都取不到时返回 None，
+/// 由调用方回退 HEAD（宁可少一次校验，也不能因为解析失败挡住上传）。
+fn remote_from_propfind(xml: &str) -> Option<RemoteObject> {
+    let size_bytes = element_text(xml, "getcontentlength").and_then(|text| text.parse().ok());
+    let modified_at = element_text(xml, "getlastmodified")
+        .and_then(|text| chrono::DateTime::parse_from_rfc2822(&text).ok())
+        .map(|time| time.timestamp_millis());
+    let etag = element_text(xml, "getetag").filter(|text| !text.is_empty());
+    if size_bytes.is_none() && modified_at.is_none() && etag.is_none() {
+        return None;
+    }
+    Some(RemoteObject {
+        exists: true,
+        size_bytes,
+        modified_at,
+        etag,
+    })
+}
+
+/// 取元素内部文本（trim 后）。只服务 `Depth: 0` 的扁平属性，不做通用 XML 解析；
+/// 命名空间前缀按 `:` 之后的部分比较，兼容 `d:` / `D:` / `lp1:` 等写法。
+fn element_text(xml: &str, local: &str) -> Option<String> {
+    let (inner, _) = find_element(xml, local)?;
+    Some(inner.trim().to_string())
+}
+
+/// 找到第一个本地名匹配的元素，返回其内部文本与是否自闭合。
+fn find_element<'a>(xml: &'a str, local: &str) -> Option<(&'a str, bool)> {
+    let mut search_from = 0;
+    while let Some(relative) = xml[search_from..].find('<') {
+        let start = search_from + relative;
+        let body_start = start + 1;
+        let rest = &xml[body_start..];
+        // 注释、处理指令与闭合标签都不是起始元素。
+        if rest.starts_with('?') || rest.starts_with('!') || rest.starts_with('/') {
+            search_from = body_start;
+            continue;
+        }
+        let end = body_start + rest.find('>')?;
+        let tag = &xml[body_start..end];
+        let after = end + 1;
+        let name = tag.split_whitespace().next().unwrap_or_default();
+        if name.rsplit(':').next() != Some(local) {
+            search_from = after;
+            continue;
+        }
+        if tag.ends_with('/') {
+            return Some(("", true));
+        }
+        let close = find_closing_tag(xml, after, local)?;
+        return Some((&xml[after..close], false));
+    }
+    None
+}
+
+fn find_closing_tag(xml: &str, from: usize, local: &str) -> Option<usize> {
+    let mut search_from = from;
+    while let Some(relative) = xml[search_from..].find("</") {
+        let start = search_from + relative;
+        let name_start = start + 2;
+        let end = name_start + xml[name_start..].find('>')?;
+        if xml[name_start..end].trim().rsplit(':').next() == Some(local) {
+            return Some(start);
+        }
+        search_from = end + 1;
+    }
+    None
 }
 
 pub fn normalize_base_url(raw: &str) -> Result<String, AppError> {
@@ -561,6 +676,10 @@ pub(crate) mod test_support {
         put_attempts: usize,
         truncate_after_put: bool,
         head_size_override: Option<u64>,
+        /// 模拟坚果云：HEAD 一律回 `Content-Length: 0`，真实大小只能靠 PROPFIND。
+        head_zero_length: bool,
+        /// 模拟不支持 PROPFIND 的服务器：应答 405，客户端应回退 HEAD。
+        unsupported_propfind: bool,
         /// 模拟坚果云：GET 不存在的对象时返回 409 而不是 404。
         missing_get_conflict: bool,
     }
@@ -589,6 +708,8 @@ pub(crate) mod test_support {
                 put_attempts: 0,
                 truncate_after_put: false,
                 head_size_override: None,
+                head_zero_length: false,
+                unsupported_propfind: false,
                 missing_get_conflict: false,
             }));
             let thread_state = state.clone();
@@ -678,6 +799,14 @@ pub(crate) mod test_support {
 
         pub(crate) fn set_head_size_override(&self, size: Option<u64>) {
             self.state.lock().unwrap().head_size_override = size;
+        }
+
+        pub(crate) fn set_head_zero_length(&self, zero: bool) {
+            self.state.lock().unwrap().head_zero_length = zero;
+        }
+
+        pub(crate) fn set_unsupported_propfind(&self, unsupported: bool) {
+            self.state.lock().unwrap().unsupported_propfind = unsupported;
         }
 
         pub(crate) fn set_missing_get_conflict(&self, conflict: bool) {
@@ -782,13 +911,43 @@ pub(crate) mod test_support {
             },
             "HEAD" => match state.objects.get(&path) {
                 Some(bytes) => {
-                    let length = state.head_size_override.unwrap_or(bytes.len() as u64);
+                    let length = if state.head_zero_length {
+                        0
+                    } else {
+                        state.head_size_override.unwrap_or(bytes.len() as u64)
+                    };
                     respond_head(&mut stream, "200 OK", length, &object_headers());
                 }
                 None => respond_head(&mut stream, "404 Not Found", 0, &[]),
             },
+            "PROPFIND" => {
+                if state.unsupported_propfind {
+                    respond(&mut stream, "405 Method Not Allowed", &[], b"");
+                } else {
+                    match state.objects.get(&path) {
+                        Some(bytes) => {
+                            let length = state.head_size_override.unwrap_or(bytes.len() as u64);
+                            let xml = propfind_document(&path, length);
+                            respond(
+                                &mut stream,
+                                "207 Multi-Status",
+                                &[("Content-Type", "application/xml; charset=utf-8".to_string())],
+                                xml.as_bytes(),
+                            );
+                        }
+                        None => respond(&mut stream, "404 Not Found", &[], b""),
+                    }
+                }
+            }
             _ => respond(&mut stream, "405 Method Not Allowed", &[], b""),
         }
+    }
+
+    /// 形如真实服务器的单条 multistatus 应答，属性顺序故意与坚果云保持一致。
+    fn propfind_document(path: &str, content_length: u64) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>{path}</d:href><d:propstat><d:prop><d:getetag>fake-etag</d:getetag><d:getcontentlength>{content_length}</d:getcontentlength><d:getlastmodified>Wed, 21 Oct 2015 07:28:00 GMT</d:getlastmodified><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#
+        )
     }
 
     fn object_headers() -> Vec<(&'static str, String)> {
@@ -1105,5 +1264,49 @@ mod tests {
         let file = temp_file(b"0123456789");
         let error = client.put(file.path()).unwrap_err().to_string();
         assert!(error.contains("大小不一致"));
+    }
+
+    #[test]
+    fn put_succeeds_when_head_reports_zero_like_jianguoyun() {
+        // 坚果云对 HEAD 一律回 Content-Length: 0；真实大小只能从 PROPFIND 拿到。
+        let server = FakeWebDav::start("me", "pw");
+        server.set_head_zero_length(true);
+        let client = client_for(&server);
+        let file = temp_file(b"0123456789");
+        let remote = client.put(file.path()).unwrap();
+        assert_eq!(remote.size_bytes, Some(10));
+        assert_eq!(client.head().unwrap().size_bytes, Some(10));
+    }
+
+    #[test]
+    fn put_still_verifies_size_when_propfind_unsupported() {
+        let server = FakeWebDav::start("me", "pw");
+        server.set_unsupported_propfind(true);
+        server.set_truncate_after_put(true);
+        let client = client_for(&server);
+        let file = temp_file(b"0123456789");
+        let error = client.put(file.path()).unwrap_err().to_string();
+        assert!(error.contains("大小不一致"));
+    }
+
+    #[test]
+    fn propfind_document_from_real_server_is_parsed() {
+        // 坚果云 dav.jianguoyun.com 的 Depth: 0 原样应答。
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?><d:multistatus xmlns:d="DAV:" xmlns:s="http://ns.jianguoyun.com"><d:response><d:href>/dav/ccswitchx/ccswitchx-backup.zip</d:href><d:propstat><d:prop><d:getetag>7vnBCItOLq839ZdlmYBpLQ</d:getetag><d:getcontenttype>application/zip</d:getcontenttype><d:displayname>ccswitchx-backup.zip</d:displayname><d:getcontentlength>13676741</d:getcontentlength><d:getlastmodified>Thu, 29 Oct 2026 02:47:32 GMT</d:getlastmodified><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#;
+        let remote = remote_from_propfind(xml).expect("应解析出元数据");
+        assert_eq!(remote.size_bytes, Some(13_676_741));
+        assert_eq!(remote.etag.as_deref(), Some("7vnBCItOLq839ZdlmYBpLQ"));
+        assert!(remote.modified_at.is_some());
+    }
+
+    #[test]
+    fn propfind_parsing_tolerates_other_name_prefixes() {
+        let xml = r#"<D:multistatus xmlns:D="DAV:"><D:response><D:propstat><D:prop><lp1:getcontentlength xmlns:lp1="DAV:">42</lp1:getcontentlength></D:prop></D:propstat></D:response></D:multistatus>"#;
+        assert_eq!(remote_from_propfind(xml).unwrap().size_bytes, Some(42));
+    }
+
+    #[test]
+    fn propfind_without_known_properties_falls_back_to_head() {
+        assert!(remote_from_propfind("<d:multistatus xmlns:d=\"DAV:\"/>").is_none());
     }
 }
