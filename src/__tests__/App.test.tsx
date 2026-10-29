@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 import App from "../App";
 import { api } from "../lib/api";
@@ -23,6 +23,7 @@ vi.mock("../lib/api", () => ({
     listSessions: vi.fn().mockResolvedValue([]),
     listDrifts: vi.fn().mockResolvedValue([]),
     rescanDrift: vi.fn().mockResolvedValue([]),
+    getAutostart: vi.fn().mockResolvedValue(false),
   },
 }));
 
@@ -67,7 +68,7 @@ test("renders all sidebar entries and switches panes", () => {
   expect(screen.getByRole("heading", { name: "Rules" })).toBeInTheDocument();
 });
 
-test("落盘状态条常驻，重扫后数字跟着磁盘结果变", async () => {
+test("一致时隐藏状态条，重扫入口在设置面板", async () => {
   const drift: DriftRecord = {
     id: 1,
     assetType: "rule",
@@ -78,11 +79,18 @@ test("落盘状态条常驻，重扫后数字跟着磁盘结果变", async () =>
     targetPath: "C:/x/.claude/rules/style.md",
   };
   render(<App />);
-  expect(await screen.findByText("落盘与真源一致")).toBeInTheDocument();
+  await waitFor(() => expect(api.listDrifts).toHaveBeenCalled());
+  expect(screen.queryByText("落盘与真源一致")).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  expect(await screen.findByText("落盘与真源一致。")).toBeInTheDocument();
 
   vi.mocked(api.rescanDrift).mockResolvedValue([drift]);
   fireEvent.click(screen.getByRole("button", { name: "重扫落盘" }));
 
   expect(await screen.findByText(/落盘有 1 处与真源不一致/)).toBeInTheDocument();
+  expect(
+    screen.getByText("发现 1 处与真源不一致，请到对应面板逐条处置。"),
+  ).toBeInTheDocument();
   expect(api.rescanDrift).toHaveBeenCalledTimes(1);
 });

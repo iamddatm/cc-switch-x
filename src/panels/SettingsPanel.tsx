@@ -10,6 +10,7 @@ import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Select } from "../components/ui/Select";
 import { api } from "../lib/api";
+import { useDrift } from "../hooks/useDrift";
 import type { UpdateController } from "../hooks/useUpdate";
 import type { AppSettings, Theme } from "../types";
 
@@ -30,6 +31,7 @@ export function SettingsPanel({
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const drift = useDrift();
 
   useEffect(() => {
     void api
@@ -156,6 +158,29 @@ export function SettingsPanel({
             <p className="text-caption text-fg-3">
               登录系统后自动打开 CC Switch X；由系统登录项管理，不需要管理员权限。
             </p>
+          </section>
+
+          <section className="space-y-2">
+            <h3 className="text-strong text-fg-1">落盘检查</h3>
+            <p className="text-caption text-fg-2">
+              核对各 agent 配置目录里的文件是否仍与真源一致；漂移只报告，不会自动覆盖。
+            </p>
+            <div className="flex flex-wrap items-center gap-3">
+              <Button loading={drift.busy} onClick={() => void drift.rescan()}>
+                重扫落盘
+              </Button>
+              <span
+                className={`text-caption ${drift.error ? "text-danger-text" : "text-fg-3"}`}
+              >
+                {drift.loading
+                  ? "正在读取落盘状态…"
+                  : drift.error
+                    ? `检查失败：${drift.error}`
+                    : drift.drifts.length === 0
+                      ? "落盘与真源一致。"
+                      : `发现 ${drift.drifts.length} 处与真源不一致，请到对应面板逐条处置。`}
+              </span>
+            </div>
           </section>
 
           <section className="space-y-2">
