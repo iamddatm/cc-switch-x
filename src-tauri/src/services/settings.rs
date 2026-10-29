@@ -20,6 +20,8 @@ pub struct ProxySettingsView {
     pub url: Option<String>,
     pub username: Option<String>,
     pub has_password: bool,
+    /// 实际生效的开关；没填地址时恒为 false。
+    pub enabled: bool,
 }
 
 pub fn proxy_secret_ref() -> SecretRef {
@@ -46,19 +48,22 @@ pub fn proxy_view(settings: &AppSettings, secrets: &Secrets) -> ProxySettingsVie
             .get(&proxy_secret_ref())
             .is_some_and(|value| !value.is_empty());
     ProxySettingsView {
-        url,
+        url: url.clone(),
         username,
         has_password,
+        enabled: url.is_some() && settings.proxy.enabled,
     }
 }
 
 /// 密码语义：None = 保留旧密码，Some("") = 清除，Some(v) = 覆盖。
+/// `enabled = false` 保留地址与凭据但按直连处理；清空地址则连同凭据一起清除。
 pub fn set_proxy_at(
     config_path: &std::path::Path,
     secrets_path: &std::path::Path,
     url: String,
     username: String,
     password: Option<String>,
+    enabled: bool,
 ) -> Result<(AppSettings, Secrets), AppError> {
     let mut current = settings::load_from(config_path)?;
     let mut secrets = Secrets::load(secrets_path)?;
@@ -69,6 +74,7 @@ pub fn set_proxy_at(
         // 清空地址就是回到直连，认证信息一并清掉，避免留下无法使用的残留。
         current.proxy.url = None;
         current.proxy.username = None;
+        current.proxy.enabled = false;
         secrets.remove(&proxy_secret_ref());
     } else {
         // 密码必须进 secrets 文件；地址里带 userinfo 会被原样写进 settings.json。
@@ -107,10 +113,12 @@ pub fn set_proxy_at(
             Some(url.to_string()),
             username.clone(),
             next_password.clone(),
+            enabled,
         );
         config.validate()?;
         current.proxy.url = Some(url.to_string());
         current.proxy.username = username;
+        current.proxy.enabled = enabled;
         if let Some(value) = next_password {
             secrets.insert(&proxy_secret_ref(), &value);
         }
@@ -510,10 +518,12 @@ mod tests {
             " http://127.0.0.1:7890 ".into(),
             " me ".into(),
             Some("p@ss".into()),
+            true,
         )
         .unwrap();
         assert_eq!(updated.proxy.url.as_deref(), Some("http://127.0.0.1:7890"));
         assert_eq!(updated.proxy.username.as_deref(), Some("me"));
+        assert!(updated.proxy.enabled);
         let saved = Secrets::load(&secrets_path).unwrap();
         assert_eq!(saved.get(&proxy_secret_ref()), Some("p@ss"));
         assert_eq!(
@@ -522,6 +532,7 @@ mod tests {
                 url: Some("http://127.0.0.1:7890".into()),
                 username: Some("me".into()),
                 has_password: true,
+                enabled: true,
             }
         );
         assert_eq!(secrets.get(&proxy_secret_ref()), Some("p@ss"));
@@ -533,6 +544,7 @@ mod tests {
             "http://127.0.0.1:7891".into(),
             "me".into(),
             None,
+            true,
         )
         .unwrap();
         assert_eq!(kept_secrets.get(&proxy_secret_ref()), Some("p@ss"));
@@ -544,15 +556,71 @@ mod tests {
             "http://127.0.0.1:7891".into(),
             "me".into(),
             Some(String::new()),
+            true,
         )
         .unwrap();
         assert!(!proxy_view(&cleared, &cleared_secrets).has_password);
 
-        let (empty, empty_secrets) =
-            set_proxy_at(&config, &secrets_path, String::new(), String::new(), None).unwrap();
+        let (empty, empty_secrets) = set_proxy_at(
+            &config,
+            &secrets_path,
+            String::new(),
+            String::new(),
+            None,
+            true,
+        )
+        .unwrap();
         assert!(empty.proxy.url.is_none());
         assert!(empty.proxy.username.is_none());
+        assert!(!empty.proxy.enabled);
         assert!(!proxy_view(&empty, &empty_secrets).has_password);
+    }
+
+    #[test]
+    fn disabling_proxy_keeps_address_and_credentials() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let secrets_path = dir.path().join("secrets.local.json");
+
+        set_proxy_at(
+            &config,
+            &secrets_path,
+            "http://127.0.0.1:7890".into(),
+            "me".into(),
+            Some("p@ss".into()),
+            true,
+        )
+        .unwrap();
+
+        let (disabled, secrets) = set_proxy_at(
+            &config,
+            &secrets_path,
+            "http://127.0.0.1:7890".into(),
+            "me".into(),
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(!disabled.proxy.enabled);
+        assert_eq!(disabled.proxy.url.as_deref(), Some("http://127.0.0.1:7890"));
+        assert_eq!(disabled.proxy.username.as_deref(), Some("me"));
+        assert_eq!(secrets.get(&proxy_secret_ref()), Some("p@ss"));
+        let view = proxy_view(&disabled, &secrets);
+        assert!(!view.enabled);
+        assert!(view.has_password);
+
+        // 重新启用时地址与密码都还在，不需要重填。
+        let (enabled, _) = set_proxy_at(
+            &config,
+            &secrets_path,
+            "http://127.0.0.1:7890".into(),
+            "me".into(),
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(enabled.proxy.enabled);
+        assert_eq!(enabled.proxy.url.as_deref(), Some("http://127.0.0.1:7890"));
     }
 
     #[test]
@@ -565,7 +633,8 @@ mod tests {
             &secrets_path,
             "ftp://127.0.0.1:21".into(),
             String::new(),
-            None
+            None,
+            true
         )
         .is_err());
         assert!(
@@ -574,7 +643,8 @@ mod tests {
                 &secrets_path,
                 "http://user:pw@127.0.0.1:7890".into(),
                 String::new(),
-                None
+                None,
+                true
             )
             .is_err(),
             "地址里的凭据不能写进设置文件"
@@ -596,6 +666,7 @@ mod tests {
             "http://127.0.0.1:7890".into(),
             String::new(),
             None,
+            true,
         )
         .unwrap();
         assert_eq!(updated.theme, Theme::Dark);

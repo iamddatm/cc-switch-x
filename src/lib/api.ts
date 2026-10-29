@@ -103,9 +103,19 @@ export const api = {
   setEnabledAgents: (agentIds: string[]) =>
     invoke<AppSettings>("set_enabled_agents", { agentIds }),
   getProxySettings: () => invoke<ProxySettingsView>("get_proxy_settings"),
-  /** password: null = 保留已保存密码，空串 = 清除。 */
-  setProxySettings: (url: string, username: string, password: string | null) =>
-    invoke<ProxySettingsView>("set_proxy_settings", { url, username, password }),
+  /** password: null = 保留已保存密码，空串 = 清除；enabled=false 只停用代理，配置保留。 */
+  setProxySettings: (
+    url: string,
+    username: string,
+    password: string | null,
+    enabled: boolean,
+  ) =>
+    invoke<ProxySettingsView>("set_proxy_settings", {
+      url,
+      username,
+      password,
+      enabled,
+    }),
   testProxySettings: (url: string, username: string, password: string | null) =>
     invoke<ProxyTestResult>("test_proxy_settings", { url, username, password }),
   scanLocalProxies: () => invoke<DetectedProxy[]>("scan_local_proxies"),

@@ -59,6 +59,7 @@ impl AppState {
             settings.proxy.url.clone(),
             settings.proxy.username.clone(),
             password,
+            settings.proxy.enabled,
         ))
     }
 

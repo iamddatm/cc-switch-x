@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Eye, EyeOff, Globe, Search, TestTube2, X } from "lucide-react";
 import { Button } from "../components/ui/Button";
+import { Checkbox } from "../components/ui/Checkbox";
 import { IconButton } from "../components/ui/IconButton";
 import { Input } from "../components/ui/Input";
 import { Notice } from "../components/ui/Notice";
@@ -15,6 +16,7 @@ export function NetworkPanel() {
   const [passwordDirty, setPasswordDirty] = useState(false);
   const [hasPassword, setHasPassword] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [enabled, setEnabled] = useState(true);
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -33,6 +35,7 @@ export function NetworkPanel() {
         setUrl(value.url ?? "");
         setUsername(value.username ?? "");
         setHasPassword(value.hasPassword);
+        setEnabled(value.enabled);
         setPassword("");
         setPasswordDirty(false);
         setDirty(false);
@@ -63,12 +66,20 @@ export function NetworkPanel() {
         url.trim(),
         username.trim(),
         passwordDirty ? password : null,
+        enabled,
       );
       setHasPassword(view.hasPassword);
+      setEnabled(view.enabled);
       setPassword("");
       setPasswordDirty(false);
       setDirty(false);
-      setMessage(url.trim() ? "代理设置已保存。" : "已切换为直连。");
+      setMessage(
+        !url.trim()
+          ? "已切换为直连。"
+          : enabled
+            ? "代理设置已保存。"
+            : "代理已停用，出站请求将直连。",
+      );
     } catch (e) {
       setError(String(e));
     } finally {
@@ -125,6 +136,7 @@ export function NetworkPanel() {
     setPassword("");
     setPasswordDirty(true);
     setHasPassword(false);
+    setEnabled(false);
     setDetected([]);
     setDirty(true);
     setError(null);
@@ -166,6 +178,21 @@ export function NetworkPanel() {
               <p className="mt-4 text-caption text-fg-3">正在读取代理设置…</p>
             ) : (
               <div className="mt-4 space-y-3">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <Checkbox
+                    id="proxy-enabled"
+                    label="启用代理"
+                    checked={enabled}
+                    onChange={(event) => {
+                      setEnabled(event.target.checked);
+                      markDirty();
+                    }}
+                  />
+                  <span className="text-caption text-fg-3">
+                    关闭后保留地址与凭据，所有出站请求直连。
+                  </span>
+                </div>
+
                 <div className="flex gap-2">
                   <Input
                     aria-label="代理地址"

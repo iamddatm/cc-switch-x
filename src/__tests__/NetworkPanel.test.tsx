@@ -18,12 +18,14 @@ beforeEach(() => {
     url: "http://127.0.0.1:7890",
     username: "me",
     hasPassword: true,
+    enabled: true,
   });
   vi.mocked(api.setProxySettings).mockImplementation(
-    async (url, username, password) => ({
+    async (url, username, password, enabled) => ({
       url: url || null,
       username: username || null,
       hasPassword: password !== null ? password !== "" : true,
+      enabled: Boolean(url) && enabled,
     }),
   );
   vi.mocked(api.testProxySettings).mockResolvedValue({
@@ -50,9 +52,34 @@ test("loads the saved proxy and keeps the stored password when saving", async ()
       "http://127.0.0.1:7891",
       "me",
       null,
+      true,
     ),
   );
   expect(await screen.findByText("代理设置已保存。")).toBeInTheDocument();
+});
+
+test("disabling the proxy keeps the address and saves enabled=false", async () => {
+  render(<NetworkPanel />);
+  const input = await screen.findByLabelText("代理地址");
+  await waitFor(() => expect(input).toHaveValue("http://127.0.0.1:7890"));
+
+  fireEvent.click(screen.getByLabelText("启用代理"));
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+  await waitFor(() =>
+    expect(api.setProxySettings).toHaveBeenCalledWith(
+      "http://127.0.0.1:7890",
+      "me",
+      null,
+      false,
+    ),
+  );
+  expect(
+    await screen.findByText("代理已停用，出站请求将直连。"),
+  ).toBeInTheDocument();
+  expect(screen.getByLabelText("代理地址")).toHaveValue(
+    "http://127.0.0.1:7890",
+  );
 });
 
 test("scans local proxies and fills the selected address", async () => {

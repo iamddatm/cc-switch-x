@@ -182,13 +182,26 @@ pub fn validate_git_remote(remote: &str) -> Result<(), String> {
     Err("远端地址只支持 https://、ssh://、file:// 或 git@host:path".into())
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxySettings {
     #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
     pub username: Option<String>,
+    /// 代理开关：关闭时保留地址与凭据，但所有出站请求直连。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for ProxySettings {
+    fn default() -> Self {
+        Self {
+            url: None,
+            username: None,
+            enabled: true,
+        }
+    }
 }
 
 /// Skill 发现仓库。owner/name 必须能被解析成 GitHub 坐标。
@@ -345,6 +358,7 @@ mod tests {
             proxy: ProxySettings {
                 url: Some("http://127.0.0.1:7890".into()),
                 username: Some("me".into()),
+                enabled: false,
             },
             skill_repos: Some(vec![SkillRepo {
                 owner: "acme".into(),

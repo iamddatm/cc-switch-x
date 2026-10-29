@@ -20,26 +20,43 @@ pub struct ProxyConfig {
     pub url: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
+    /// 关闭时保留配置（地址、凭据）但按直连处理，方便随时切回。
+    pub enabled: bool,
 }
 
 impl ProxyConfig {
-    pub fn new(url: Option<String>, username: Option<String>, password: Option<String>) -> Self {
+    pub fn new(
+        url: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+        enabled: bool,
+    ) -> Self {
         Self {
             url,
             username,
             password,
+            enabled,
         }
     }
 
     pub fn is_enabled(&self) -> bool {
+        self.enabled
+            && self
+                .url
+                .as_deref()
+                .is_some_and(|url| !url.trim().is_empty())
+    }
+
+    fn has_url(&self) -> bool {
         self.url
             .as_deref()
             .is_some_and(|url| !url.trim().is_empty())
     }
 
     /// 校验用户输入；密码可以只在 secrets 里，因此不要求出现在这里。
+    /// 停用状态也要校验已保存的地址，避免把无法启用的配置写进设置文件。
     pub fn validate(&self) -> Result<(), AppError> {
-        if !self.is_enabled() {
+        if !self.has_url() {
             if self
                 .username
                 .as_deref()
@@ -422,6 +439,7 @@ mod tests {
             Some("http://127.0.0.1:7890".into()),
             Some("me".into()),
             Some("p@ss".into()),
+            true,
         );
         assert!(auth.validate().is_ok());
         let url = auth.url_with_auth().unwrap();
@@ -431,17 +449,29 @@ mod tests {
         assert_eq!(url.host_str(), Some("127.0.0.1"));
 
         for bad in [
-            ProxyConfig::new(Some("ftp://127.0.0.1:21".into()), None, None),
-            ProxyConfig::new(Some("not a url".into()), None, None),
+            ProxyConfig::new(Some("ftp://127.0.0.1:21".into()), None, None, true),
+            ProxyConfig::new(Some("not a url".into()), None, None, true),
             ProxyConfig::new(
                 Some("http://127.0.0.1:7890".into()),
                 None,
                 Some("pw".into()),
+                true,
             ),
-            ProxyConfig::new(None, Some("me".into()), None),
+            ProxyConfig::new(None, Some("me".into()), None, true),
         ] {
             assert!(bad.validate().is_err());
         }
+
+        // 停用只影响是否走代理，配置本身仍需合法、可随时重新启用。
+        let disabled = ProxyConfig::new(
+            Some("http://127.0.0.1:7890".into()),
+            Some("me".into()),
+            Some("p@ss".into()),
+            false,
+        );
+        assert!(!disabled.is_enabled());
+        assert!(disabled.proxy().unwrap().is_none());
+        assert!(disabled.validate().is_ok());
     }
 
     #[test]

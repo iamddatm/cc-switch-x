@@ -204,6 +204,8 @@ export interface ProxySettingsView {
   url: string | null;
   username: string | null;
   hasPassword: boolean;
+  /** 实际生效的开关；没有填写地址时恒为 false。 */
+  enabled: boolean;
 }
 
 export interface ProxyTestResult {

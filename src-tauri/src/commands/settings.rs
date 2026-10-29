@@ -110,12 +110,14 @@ pub fn get_proxy_settings(state: State<'_, AppState>) -> Result<ProxySettingsVie
 }
 
 /// `password` 为 None 表示沿用已保存的密码；空串表示清除密码。
+/// `enabled = false` 只停用代理，地址与凭据保留。
 #[tauri::command]
 pub fn set_proxy_settings(
     state: State<'_, AppState>,
     url: String,
     username: String,
     password: Option<String>,
+    enabled: bool,
 ) -> Result<ProxySettingsView, AppError> {
     let (updated, secrets) = settings_service::set_proxy_at(
         &settings_file::settings_path()?,
@@ -123,6 +125,7 @@ pub fn set_proxy_settings(
         url,
         username,
         password,
+        enabled,
     )?;
     let mut current = state
         .settings
@@ -211,6 +214,7 @@ pub async fn test_proxy_settings(
         Some(url),
         (!username.trim().is_empty()).then_some(username),
         password.or(saved_password),
+        true,
     );
     tauri::async_runtime::spawn_blocking(move || test_proxy(&config))
         .await
