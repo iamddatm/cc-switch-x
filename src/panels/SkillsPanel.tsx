@@ -21,6 +21,7 @@ import { Button } from "../components/ui/Button";
 import { Checkbox } from "../components/ui/Checkbox";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { EmptyState } from "../components/ui/EmptyState";
+import { FeedbackBar } from "../components/ui/FeedbackBar";
 import { Menu, type MenuItem } from "../components/ui/Menu";
 import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -448,17 +449,16 @@ export function SkillsPanel() {
           </span>
         </div>
 
+      {(error || actionError || checkError || actionMessage) && (
+        <FeedbackBar>
+          {(error || actionError || checkError) && (
+            <Notice tone="danger">{error ?? actionError ?? checkError}</Notice>
+          )}
+          {actionMessage && <Notice tone="success">{actionMessage}</Notice>}
+        </FeedbackBar>
+      )}
+
       <div className="min-h-0 flex-1 overflow-auto px-6 pb-5">
-        {(error || actionError || checkError) && (
-          <Notice tone="danger" className="mb-3">
-            {error ?? actionError ?? checkError}
-          </Notice>
-        )}
-        {actionMessage && (
-          <Notice tone="success" className="mb-3">
-            {actionMessage}
-          </Notice>
-        )}
         {checking && (
           <Notice tone="info" className="mb-3">
             正在读取上游仓库并比对内容…

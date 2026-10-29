@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Layers } from "lucide-react";
 import { AgentGlyph } from "../components/agents/AgentGlyph";
 import { Badge } from "../components/ui/Badge";
+import { FeedbackBar } from "../components/ui/FeedbackBar";
 import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
 import { useAgents } from "../hooks/useAgents";
@@ -48,11 +49,15 @@ export function AgentsPanel() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader icon={Layers} title="Agents" />
-      <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
-        <div className="space-y-3">
+      {(error || actionError || message) && (
+        <FeedbackBar>
           {(error || actionError) && <Notice tone="danger">{error ?? actionError}</Notice>}
           {message && <Notice tone="success">{message}</Notice>}
+        </FeedbackBar>
+      )}
 
+      <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
+        <div className="space-y-3">
           <div className="overflow-hidden rounded-panel border border-border bg-surface">
             <ul>
               {agents.map((agent) => (

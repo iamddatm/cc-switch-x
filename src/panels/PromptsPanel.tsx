@@ -9,6 +9,7 @@ import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Dialog } from "../components/ui/Dialog";
 import { EmptyState } from "../components/ui/EmptyState";
+import { FeedbackBar } from "../components/ui/FeedbackBar";
 import { IconButton } from "../components/ui/IconButton";
 import { Menu } from "../components/ui/Menu";
 import { Notice } from "../components/ui/Notice";
@@ -237,6 +238,15 @@ export function PromptsPanel() {
         <span className="text-caption text-fg-3">{visible.length} 条</span>
       </div>
 
+      {(error || actionError || message) && (
+        <FeedbackBar>
+          {(error || actionError) && (
+            <Notice tone="danger">{error ?? actionError}</Notice>
+          )}
+          {message && <Notice tone="success">{message}</Notice>}
+        </FeedbackBar>
+      )}
+
       <div className="min-h-0 flex-1 overflow-auto px-6 pb-5">
         <DriftBanner
           drifts={promptDrifts}
@@ -247,16 +257,6 @@ export function PromptsPanel() {
         {drift.error && (
           <Notice tone="danger" className="mb-3">
             {drift.error}
-          </Notice>
-        )}
-        {(error || actionError) && (
-          <Notice tone="danger" className="mb-3">
-            {error ?? actionError}
-          </Notice>
-        )}
-        {message && (
-          <Notice tone="success" className="mb-3">
-            {message}
           </Notice>
         )}
         {selectedAgent && !canActivate && (

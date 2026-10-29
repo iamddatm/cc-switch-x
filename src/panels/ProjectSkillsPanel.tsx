@@ -24,6 +24,7 @@ import { Button } from "../components/ui/Button";
 import { Checkbox } from "../components/ui/Checkbox";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { EmptyState } from "../components/ui/EmptyState";
+import { FeedbackBar } from "../components/ui/FeedbackBar";
 import { Menu, type MenuItem } from "../components/ui/Menu";
 import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -753,17 +754,18 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
           </span>
         </div>
 
+        {(error || actionError || actionMessage) && (
+          <FeedbackBar>
+            {(error || actionError) && (
+              <Notice tone="danger">
+                {actionError ?? `读取项目 Skills 失败：${error}`}
+              </Notice>
+            )}
+            {actionMessage && <Notice tone="success">{actionMessage}</Notice>}
+          </FeedbackBar>
+        )}
+
         <div className="min-h-0 flex-1 overflow-auto px-6 pb-5">
-          {(error || actionError) && (
-            <Notice tone="danger" className="mb-3">
-              {actionError ?? `读取项目 Skills 失败：${error}`}
-            </Notice>
-          )}
-          {actionMessage && (
-            <Notice tone="success" className="mb-3">
-              {actionMessage}
-            </Notice>
-          )}
           {checking && (
             <Notice tone="info" className="mb-3">
               正在读取上游仓库并比对项目真源…

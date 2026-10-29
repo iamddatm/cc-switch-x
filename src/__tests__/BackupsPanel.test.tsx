@@ -103,6 +103,15 @@ const cloudStatus: CloudStatus = {
     etag: '"abc"',
   },
   remoteError: null,
+  manifest: {
+    appVersion: "0.10.0",
+    deviceName: "DESKTOP-TEST",
+    createdAt: Date.now() - 300_000,
+    files: 12,
+    schema: 1,
+    compatible: true,
+  },
+  manifestError: null,
   lastUploadAt: Date.now() - 300_000,
   lastError: null,
 };
@@ -336,6 +345,32 @@ test("renders cloud backup section and remote status", async () => {
   expect(await screen.findByText("云备份（WebDAV）")).toBeInTheDocument();
   expect(screen.getByText(/ccswitchx\/ccswitchx-backup\.zip/)).toBeInTheDocument();
   expect(screen.getByText("云端有备份")).toBeInTheDocument();
+  // manifest 描述上传来源：换机时先看清是哪台机器、哪个版本传的包。
+  expect(screen.getByText("DESKTOP-TEST · v0.10.0")).toBeInTheDocument();
+  // WebDAV 是主用的远端通道，区块排在快照之前。
+  const cloudHeading = screen.getByText("云备份（WebDAV）");
+  const snapshotHeading = screen.getByText("快照", { selector: "h3" });
+  expect(
+    cloudHeading.compareDocumentPosition(snapshotHeading) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+});
+
+test("warns when the remote manifest is incompatible", async () => {
+  vi.mocked(api.getCloudStatus).mockResolvedValue({
+    ...cloudStatus,
+    manifest: { ...cloudStatus.manifest!, schema: 99, compatible: false },
+  });
+  render(<BackupsPanel />);
+  expect(
+    await screen.findByText(/不兼容的版本上传（manifest schema 99）/),
+  ).toBeInTheDocument();
+});
+
+test("explains a legacy remote package without manifest", async () => {
+  vi.mocked(api.getCloudStatus).mockResolvedValue({ ...cloudStatus, manifest: null });
+  render(<BackupsPanel />);
+  expect(await screen.findByText(/旧版上传的裸包，没有 manifest/)).toBeInTheDocument();
 });
 
 test("saves cloud settings without overwriting the saved password", async () => {
@@ -362,6 +397,19 @@ test("tests the cloud connection", async () => {
   fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
   await waitFor(() => expect(api.testCloudConnection).toHaveBeenCalled());
   expect(await screen.findByText(/连接成功（42 ms）/)).toBeInTheDocument();
+});
+
+test("surfaces the cloud test failure in the pinned notice band", async () => {
+  vi.mocked(api.testCloudConnection).mockRejectedValueOnce(
+    "WebDAV MKCOL 请求失败：error sending request",
+  );
+  render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+
+  // 失败提示在滚动区之外：面板滚到页底的 WebDAV 区时，它也不会被滚出可视区。
+  const banner = await screen.findByText(/WebDAV MKCOL 请求失败/);
+  expect(banner.closest(".overflow-auto")).toBeNull();
 });
 
 test("uploads and restores only after confirmation", async () => {
@@ -391,6 +439,8 @@ test("disables cloud actions without config", async () => {
     autoUpload: false,
     remote: null,
     remoteError: null,
+    manifest: null,
+    manifestError: null,
     lastUploadAt: null,
     lastError: null,
   });

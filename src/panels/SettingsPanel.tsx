@@ -4,6 +4,7 @@ import { ImportDialog } from "../components/ImportDialog";
 import { AboutSection } from "../components/settings/AboutSection";
 import { Button } from "../components/ui/Button";
 import { Checkbox } from "../components/ui/Checkbox";
+import { FeedbackBar } from "../components/ui/FeedbackBar";
 import { Input } from "../components/ui/Input";
 import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -107,9 +108,13 @@ export function SettingsPanel({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader icon={Settings} title="Settings" />
+      {error && (
+        <FeedbackBar className="max-w-2xl">
+          <Notice tone="danger">{error}</Notice>
+        </FeedbackBar>
+      )}
       <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
         <div className="max-w-2xl space-y-8">
-          {error && <Notice tone="danger">{error}</Notice>}
           <section className="space-y-2">
             <label className="block text-strong text-fg-1" htmlFor="theme">
               主题

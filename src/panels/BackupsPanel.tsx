@@ -5,6 +5,7 @@ import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { Dialog } from "../components/ui/Dialog";
 import { EmptyState } from "../components/ui/EmptyState";
+import { FeedbackBar } from "../components/ui/FeedbackBar";
 import { Field } from "../components/ui/Field";
 import { Input } from "../components/ui/Input";
 import { Notice } from "../components/ui/Notice";
@@ -415,11 +416,15 @@ export function BackupsPanel() {
           </>
         }
       />
-      <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
-        <div className="max-w-4xl space-y-6">
+      {/* 面板比一屏长，提示固定在滚动区上方：在页底的 Git / WebDAV 区点完按钮也能立刻看到结果。 */}
+      {(error || notice) && (
+        <FeedbackBar className="max-w-4xl">
           {error && <Notice tone="danger">{error}</Notice>}
           {notice && <Notice tone="success">{notice}</Notice>}
-
+        </FeedbackBar>
+      )}
+      <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
+        <div className="max-w-4xl space-y-6">
           <section className="rounded-panel border border-border bg-surface px-4 py-3">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
               <div className="min-w-0 flex-1">
@@ -436,6 +441,19 @@ export function BackupsPanel() {
               />
             </div>
           </section>
+
+          {/* WebDAV 是日常主用的远端通道，排在快照与 Git 之前，省得每次往下滚。 */}
+          <CloudSection
+            cloud={cloud}
+            cloudStatus={cloudStatus}
+            loading={loading}
+            busy={busy}
+            onRefreshStatus={() => void refreshCloudStatus()}
+            onTest={(draft) => void testCloud(draft)}
+            onSave={saveCloud}
+            onUpload={() => void uploadCloud()}
+            onOpenRestore={() => setCloudRestoreOpen(true)}
+          />
 
           <section className="rounded-panel border border-border bg-surface">
             <div className="flex items-center gap-2 border-b border-border px-4 py-3">
@@ -632,18 +650,6 @@ export function BackupsPanel() {
             onRevealStore={() =>
               void act("reveal", () => api.revealBackupLocation("store"))
             }
-          />
-
-          <CloudSection
-            cloud={cloud}
-            cloudStatus={cloudStatus}
-            loading={loading}
-            busy={busy}
-            onRefreshStatus={() => void refreshCloudStatus()}
-            onTest={(draft) => void testCloud(draft)}
-            onSave={saveCloud}
-            onUpload={() => void uploadCloud()}
-            onOpenRestore={() => setCloudRestoreOpen(true)}
           />
         </div>
       </div>

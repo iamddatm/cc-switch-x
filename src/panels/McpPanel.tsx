@@ -9,6 +9,7 @@ import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { EmptyState } from "../components/ui/EmptyState";
+import { FeedbackBar } from "../components/ui/FeedbackBar";
 import { Menu } from "../components/ui/Menu";
 import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -151,17 +152,16 @@ export function McpPanel() {
         </span>
       </div>
 
+      {(error || actionError || actionMessage) && (
+        <FeedbackBar>
+          {(error || actionError) && (
+            <Notice tone="danger">{error ?? actionError}</Notice>
+          )}
+          {actionMessage && <Notice tone="success">{actionMessage}</Notice>}
+        </FeedbackBar>
+      )}
+
       <div className="min-h-0 flex-1 overflow-auto px-6 pb-5">
-        {(error || actionError) && (
-          <Notice tone="danger" className="mb-3">
-            {error ?? actionError}
-          </Notice>
-        )}
-        {actionMessage && (
-          <Notice tone="success" className="mb-3">
-            {actionMessage}
-          </Notice>
-        )}
         {enabledAgents.length === 0 && (
           <Notice tone="warning" className="mb-3">
             还没有启用任何 Agent，右侧不会出现勾选列。去左侧 Agents 页选择要管理的 Agent。
