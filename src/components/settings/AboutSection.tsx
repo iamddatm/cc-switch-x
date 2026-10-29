@@ -107,10 +107,6 @@ export function AboutSection({ update }: { update: UpdateController }) {
 
       {update.error && <Notice tone="danger">{update.error}</Notice>}
 
-      <p className="text-caption text-fg-3">
-        更新由 GitHub Releases 提供，仅支持 Windows x64。
-      </p>
-
       <ConfirmDialog
         open={confirmOpen}
         title="安装更新"
