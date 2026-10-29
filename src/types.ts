@@ -122,12 +122,26 @@ export interface CloudRemoteStatus {
   etag: string | null;
 }
 
+/** 云端 manifest 的展示视图：换机时不上传/下载就能看清包是哪台机器、哪个版本传的。 */
+export interface CloudManifestInfo {
+  appVersion: string;
+  deviceName: string;
+  createdAt: number;
+  files: number;
+  schema: number;
+  /** format/schema 与本机一致时才为真；不兼容的包不能恢复。 */
+  compatible: boolean;
+}
+
 export interface CloudStatus {
   configured: boolean;
   hasPassword: boolean;
   autoUpload: boolean;
   remote: CloudRemoteStatus | null;
   remoteError: string | null;
+  /** 旧版上传的裸包没有 manifest，这里为 null。 */
+  manifest: CloudManifestInfo | null;
+  manifestError: string | null;
   lastUploadAt: number | null;
   lastError: string | null;
 }

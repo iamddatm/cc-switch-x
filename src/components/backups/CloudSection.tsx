@@ -215,6 +215,23 @@ export function CloudSection({
                 {remotePath}
               </p>
             </div>
+            <div className="min-w-0">
+              <p className="text-caption text-fg-3">上传来源</p>
+              <p
+                className="truncate text-body text-fg-1"
+                title={
+                  cloudStatus?.manifest
+                    ? `${cloudStatus.manifest.deviceName} · v${cloudStatus.manifest.appVersion} · ${
+                        cloudStatus.manifest.files
+                      } 个文件 · ${formatRelativeTime(cloudStatus.manifest.createdAt)}上传`
+                    : "旧版上传的备份没有 manifest 描述文件"
+                }
+              >
+                {cloudStatus?.manifest
+                  ? `${cloudStatus.manifest.deviceName} · v${cloudStatus.manifest.appVersion}`
+                  : "—"}
+              </p>
+            </div>
             <div>
               <p className="text-caption text-fg-3">远端大小</p>
               <p className="text-body text-fg-1">
@@ -244,6 +261,31 @@ export function CloudSection({
               <Notice tone="danger">{cloudStatus.remoteError}</Notice>
             </div>
           )}
+          {cloudStatus?.manifest && !cloudStatus.manifest.compatible && (
+            <div className="px-4 pb-3">
+              <Notice tone="danger">
+                云端备份由不兼容的版本上传（manifest schema {cloudStatus.manifest.schema}），
+                请升级 CC Switch X 后再恢复。
+              </Notice>
+            </div>
+          )}
+          {cloudStatus?.manifestError && (
+            <div className="px-4 pb-3">
+              <Notice tone="warning">
+                云端 manifest 无法解析：{cloudStatus.manifestError}
+              </Notice>
+            </div>
+          )}
+          {cloudStatus?.remote?.exists &&
+            !cloudStatus.manifest &&
+            !cloudStatus.manifestError && (
+              <div className="px-4 pb-3">
+                <Notice tone="info">
+                  云端备份是旧版上传的裸包，没有 manifest：来源与完整性无法核对。
+                  重新上传一次即可补齐。
+                </Notice>
+              </div>
+            )}
           {cloudStatus?.lastError && (
             <div className="px-4 pb-3">
               <Notice tone="warning">

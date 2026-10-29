@@ -14,7 +14,11 @@ use std::path::Path;
 use std::time::Duration;
 
 pub const BACKUP_OBJECT: &str = "ccswitchx-backup.zip";
+/// 备份包旁边的描述文件：记录上传设备、版本与包的哈希，供换机时先看不用先下载。
+pub const MANIFEST_OBJECT: &str = "manifest.json";
 pub const MAX_CLOUD_BYTES: u64 = 512 * 1024 * 1024;
+/// manifest 只描述一个包，正常只有几百字节；上限防止被别的应用塞进大文件。
+pub const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_REMOTE_DIR: &str = "ccswitchx";
 
 #[derive(Clone)]
@@ -108,8 +112,12 @@ impl WebDavClient {
     }
 
     pub fn head(&self) -> Result<RemoteObject, AppError> {
+        self.head_object(BACKUP_OBJECT)
+    }
+
+    fn head_object(&self, name: &str) -> Result<RemoteObject, AppError> {
         let response = self
-            .request(Method::HEAD, self.object_url()?)
+            .request(Method::HEAD, self.remote_url(name)?)
             .send()
             .map_err(transport_error("HEAD"))?;
         let status = response.status();
@@ -119,6 +127,78 @@ impl WebDavClient {
             401 | 403 => Err(auth_error(status)),
             _ => Err(status_error("HEAD", status)),
         }
+    }
+
+    /// 写描述文件。包先落地、manifest 最后写：远端读到 manifest 就说明它描述的包是完整的。
+    pub fn put_manifest(&self, bytes: &[u8]) -> Result<RemoteObject, AppError> {
+        let length = bytes.len() as u64;
+        if length > MAX_MANIFEST_BYTES {
+            return Err(AppError::Cloud(format!(
+                "manifest 超过上限（{MAX_MANIFEST_BYTES} 字节）"
+            )));
+        }
+        let response = self
+            .request(Method::PUT, self.remote_url(MANIFEST_OBJECT)?)
+            .header(CONTENT_TYPE, "application/json")
+            .header(CONTENT_LENGTH, length)
+            .body(Body::from(bytes.to_vec()))
+            .send()
+            .map_err(transport_error("PUT"))?;
+        let status = response.status();
+        if !status.is_success() {
+            if matches!(status.as_u16(), 401 | 403) {
+                return Err(auth_error(status));
+            }
+            return Err(status_error("PUT", status));
+        }
+
+        // 回读确认：manifest 是恢复端判断远端版本的唯一依据，写残缺比写失败更难排查。
+        let remote = self.head_object(MANIFEST_OBJECT)?;
+        if !remote.exists {
+            return Err(AppError::Cloud("上传后远端 manifest 不存在".into()));
+        }
+        if let Some(size) = remote.size_bytes {
+            if size != length {
+                return Err(AppError::Cloud(format!(
+                    "上传后远端 manifest 大小不一致：本地 {length} 字节，远端 {size} 字节"
+                )));
+            }
+        }
+        Ok(remote)
+    }
+
+    /// 读描述文件；远端没有（旧版上传的裸包）时返回 None。
+    pub fn get_manifest(&self) -> Result<Option<Vec<u8>>, AppError> {
+        let response = self
+            .request(Method::GET, self.remote_url(MANIFEST_OBJECT)?)
+            .send()
+            .map_err(transport_error("GET"))?;
+        let status = response.status();
+        match status.as_u16() {
+            200 => {}
+            // 坚果云在父目录不存在时用 409 代替标准 404；这里只探测「有没有 manifest」，
+            // 两种状态都按没有处理（真正缺包由 HEAD 备份对象判定）。
+            404 | 409 => return Ok(None),
+            401 | 403 => return Err(auth_error(status)),
+            _ => return Err(status_error("GET", status)),
+        }
+        if let Some(length) = header_u64(response.headers(), CONTENT_LENGTH) {
+            if length > MAX_MANIFEST_BYTES {
+                return Err(AppError::Cloud(format!(
+                    "远端 manifest 超过上限（{MAX_MANIFEST_BYTES} 字节）"
+                )));
+            }
+        }
+        let mut bytes = Vec::new();
+        response
+            .take(MAX_MANIFEST_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+            return Err(AppError::Cloud(format!(
+                "远端 manifest 超过上限（{MAX_MANIFEST_BYTES} 字节）"
+            )));
+        }
+        Ok(Some(bytes))
     }
 
     pub fn get_to_file(&self, dest: &Path, max_bytes: u64) -> Result<RemoteObject, AppError> {
@@ -207,9 +287,14 @@ impl WebDavClient {
             .send()
             .map_err(transport_error("MOVE"))?
             .status();
-        if move_status.as_u16() == 405 || move_status.as_u16() == 501 {
-            // 直写成功前不动临时对象：直写失败时它是唯一的完整副本。
-            self.put_file(source, length, final_url)?;
+        if matches!(move_status.as_u16(), 405 | 409 | 501) {
+            // 405/501：服务器不支持 MOVE；409：坚果云这类服务拒绝覆盖式 MOVE（目标已存在）。
+            // 两者都退回直写最终对象；直写成功前不动临时对象，失败时它是唯一的完整副本。
+            if let Err(error) = self.put_file(source, length, final_url) {
+                return Err(AppError::Cloud(format!(
+                    "WebDAV MOVE 被拒绝（HTTP {move_status}），直写最终对象也失败：{error}"
+                )));
+            }
             let _ = self.delete_url(temp_url);
         } else if !move_status.is_success() {
             let _ = self.delete_url(temp_url);
@@ -272,10 +357,7 @@ impl WebDavClient {
     }
 
     fn temp_url(&self, name: &str) -> Result<Url, AppError> {
-        let segments: Vec<&str> = self.config.remote_dir.split('/').collect();
-        let dir = self.dir_url(&segments)?;
-        dir.join(name)
-            .map_err(|error| AppError::Cloud(format!("拼接临时对象地址失败：{error}")))
+        self.remote_url(name)
     }
 
     fn request(&self, method: Method, url: Url) -> reqwest::blocking::RequestBuilder {
@@ -300,9 +382,13 @@ impl WebDavClient {
     }
 
     fn object_url(&self) -> Result<Url, AppError> {
+        self.remote_url(BACKUP_OBJECT)
+    }
+
+    fn remote_url(&self, name: &str) -> Result<Url, AppError> {
         let segments: Vec<&str> = self.config.remote_dir.split('/').collect();
         let dir = self.dir_url(&segments)?;
-        dir.join(BACKUP_OBJECT)
+        dir.join(name)
             .map_err(|error| AppError::Cloud(format!("拼接远端对象地址失败：{error}")))
     }
 }
@@ -468,12 +554,15 @@ pub(crate) mod test_support {
         methods: HashMap<String, usize>,
         reject_move: bool,
         fail_move: bool,
+        conflict_move: bool,
         redirect: bool,
         fail_put: bool,
         fail_put_after: Option<usize>,
         put_attempts: usize,
         truncate_after_put: bool,
         head_size_override: Option<u64>,
+        /// 模拟坚果云：GET 不存在的对象时返回 409 而不是 404。
+        missing_get_conflict: bool,
     }
 
     pub(crate) struct FakeWebDav {
@@ -493,12 +582,14 @@ pub(crate) mod test_support {
                 methods: HashMap::new(),
                 reject_move: false,
                 fail_move: false,
+                conflict_move: false,
                 redirect: false,
                 fail_put: false,
                 fail_put_after: None,
                 put_attempts: 0,
                 truncate_after_put: false,
                 head_size_override: None,
+                missing_get_conflict: false,
             }));
             let thread_state = state.clone();
             std::thread::spawn(move || {
@@ -563,6 +654,11 @@ pub(crate) mod test_support {
             self.state.lock().unwrap().fail_move = fail;
         }
 
+        /// 目标已存在时 MOVE 返回 409 —— 坚果云等服务的实际行为。
+        pub(crate) fn set_move_conflict(&self, conflict: bool) {
+            self.state.lock().unwrap().conflict_move = conflict;
+        }
+
         pub(crate) fn set_redirect(&self, redirect: bool) {
             self.state.lock().unwrap().redirect = redirect;
         }
@@ -582,6 +678,10 @@ pub(crate) mod test_support {
 
         pub(crate) fn set_head_size_override(&self, size: Option<u64>) {
             self.state.lock().unwrap().head_size_override = size;
+        }
+
+        pub(crate) fn set_missing_get_conflict(&self, conflict: bool) {
+            self.state.lock().unwrap().missing_get_conflict = conflict;
         }
     }
 
@@ -650,6 +750,8 @@ pub(crate) mod test_support {
                     respond(&mut stream, "405 Method Not Allowed", &[], b"");
                 } else if state.fail_move {
                     respond(&mut stream, "500 Internal Server Error", &[], b"");
+                } else if state.conflict_move {
+                    respond(&mut stream, "409 Conflict", &[], b"");
                 } else {
                     let destination = headers
                         .get("destination")
@@ -672,6 +774,9 @@ pub(crate) mod test_support {
                 Some(bytes) => {
                     let headers = object_headers();
                     respond(&mut stream, "200 OK", &headers, bytes);
+                }
+                None if state.missing_get_conflict => {
+                    respond(&mut stream, "409 Conflict", &[], b"")
                 }
                 None => respond(&mut stream, "404 Not Found", &[], b""),
             },
@@ -925,6 +1030,41 @@ mod tests {
             b"fallback"
         );
         assert!(server.paths().iter().all(|path| !path.contains(".tmp-")));
+    }
+
+    #[test]
+    fn move_conflict_falls_back_to_put() {
+        let server = FakeWebDav::start("me", "pw");
+        server.put_object("/dav/ccswitchx/ccswitchx-backup.zip", b"old".to_vec());
+        server.set_move_conflict(true);
+        let client = client_for(&server);
+        let file = temp_file(b"new-zip");
+        let remote = client.put(file.path()).unwrap();
+        assert_eq!(
+            server.object("/dav/ccswitchx/ccswitchx-backup.zip").unwrap(),
+            b"new-zip"
+        );
+        assert_eq!(remote.size_bytes, Some(7));
+        assert!(server.paths().iter().all(|path| !path.contains(".tmp-")));
+    }
+
+    #[test]
+    fn put_and_get_manifest_roundtrip() {
+        let server = FakeWebDav::start("me", "pw");
+        let client = client_for(&server);
+        client.put_manifest(br#"{"format":"ccswitchx-cloud"}"#).unwrap();
+        assert_eq!(
+            client.get_manifest().unwrap().unwrap(),
+            br#"{"format":"ccswitchx-cloud"}"#
+        );
+    }
+
+    #[test]
+    fn missing_manifest_conflict_reads_as_absent() {
+        let server = FakeWebDav::start("me", "pw");
+        server.set_missing_get_conflict(true);
+        let client = client_for(&server);
+        assert!(client.get_manifest().unwrap().is_none());
     }
 
     #[test]
