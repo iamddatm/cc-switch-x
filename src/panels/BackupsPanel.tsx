@@ -15,6 +15,7 @@ import {
   type SegmentedItem,
 } from "../components/ui/SegmentedControl";
 import { Select } from "../components/ui/Select";
+import { CloudBackupMeta } from "../components/backups/CloudBackupMeta";
 import { CloudSection, type CloudDraft } from "../components/backups/CloudSection";
 import { GitSection, type GitDraft } from "../components/backups/GitSection";
 import { useBackups } from "../hooks/useBackups";
@@ -689,11 +690,14 @@ export function BackupsPanel() {
         open={cloudRestoreOpen}
         title="从云端恢复？"
         body={
-          <>
-            将下载云端最新包并覆盖 <code>assets/</code> 与 <code>agents/</code>，
-            删除包中不存在的资产。恢复前会自动创建安全快照；本机{" "}
-            <code>local/</code>、密钥与索引不会被动。
-          </>
+          <div className="space-y-3">
+            <CloudBackupMeta status={cloudStatus} />
+            <p>
+              将下载云端最新包并覆盖 <code>assets/</code> 与 <code>agents/</code>，
+              删除包中不存在的资产。恢复前会自动创建安全快照；本机{" "}
+              <code>local/</code>、密钥与索引不会被动。
+            </p>
+          </div>
         }
         confirmLabel="恢复"
         pending={busy === "cloud-restore"}

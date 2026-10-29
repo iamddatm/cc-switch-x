@@ -425,6 +425,20 @@ test("uploads and restores only after confirmation", async () => {
   await waitFor(() => expect(api.cloudRestoreLatest).toHaveBeenCalled());
 });
 
+test("shows the cloud backup identity before restoring", async () => {
+  render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  fireEvent.click(screen.getByRole("button", { name: "从云端恢复" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "从云端恢复？" });
+
+  // 恢复前先看清远端包是哪台机器、什么时候传的、多大，避免拿旧包覆盖真源。
+  expect(within(dialog).getByText("DESKTOP-TEST · v0.10.0")).toBeInTheDocument();
+  expect(within(dialog).getByText("5 分钟前")).toBeInTheDocument();
+  expect(within(dialog).getByText("12 个")).toBeInTheDocument();
+  expect(within(dialog).getByText("2.0 KB")).toBeInTheDocument();
+  expect(api.cloudRestoreLatest).not.toHaveBeenCalled();
+});
+
 test("disables cloud actions without config", async () => {
   vi.mocked(api.getCloudSettings).mockResolvedValue({
     autoUpload: false,
