@@ -156,7 +156,7 @@ export function SettingsPanel({
               onChange={(event) => void toggleAutoStart(event.target.checked)}
             />
             <p className="text-caption text-fg-3">
-              登录系统后自动打开 CC Switch X；由系统登录项管理，不需要管理员权限。
+              登录系统后自动在托盘后台启动，不弹出主窗口，点托盘图标即可打开。由系统登录项管理，不需要管理员权限。
             </p>
           </section>
 

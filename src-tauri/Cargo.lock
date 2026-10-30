@@ -337,6 +337,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "toml_edit 0.22.27",
+ "winreg 0.10.1",
  "zip 2.6.1",
  "zstd",
 ]

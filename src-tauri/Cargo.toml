@@ -34,3 +34,7 @@ auto-launch = "0.5"
 # Skill 来源安装/更新：GitHub 归档走阻塞客户端，放进 spawn_blocking，避免占用 UI 线程
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "socks"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# 读取登录项当前指向的命令行，升级时只给指向本程序的旧条目补启动参数
+[target.'cfg(windows)'.dependencies]
+winreg = "0.10"

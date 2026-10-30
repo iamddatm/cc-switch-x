@@ -40,10 +40,23 @@ pub fn run() {
         .setup(|app| {
             use tauri::Manager;
             tray::setup(app)?;
-            // 配置里的 "center": true 只按工作区摆，这里再按整屏修正一次；摆位失败不拦启动。
+            // 登录项现在会带 --autostart；旧版本写入的没有，启动时补写一次。
+            tauri::async_runtime::spawn_blocking(|| {
+                if let Err(error) = auto_launch::refresh_if_enabled() {
+                    eprintln!("刷新开机自启登录项失败：{error}");
+                }
+            });
+            // 窗口在配置里默认不可见，避免开机自启时闪一下；正常启动在这里显示。
+            let launched_at_login = auto_launch::launched_at_login();
             if let Some(main_window) = app.get_webview_window("main") {
+                // 配置里的 "center": true 只按工作区摆，这里再按整屏修正一次；摆位失败不拦启动。
                 if let Err(e) = window::center_on_screen(&main_window) {
                     eprintln!("主窗口未能按整屏居中，沿用 Tauri 的摆放：{e}");
+                }
+                if !launched_at_login {
+                    if let Err(e) = main_window.show() {
+                        eprintln!("显示主窗口失败：{e}");
+                    }
                 }
             }
             let app_state = app.state::<state::AppState>();
