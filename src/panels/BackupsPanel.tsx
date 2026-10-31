@@ -499,7 +499,7 @@ export function BackupsPanel() {
                 </Select>
               </Field>
               <p className="pb-1.5 text-caption text-fg-3">
-                间隔为 0 时关闭自动快照；保留数只裁剪 snapshots 目录里的旧快照，不动写入留底与日志。
+                间隔为 0 时关闭自动快照；内容没有变化时不产生重复快照，也不会上传覆盖。保留数只裁剪 snapshots 目录里的旧快照，不动写入留底与日志。
               </p>
             </div>
 

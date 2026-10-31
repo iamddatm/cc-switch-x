@@ -256,6 +256,41 @@ pub fn write_archive_to(
     })
 }
 
+/// 内容指纹：只由「相对路径 + 文件 sha256」决定，不含打包时间与 app_version。
+/// 排序后再算，保证内存里算的值和从旧快照 manifest 读出的值可直接比较，
+/// 应用升级本身不会触发一次多余的备份与上传。
+fn fingerprint_of_files(files: &[ManifestFile]) -> String {
+    let mut ordered = files
+        .iter()
+        .map(|file| (file.path.as_str(), file.sha256.as_str()))
+        .collect::<Vec<_>>();
+    ordered.sort_unstable();
+    let mut buffer = String::new();
+    for (path, sha256) in ordered {
+        buffer.push_str(path);
+        buffer.push('\0');
+        buffer.push_str(sha256);
+        buffer.push('\0');
+    }
+    sha256_hex(buffer.as_bytes())
+}
+
+/// 当前可移植真源的内容指纹，与快照包内 manifest 的 `files` 同源。
+pub fn content_fingerprint(store: &Store) -> Result<String, AppError> {
+    let files = collect_files(store)?;
+    let mut manifest_files = Vec::with_capacity(files.len());
+    for (absolute, relative) in &files {
+        let bytes = fs::read(absolute)?;
+        manifest_files.push(ManifestFile::for_bytes(relative.clone(), &bytes));
+    }
+    Ok(fingerprint_of_files(&manifest_files))
+}
+
+/// 已有快照包的内容指纹；只读包内 manifest.json，不解压内容。
+pub fn fingerprint_of_archive(path: &Path) -> Result<String, AppError> {
+    read_manifest(path).map(|manifest| fingerprint_of_files(&manifest.files))
+}
+
 /// 上传前的本地预检：确保包能通过恢复端的同一条上限校验。
 pub fn validate_archive_for_restore(path: &Path) -> Result<ArchiveSummary, AppError> {
     let manifest = read_manifest(path)?;
@@ -1111,46 +1146,65 @@ pub(crate) fn periodic_once(state: &crate::state::AppState) {
     if chrono::Utc::now().timestamp_millis() < due {
         return;
     }
-    let created = {
-        let Ok(_guard) = state.maintenance.write() else {
-            return;
-        };
-        match create(&state.store, None, SnapshotKind::Auto) {
-            Ok(info) => {
-                let _ = prune(&state.store, retain);
-                Some(info)
-            }
-            Err(error) => {
-                eprintln!("自动备份失败：{error}");
-                None
-            }
-        }
-    };
-    let Some(info) = created else {
-        return;
-    };
-
-    // 远端备份只能选一种：Git 自动同步生效时不再上传 WebDAV。
-    // 历史设置可能同时开启两者；以「Git 已验证且已开启」为生效条件，避免两边都跑。
-    let auto_upload = state
-        .settings
-        .lock()
-        .map(|settings| {
-            let git_active = settings.backup.git.enabled
-                && git_sync::is_remote_verified(
-                    &state.store,
-                    settings.backup.git.remote.as_deref(),
-                );
-            settings.cloud.auto_upload && !git_active
-        })
-        .unwrap_or(false);
-    if !auto_upload {
-        return;
+    if let Err(error) = auto_snapshot_if_changed(state, retain) {
+        eprintln!("自动备份失败：{error}");
     }
-    let snapshot = snapshots_dir(&state.store).join(format!("{}.zip", info.name));
-    if let Err(error) = crate::services::cloud_backup::upload_archive(state, &snapshot) {
+    if let Err(error) = auto_upload_if_needed(state) {
         eprintln!("自动上传云备份失败：{error}");
     }
+}
+
+/// 内容有变化才新建 Auto 快照并清理超额；与最新一份快照内容一致时返回 `None`，
+/// 免得等内容把 `retain_count` 窗口里真正有内容的历史挤掉。
+pub(crate) fn auto_snapshot_if_changed(
+    state: &crate::state::AppState,
+    retain: usize,
+) -> Result<Option<SnapshotInfo>, AppError> {
+    let current = content_fingerprint(&state.store)?;
+    let newest = list(&state.store)?.into_iter().next();
+    if let Some(newest) = newest {
+        let archived = snapshot_path(&state.store, &newest.name)
+            .and_then(|path| fingerprint_of_archive(&path));
+        if archived
+            .as_deref()
+            .is_ok_and(|fingerprint| fingerprint == current.as_str())
+        {
+            return Ok(None);
+        }
+    }
+    let _guard = state.enter_maintenance()?;
+    let info = create(&state.store, None, SnapshotKind::Auto)?;
+    let _ = prune(&state.store, retain.max(1));
+    Ok(Some(info))
+}
+
+/// 云端只有一份包，它应当等于本地最新快照：内容有变、或云端还不是这份内容时才上传覆盖。
+/// 基线独立于「是否新建了快照」，所以手动备份过的内容、以及上次上传失败的内容都能被补传。
+pub(crate) fn auto_upload_if_needed(state: &crate::state::AppState) -> Result<(), AppError> {
+    let (auto_upload, git) = match state.settings.lock() {
+        Ok(settings) => (settings.cloud.auto_upload, settings.backup.git.clone()),
+        Err(_) => return Ok(()),
+    };
+    if !auto_upload {
+        return Ok(());
+    }
+    // 远端备份只能选一种：Git 自动同步生效时不再上传 WebDAV。
+    // 历史设置可能同时开启两者；以「Git 已验证且已开启」为生效条件，避免两边都跑。
+    let git_active = git.enabled
+        && git_sync::is_remote_verified(&state.store, git.remote.as_deref());
+    if git_active {
+        return Ok(());
+    }
+    let Some(newest) = list(&state.store)?.into_iter().next() else {
+        return Ok(());
+    };
+    let archive = snapshot_path(&state.store, &newest.name)?;
+    let fingerprint = fingerprint_of_archive(&archive)?;
+    let runtime = crate::services::cloud_backup::load_runtime_status(&state.store);
+    if runtime.remote_fingerprint.as_deref() == Some(fingerprint.as_str()) {
+        return Ok(());
+    }
+    crate::services::cloud_backup::upload_archive(state, &archive).map(|_| ())
 }
 
 #[cfg(test)]
@@ -1483,6 +1537,135 @@ mod tests {
         let summary = validate_archive_for_restore(&path).unwrap();
         assert!(summary.files >= 2);
         assert!(summary.total_bytes > 0);
+    }
+
+    fn plain_state() -> AppState {
+        let dir = tempdir().unwrap();
+        let settings = AppSettings {
+            store_root: dir.path().join("store"),
+            ..AppSettings::default()
+        };
+        let state = AppState::init(settings).unwrap();
+        write_mcp(&state.store, "pw", "Playwright");
+        CLOUD_TEST_DIRS.lock().unwrap().push(dir);
+        state
+    }
+
+    #[test]
+    fn content_fingerprint_tracks_only_portable_truth() {
+        let (_dir, store, _index) = fixture();
+        write_mcp(&store, "pw", "Playwright");
+        let base = content_fingerprint(&store).unwrap();
+
+        std::fs::create_dir_all(store.root().join("local/agents")).unwrap();
+        std::fs::write(
+            store.root().join("local/agents/claude.json"),
+            "{\"a\":1}",
+        )
+        .unwrap();
+        std::fs::create_dir_all(store.root().join("state/applied")).unwrap();
+        std::fs::write(store.root().join("state/applied/claude.json"), "{}").unwrap();
+        std::fs::write(store.root().join("secrets.local.json"), "{}").unwrap();
+        std::fs::create_dir_all(store.root().join("logs")).unwrap();
+        std::fs::write(store.root().join("logs/app.log"), "log").unwrap();
+        assert_eq!(
+            base,
+            content_fingerprint(&store).unwrap(),
+            "不进快照的内容变化不该改变指纹"
+        );
+
+        write_mcp(&store, "pw", "Playwright v2");
+        assert_ne!(base, content_fingerprint(&store).unwrap(), "真源改动必须被指纹看到");
+    }
+
+    #[test]
+    fn archive_fingerprint_matches_content_fingerprint() {
+        let (_dir, store, _index) = fixture();
+        write_mcp(&store, "pw", "Playwright");
+        let content = content_fingerprint(&store).unwrap();
+
+        create(&store, Some("first"), SnapshotKind::Manual).unwrap();
+        create(&store, Some("second"), SnapshotKind::Auto).unwrap();
+        let first = fingerprint_of_archive(&snapshot_path(&store, "first").unwrap()).unwrap();
+        let second = fingerprint_of_archive(&snapshot_path(&store, "second").unwrap()).unwrap();
+        assert_eq!(first, second, "同内容的两份快照指纹必须相同");
+        assert_eq!(first, content, "包内算出的指纹要和内存里算的可直接比较");
+    }
+
+    #[test]
+    fn auto_snapshot_creates_only_when_content_changes() {
+        let state = plain_state();
+        assert!(auto_snapshot_if_changed(&state, 5).unwrap().is_some());
+        assert!(
+            auto_snapshot_if_changed(&state, 5).unwrap().is_none(),
+            "内容没变不该再建一份等内容快照"
+        );
+        assert_eq!(list(&state.store).unwrap().len(), 1);
+
+        write_mcp(&state.store, "other", "Other");
+        assert!(auto_snapshot_if_changed(&state, 5).unwrap().is_some());
+        assert_eq!(list(&state.store).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn auto_upload_skips_when_remote_already_matches() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
+        auto_snapshot_if_changed(&state, 5).unwrap().unwrap();
+        auto_upload_if_needed(&state).unwrap();
+        let puts = server.request_count("PUT");
+        assert!(puts > 0, "首轮没有云端副本，应当上传");
+
+        auto_upload_if_needed(&state).unwrap();
+        assert_eq!(
+            server.request_count("PUT"),
+            puts,
+            "云端已经是同一份内容，不该再覆盖一次"
+        );
+    }
+
+    #[test]
+    fn auto_upload_retries_after_failure() {
+        let server = FakeWebDav::start("me", "pw");
+        server.set_fail_put(true);
+        let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
+        auto_snapshot_if_changed(&state, 5).unwrap().unwrap();
+        assert!(auto_upload_if_needed(&state).is_err());
+        assert!(load_runtime_status(&state.store).remote_fingerprint.is_none());
+
+        server.set_fail_put(false);
+        auto_upload_if_needed(&state).unwrap();
+        assert!(server
+            .object("/dav/ccswitchx/ccswitchx-backup.zip")
+            .is_some());
+        assert_eq!(
+            load_runtime_status(&state.store)
+                .remote_fingerprint
+                .as_deref(),
+            Some(content_fingerprint(&state.store).unwrap().as_str()),
+            "补传成功后基线要落值，否则每轮都会重传"
+        );
+    }
+
+    #[test]
+    fn auto_upload_uploads_manual_snapshot_absent_from_cloud() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
+        create(&state.store, Some("manual"), SnapshotKind::Manual).unwrap();
+
+        auto_upload_if_needed(&state).unwrap();
+
+        assert!(
+            server
+                .object("/dav/ccswitchx/ccswitchx-backup.zip")
+                .is_some(),
+            "手动备份过的内容云端还没有，得补上去"
+        );
+        assert_eq!(
+            list(&state.store).unwrap().len(),
+            1,
+            "最新快照内容就是当前内容，不该再造 Auto 快照"
+        );
     }
 
     #[test]

@@ -30,6 +30,11 @@ const CLOUD_MANIFEST_SCHEMA: u32 = 1;
 pub struct CloudRuntimeStatus {
     pub last_upload_at: Option<i64>,
     pub last_error: Option<String>,
+    /// 云端那份包当前的内容指纹（见 `backup::content_fingerprint`）。
+    /// 自动上传拿它和本地最新快照比，一致就不动云端；旧状态文件没这个字段按未知处理，
+    /// 退化成多传一次覆盖，不会丢数据。
+    #[serde(default)]
+    pub remote_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -464,10 +469,11 @@ fn upload_archive_locked(
     proxy: &ProxyConfig,
     archive: &Path,
 ) -> Result<CloudStatus, AppError> {
-    let result = (|| -> Result<(RemoteObject, CloudManifest), AppError> {
+    let result = (|| -> Result<(RemoteObject, CloudManifest, String), AppError> {
         let summary = backup::validate_archive_for_restore(archive)?;
         let size_bytes = fs::metadata(archive)?.len();
         let sha256 = sha256_file(archive)?;
+        let content_fingerprint = backup::fingerprint_of_archive(archive)?;
         let client = client_for(connection, proxy)?;
         let remote = client.put(archive)?;
 
@@ -487,13 +493,14 @@ fn upload_archive_locked(
         };
         let bytes = serde_json::to_vec_pretty(&manifest)?;
         client.put_manifest(&bytes)?;
-        Ok((remote, manifest))
+        Ok((remote, manifest, content_fingerprint))
     })();
     match result {
-        Ok((remote, manifest)) => {
+        Ok((remote, manifest, content_fingerprint)) => {
             let mut runtime = load_runtime_status(&state.store);
             runtime.last_upload_at = Some(chrono::Utc::now().timestamp_millis());
             runtime.last_error = None;
+            runtime.remote_fingerprint = Some(content_fingerprint);
             if let Err(error) = save_runtime_status(&state.store, &runtime) {
                 eprintln!("保存云备份状态失败：{error}");
             }
@@ -574,6 +581,15 @@ pub fn restore_latest(state: &AppState) -> Result<CloudRestoreReport, AppError> 
         let _ = fs::remove_file(&temp);
         return Err(AppError::Cloud(format!("云端备份无效：{error}")));
     }
+    // 包还叫 temp 时先读内容指纹：恢复成功后要用它把云端状态标成「和本地一致」，
+    // 免得换机恢复完立刻把同样的内容原样传回去。
+    let remote_fingerprint = match backup::fingerprint_of_archive(&temp) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            return Err(AppError::Cloud(format!("云端备份无效：{error}")));
+        }
+    };
     if let Some(manifest) = &manifest {
         // manifest 最后写：哈希对不上说明包和描述不是同一次上传的产物（中途断网或外部替换）。
         let digest = sha256_file(&temp)?;
@@ -606,17 +622,24 @@ pub fn restore_latest(state: &AppState) -> Result<CloudRestoreReport, AppError> 
     let _ = fs::remove_file(&temp);
 
     match restored {
-        Ok(report) => Ok(CloudRestoreReport {
-            safety_backup: report.safety_backup,
-            restored_files: report.restored_files,
-            removed_files: report.removed_files,
-            downloaded_snapshot: name,
-            remote_size_bytes: downloaded
-                .size_bytes
-                .or(remote.size_bytes)
-                .unwrap_or(0),
-            remote_modified_at: remote.modified_at,
-        }),
+        Ok(report) => {
+            let mut runtime = load_runtime_status(&state.store);
+            runtime.remote_fingerprint = Some(remote_fingerprint);
+            if let Err(error) = save_runtime_status(&state.store, &runtime) {
+                eprintln!("保存云备份状态失败：{error}");
+            }
+            Ok(CloudRestoreReport {
+                safety_backup: report.safety_backup,
+                restored_files: report.restored_files,
+                removed_files: report.removed_files,
+                downloaded_snapshot: name,
+                remote_size_bytes: downloaded
+                    .size_bytes
+                    .or(remote.size_bytes)
+                    .unwrap_or(0),
+                remote_modified_at: remote.modified_at,
+            })
+        }
         Err(error) => Err(error),
     }
 }
@@ -684,12 +707,51 @@ mod tests {
         let status = CloudRuntimeStatus {
             last_upload_at: Some(123),
             last_error: Some("boom".into()),
+            remote_fingerprint: Some("f".repeat(64)),
         };
         save_runtime_status(&store, &status).unwrap();
         assert_eq!(load_runtime_status(&store), status);
 
         std::fs::write(status_path(&store), "{bad json").unwrap();
         assert_eq!(load_runtime_status(&store), CloudRuntimeStatus::default());
+    }
+
+    #[test]
+    fn runtime_status_without_fingerprint_field_reads_none() {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        std::fs::write(
+            status_path(&store),
+            r#"{"lastUploadAt":5,"lastError":null}"#,
+        )
+        .unwrap();
+        let loaded = load_runtime_status(&store);
+        assert_eq!(loaded.last_upload_at, Some(5));
+        assert!(
+            loaded.remote_fingerprint.is_none(),
+            "旧版本状态文件没有该字段时按未知处理，退化成多传一次"
+        );
+    }
+
+    #[test]
+    fn upload_now_records_remote_fingerprint() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = test_state_with_asset(config_for(&server), Some("pw"));
+        upload_now(&state).unwrap();
+        assert_eq!(
+            load_runtime_status(&state.store)
+                .remote_fingerprint
+                .as_deref(),
+            Some(backup::content_fingerprint(&state.store).unwrap().as_str())
+        );
+    }
+
+    #[test]
+    fn upload_failure_keeps_remote_fingerprint_unknown() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = test_state_with_asset(config_for(&server), Some("wrong"));
+        assert!(upload_now(&state).is_err());
+        assert!(load_runtime_status(&state.store).remote_fingerprint.is_none());
     }
 
     #[test]
@@ -820,6 +882,35 @@ mod tests {
             std::fs::read_to_string(target.store.root().join("local/agents/sentinel.json")).unwrap(),
             "keep"
         );
+    }
+
+    #[test]
+    fn restore_latest_records_remote_fingerprint() {
+        let server = FakeWebDav::start("me", "pw");
+        let source = test_state_with_asset(config_for(&server), Some("pw"));
+        let snapshot = build_named_snapshot(&source, "cloud-source");
+        let fingerprint = backup::fingerprint_of_archive(&snapshot).unwrap();
+        server.put_object(
+            "/dav/ccswitchx/ccswitchx-backup.zip",
+            std::fs::read(&snapshot).unwrap(),
+        );
+
+        let target = test_state(config_for(&server), Some("pw"));
+        let report = restore_latest(&target).unwrap();
+
+        // 恢复完本地内容就等于云端，指纹基线要跟上，否则下一轮会把同样的内容再传回去。
+        assert_eq!(
+            load_runtime_status(&target.store)
+                .remote_fingerprint
+                .as_deref(),
+            Some(fingerprint.as_str())
+        );
+        assert_eq!(
+            backup::content_fingerprint(&target.store).unwrap(),
+            fingerprint,
+            "恢复后的真源内容应与云端包一致"
+        );
+        assert!(report.downloaded_snapshot.starts_with("cloud_restore_"));
     }
 
     #[test]

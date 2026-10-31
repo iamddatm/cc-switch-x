@@ -175,7 +175,7 @@ export function CloudSection({
               </Field>
             </div>
             <p className="text-caption text-fg-3">
-              在页面顶部选择「WebDAV 云备份」后，每次自动快照都会上传；与 Git 备份互斥。
+              在页面顶部选择「WebDAV 云备份」后，内容有变化才会打包上传覆盖；与 Git 备份互斥。
             </p>
             <div className="flex flex-wrap gap-2">
               <Button
