@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Layers } from "lucide-react";
+import { GripVertical, Layers } from "lucide-react";
 import { AgentGlyph } from "../components/agents/AgentGlyph";
 import { Badge } from "../components/ui/Badge";
 import { FeedbackBar } from "../components/ui/FeedbackBar";
@@ -7,6 +7,7 @@ import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
 import { useAgents } from "../hooks/useAgents";
 import { api } from "../lib/api";
+import { cn } from "../lib/cn";
 import type { AgentStatus, AssetKind } from "../types";
 
 const CAPABILITIES: { kind: AssetKind; label: string }[] = [
@@ -23,6 +24,30 @@ export function AgentsPanel() {
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [dragging, setDragging] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+
+  /** 拖动结束后把整张顺序表写回设置；显示顺序由后端统一排序，其他面板的列也一起跟着变。 */
+  const reorder = async (fromId: string, toId: string) => {
+    if (fromId === toId) return;
+    const ids = agents.map((item) => item.id);
+    const from = ids.indexOf(fromId);
+    const to = ids.indexOf(toId);
+    if (from < 0 || to < 0) return;
+    ids.splice(to, 0, ...ids.splice(from, 1));
+    setBusy(fromId);
+    setActionError(null);
+    setMessage(null);
+    try {
+      await api.setAgentOrder(ids);
+      await refresh();
+      setMessage("已调整 Agent 顺序");
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const toggle = async (agent: AgentStatus, next: boolean) => {
     setBusy(agent.id);
@@ -63,8 +88,45 @@ export function AgentsPanel() {
               {agents.map((agent) => (
                 <li
                   key={agent.id}
-                  className="flex items-start gap-4 border-t border-border px-4 py-3 first:border-t-0"
+                  draggable
+                  onDragStart={(event) => {
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", agent.id);
+                    setDragging(agent.id);
+                  }}
+                  onDragOver={(event) => {
+                    if (!dragging) return;
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                    if (dropTarget !== agent.id) setDropTarget(agent.id);
+                  }}
+                  onDragLeave={() =>
+                    setDropTarget((current) => (current === agent.id ? null : current))
+                  }
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    // 只认本列表内部拖过来的行，避免外部拖入的文本被当成排序
+                    const fromId = dragging ?? event.dataTransfer.getData("text/plain");
+                    setDragging(null);
+                    setDropTarget(null);
+                    if (dragging) void reorder(fromId, agent.id);
+                  }}
+                  onDragEnd={() => {
+                    setDragging(null);
+                    setDropTarget(null);
+                  }}
+                  className={cn(
+                    "flex items-start gap-3 border-t border-border px-4 py-3 first:border-t-0",
+                    dragging === agent.id && "opacity-40",
+                    dropTarget === agent.id && dragging !== agent.id && "bg-subtle",
+                  )}
                 >
+                  <span
+                    title="拖动调整顺序"
+                    className="mt-1 shrink-0 cursor-grab text-fg-3 active:cursor-grabbing"
+                  >
+                    <GripVertical size={16} aria-hidden />
+                  </span>
                   <AgentGlyph agentId={agent.id} label={agent.displayName} size={26} />
                   <div className="min-w-0 flex-1 space-y-1.5">
                     <div className="flex flex-wrap items-center gap-2">
@@ -132,6 +194,7 @@ export function AgentsPanel() {
 
           <Notice tone="info">
             启用范围只影响本应用里的显示与分发入口；已部署到 agent 的文件不会被删除。
+            拖动左侧手柄可调整顺序，顺序会同步到各资产面板的 agent 列。
             配置目录不存在的 agent 仍可预先启用；CLI 状态只表示 PATH 与常见安装目录里能否找到命令。
           </Notice>
         </div>

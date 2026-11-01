@@ -176,6 +176,7 @@ pub fn run() {
             commands::settings::get_autostart,
             commands::settings::get_proxy_settings,
             commands::settings::scan_local_proxies,
+            commands::settings::set_agent_order,
             commands::settings::set_autostart,
             commands::settings::set_close_to_tray,
             commands::settings::set_enabled_agents,

@@ -15,6 +15,9 @@ pub struct AppSettings {
     /// 全局启用的 agent；None = 全部启用（兼容旧设置文件）。
     #[serde(default)]
     pub enabled_agents: Option<Vec<String>>,
+    /// Agents 页的显示顺序；None = 按内置注册表顺序。未列出的 agent 排在已列出的之后。
+    #[serde(default)]
+    pub agent_order: Option<Vec<String>>,
     /// 关闭主窗口时隐藏到托盘，而不是退出应用。
     #[serde(default = "default_true")]
     pub close_to_tray: bool,
@@ -192,6 +195,9 @@ pub struct ProxySettings {
     /// 代理开关：关闭时保留地址与凭据，但所有出站请求直连。
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// WebDAV 云备份是否也走这个代理；关闭后云备份直连。缺省 true，旧设置文件行为不变。
+    #[serde(default = "default_true")]
+    pub webdav_uses_proxy: bool,
 }
 
 impl Default for ProxySettings {
@@ -200,6 +206,7 @@ impl Default for ProxySettings {
             url: None,
             username: None,
             enabled: true,
+            webdav_uses_proxy: true,
         }
     }
 }
@@ -281,6 +288,7 @@ impl Default for AppSettings {
             store_root: default_store_root(),
             theme: Theme::System,
             enabled_agents: None,
+            agent_order: None,
             close_to_tray: true,
             proxy: ProxySettings::default(),
             skill_repos: None,
@@ -354,11 +362,13 @@ mod tests {
             store_root: dir.path().join("data"),
             theme: Theme::Dark,
             enabled_agents: Some(vec!["claude".into()]),
+            agent_order: Some(vec!["pi".into(), "claude".into()]),
             close_to_tray: false,
             proxy: ProxySettings {
                 url: Some("http://127.0.0.1:7890".into()),
                 username: Some("me".into()),
                 enabled: false,
+                webdav_uses_proxy: false,
             },
             skill_repos: Some(vec![SkillRepo {
                 owner: "acme".into(),

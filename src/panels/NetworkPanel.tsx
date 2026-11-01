@@ -17,6 +17,7 @@ export function NetworkPanel() {
   const [hasPassword, setHasPassword] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [enabled, setEnabled] = useState(true);
+  const [webdavUsesProxy, setWebdavUsesProxy] = useState(true);
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -36,6 +37,7 @@ export function NetworkPanel() {
         setUsername(value.username ?? "");
         setHasPassword(value.hasPassword);
         setEnabled(value.enabled);
+        setWebdavUsesProxy(value.webdavUsesProxy);
         setPassword("");
         setPasswordDirty(false);
         setDirty(false);
@@ -67,9 +69,11 @@ export function NetworkPanel() {
         username.trim(),
         passwordDirty ? password : null,
         enabled,
+        webdavUsesProxy,
       );
       setHasPassword(view.hasPassword);
       setEnabled(view.enabled);
+      setWebdavUsesProxy(view.webdavUsesProxy);
       setPassword("");
       setPasswordDirty(false);
       setDirty(false);
@@ -171,7 +175,8 @@ export function NetworkPanel() {
               </span>
             </div>
             <p className="mt-1 text-caption text-fg-2">
-              所有出站请求（Skills 下载、skills.sh 搜索、应用更新）都会经过此代理；留空表示直连。
+              出站请求（Skills 下载、skills.sh 搜索、应用更新）都会经过此代理；留空表示直连。
+              WebDAV 云备份可以单独设为不走代理。
             </p>
 
             {loading ? (
@@ -190,6 +195,21 @@ export function NetworkPanel() {
                   />
                   <span className="text-caption text-fg-3">
                     关闭后保留地址与凭据，所有出站请求直连。
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <Checkbox
+                    id="proxy-webdav"
+                    label="WebDAV 云备份走代理"
+                    checked={webdavUsesProxy}
+                    onChange={(event) => {
+                      setWebdavUsesProxy(event.target.checked);
+                      markDirty();
+                    }}
+                  />
+                  <span className="text-caption text-fg-3">
+                    关闭后云备份的上传、下载与连通性测试直连，其余请求仍按上面的开关走代理。
                   </span>
                 </div>
 

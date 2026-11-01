@@ -19,13 +19,15 @@ beforeEach(() => {
     username: "me",
     hasPassword: true,
     enabled: true,
+    webdavUsesProxy: true,
   });
   vi.mocked(api.setProxySettings).mockImplementation(
-    async (url, username, password, enabled) => ({
+    async (url, username, password, enabled, webdavUsesProxy) => ({
       url: url || null,
       username: username || null,
       hasPassword: password !== null ? password !== "" : true,
       enabled: Boolean(url) && enabled,
+      webdavUsesProxy,
     }),
   );
   vi.mocked(api.testProxySettings).mockResolvedValue({
@@ -53,6 +55,7 @@ test("loads the saved proxy and keeps the stored password when saving", async ()
       "me",
       null,
       true,
+      true,
     ),
   );
   expect(await screen.findByText("代理设置已保存。")).toBeInTheDocument();
@@ -72,6 +75,7 @@ test("disabling the proxy keeps the address and saves enabled=false", async () =
       "me",
       null,
       false,
+      true,
     ),
   );
   expect(
@@ -79,6 +83,24 @@ test("disabling the proxy keeps the address and saves enabled=false", async () =
   ).toBeInTheDocument();
   expect(screen.getByLabelText("代理地址")).toHaveValue(
     "http://127.0.0.1:7890",
+  );
+});
+
+test("webdav can be taken off the proxy without disabling it globally", async () => {
+  render(<NetworkPanel />);
+  await screen.findByLabelText("代理地址");
+
+  fireEvent.click(screen.getByLabelText("WebDAV 云备份走代理"));
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+  await waitFor(() =>
+    expect(api.setProxySettings).toHaveBeenCalledWith(
+      "http://127.0.0.1:7890",
+      "me",
+      null,
+      true,
+      false,
+    ),
   );
 });
 

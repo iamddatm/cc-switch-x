@@ -44,6 +44,21 @@ pub fn set_enabled_agents(
     Ok(updated)
 }
 
+/// Agents 页拖动排序后的显示顺序；只改本机偏好，不碰启用范围与已部署文件。
+#[tauri::command]
+pub fn set_agent_order(
+    state: State<'_, AppState>,
+    agent_ids: Vec<String>,
+) -> Result<AppSettings, AppError> {
+    let updated = settings_service::set_agent_order(agent_ids)?;
+    let mut settings = state
+        .settings
+        .lock()
+        .map_err(|_| AppError::InvalidInput("settings 锁失败".into()))?;
+    *settings = updated.clone();
+    Ok(updated)
+}
+
 /// 返回 true 表示设置已写入文件；store root 生效需要重启应用。
 #[tauri::command]
 pub fn set_store_root(
@@ -118,6 +133,7 @@ pub fn set_proxy_settings(
     username: String,
     password: Option<String>,
     enabled: bool,
+    webdav_uses_proxy: bool,
 ) -> Result<ProxySettingsView, AppError> {
     let (updated, secrets) = settings_service::set_proxy_at(
         &settings_file::settings_path()?,
@@ -126,6 +142,7 @@ pub fn set_proxy_settings(
         username,
         password,
         enabled,
+        webdav_uses_proxy,
     )?;
     let mut current = state
         .settings

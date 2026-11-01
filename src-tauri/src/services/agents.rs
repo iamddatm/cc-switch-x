@@ -188,10 +188,46 @@ pub fn detect_all(store: &Store, home: &Path) -> Result<Vec<AgentStatus>, AppErr
     Ok(out)
 }
 
+/// 按设置里的偏好顺序重排；没列出的 agent 保持注册表顺序排在后面（稳定排序）。
+/// 偏好里出现注册表已删除的 id 不会报错，自然落在未列出那一档。
+pub fn apply_order(agents: Vec<AgentStatus>, order: Option<&[String]>) -> Vec<AgentStatus> {
+    let Some(order) = order else {
+        return agents;
+    };
+    let rank = |id: &str| {
+        order
+            .iter()
+            .position(|item| item == id)
+            .unwrap_or(usize::MAX)
+    };
+    let mut agents = agents;
+    agents.sort_by_key(|agent| rank(&agent.id));
+    agents
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn agent_order_overrides_the_registry_order_and_keeps_unlisted_last() {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let agents = detect_all(&store, &dir.path().join("home")).unwrap();
+        let ids = |list: &[AgentStatus]| list.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
+
+        let base = ids(&agents);
+        let order = vec![base[2].clone(), base[0].clone()];
+        let got = ids(&apply_order(agents.clone(), Some(&order)));
+
+        assert_eq!(&got[..2], &order[..], "列出的按给定顺序排在前面");
+        let rest: Vec<String> = base.iter().filter(|id| !order.contains(id)).cloned().collect();
+        assert_eq!(&got[2..], &rest[..], "未列出的保持相对顺序跟在后面");
+
+        assert_eq!(ids(&apply_order(agents, None)), base, "没有偏好时保持注册表顺序");
+    }
+
 
     #[test]
     fn detect_marks_agents_by_their_config_root() {

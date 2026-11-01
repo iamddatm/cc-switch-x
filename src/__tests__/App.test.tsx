@@ -10,6 +10,7 @@ vi.mock("../lib/api", () => ({
       storeRoot: "C:/Users/me/.ccswitchx",
       theme: "system",
       enabledAgents: null,
+      agentOrder: null,
       closeToTray: true,
       proxy: { url: null, username: null },
       skillRepos: null,

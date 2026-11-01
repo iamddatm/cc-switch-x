@@ -63,6 +63,20 @@ impl AppState {
         ))
     }
 
+    /// WebDAV 专用：设置里关掉「云备份走代理」时返回 None，客户端按直连建。
+    pub fn webdav_proxy_config(&self) -> Result<Option<ProxyConfig>, AppError> {
+        let uses_proxy = self
+            .settings
+            .lock()
+            .map_err(|_| AppError::InvalidInput("settings 锁失败".into()))?
+            .proxy
+            .webdav_uses_proxy;
+        if !uses_proxy {
+            return Ok(None);
+        }
+        self.proxy_config().map(Some)
+    }
+
     /// 托盘尚未建好时也按「关闭到托盘」处理，避免窗口被误关。
     pub fn close_to_tray(&self) -> bool {
         self.settings

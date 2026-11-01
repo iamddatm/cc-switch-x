@@ -155,6 +155,7 @@ function mockBase(git: GitStatus = healthyGit) {
     storeRoot: "C:/data",
     theme: "system",
     enabledAgents: null,
+    agentOrder: null,
     closeToTray: true,
     proxy: { url: null, username: null },
     skillRepos: null,

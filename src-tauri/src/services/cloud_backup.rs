@@ -234,7 +234,7 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
         });
     }
 
-    let proxy = state.proxy_config()?;
+    let proxy = state.webdav_proxy_config()?;
     let _guard = state
         .cloud_ops
         .lock()
@@ -246,7 +246,7 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
             password: password.unwrap_or_default(),
             remote_dir: cloud.remote_dir,
         },
-        Some(&proxy),
+        proxy.as_ref(),
     )?;
     let (remote, remote_error) = match client.head() {
         Ok(remote) => (
@@ -322,7 +322,7 @@ pub fn test_connection(
     if password.trim().is_empty() {
         return Err(AppError::InvalidInput("请填写 WebDAV 密码".into()));
     }
-    let proxy = state.proxy_config()?;
+    let proxy = state.webdav_proxy_config()?;
     let _guard = state
         .cloud_ops
         .lock()
@@ -334,7 +334,7 @@ pub fn test_connection(
             password,
             remote_dir: remote_dir.trim().to_string(),
         },
-        Some(&proxy),
+        proxy.as_ref(),
     )?;
     let started = Instant::now();
     client.test()?;
@@ -377,7 +377,7 @@ fn read_connection(state: &AppState) -> Result<CloudConnection, AppError> {
 
 fn client_for(
     connection: &CloudConnection,
-    proxy: &ProxyConfig,
+    proxy: Option<&ProxyConfig>,
 ) -> Result<WebDavClient, AppError> {
     WebDavClient::new(
         WebDavConfig {
@@ -386,7 +386,7 @@ fn client_for(
             password: connection.password.clone(),
             remote_dir: connection.cloud.remote_dir.clone(),
         },
-        Some(proxy),
+        proxy,
     )
 }
 
@@ -424,7 +424,7 @@ fn status_from_remote(
 /// 手动上传：在 `maintenance` 写锁下打包当前真源，释放锁后再联网。
 pub fn upload_now(state: &AppState) -> Result<CloudStatus, AppError> {
     let connection = read_connection(state)?;
-    let proxy = state.proxy_config()?;
+    let proxy = state.webdav_proxy_config()?;
     let _guard = state
         .cloud_ops
         .lock()
@@ -441,7 +441,7 @@ pub fn upload_now(state: &AppState) -> Result<CloudStatus, AppError> {
         backup::write_archive_to(&state.store, &archive, SnapshotKind::Manual)
     };
     let result = match build {
-        Ok(_) => upload_archive_locked(state, &connection, &proxy, &archive),
+        Ok(_) => upload_archive_locked(state, &connection, proxy.as_ref(), &archive),
         Err(error) => {
             record_failure(state, &error);
             let _ = fs::remove_file(&archive);
@@ -455,18 +455,18 @@ pub fn upload_now(state: &AppState) -> Result<CloudStatus, AppError> {
 /// 自动上传入口：直接上传已有快照，调用方无需持有 `cloud_ops`。
 pub fn upload_archive(state: &AppState, archive: &Path) -> Result<CloudStatus, AppError> {
     let connection = read_connection(state)?;
-    let proxy = state.proxy_config()?;
+    let proxy = state.webdav_proxy_config()?;
     let _guard = state
         .cloud_ops
         .lock()
         .map_err(|_| AppError::Cloud("云备份任务锁失败".into()))?;
-    upload_archive_locked(state, &connection, &proxy, archive)
+    upload_archive_locked(state, &connection, proxy.as_ref(), archive)
 }
 
 fn upload_archive_locked(
     state: &AppState,
     connection: &CloudConnection,
-    proxy: &ProxyConfig,
+    proxy: Option<&ProxyConfig>,
     archive: &Path,
 ) -> Result<CloudStatus, AppError> {
     let result = (|| -> Result<(RemoteObject, CloudManifest, String), AppError> {
@@ -534,12 +534,12 @@ fn unique_restore_name(store: &Store) -> String {
 /// 下载云端最新包，走与本地快照相同的安全恢复流水线；不做自动保留清理。
 pub fn restore_latest(state: &AppState) -> Result<CloudRestoreReport, AppError> {
     let connection = read_connection(state)?;
-    let proxy = state.proxy_config()?;
+    let proxy = state.webdav_proxy_config()?;
     let _guard = state
         .cloud_ops
         .lock()
         .map_err(|_| AppError::Cloud("云备份任务锁失败".into()))?;
-    let client = client_for(&connection, &proxy)?;
+    let client = client_for(&connection, proxy.as_ref())?;
 
     let remote = client.head()?;
     if !remote.exists {

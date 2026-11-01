@@ -8,7 +8,9 @@ use crate::domain::mcp::McpServer;
 use crate::domain::{AssetKind, AssetType};
 use crate::error::AppError;
 use crate::import::update_matrix;
-use crate::services::agents::{detect_all, ensure_agent_detected, load_state, AgentStatus};
+use crate::services::agents::{
+    apply_order, detect_all, ensure_agent_detected, load_state, AgentStatus,
+};
 use crate::services::apply::ApplyReport;
 use crate::services::drift;
 use crate::state::AppState;
@@ -44,7 +46,7 @@ pub fn list_agents(state: State<'_, AppState>) -> Result<Vec<AgentStatus>, AppEr
     for agent in &mut agents {
         agent.enabled = crate::settings::is_agent_enabled(&settings, &agent.id);
     }
-    Ok(agents)
+    Ok(apply_order(agents, settings.agent_order.as_deref()))
 }
 
 #[tauri::command]

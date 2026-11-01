@@ -22,6 +22,8 @@ pub struct ProxySettingsView {
     pub has_password: bool,
     /// 实际生效的开关；没填地址时恒为 false。
     pub enabled: bool,
+    /// WebDAV 云备份是否也用这个代理。
+    pub webdav_uses_proxy: bool,
 }
 
 pub fn proxy_secret_ref() -> SecretRef {
@@ -52,6 +54,7 @@ pub fn proxy_view(settings: &AppSettings, secrets: &Secrets) -> ProxySettingsVie
         username,
         has_password,
         enabled: url.is_some() && settings.proxy.enabled,
+        webdav_uses_proxy: settings.proxy.webdav_uses_proxy,
     }
 }
 
@@ -64,11 +67,14 @@ pub fn set_proxy_at(
     username: String,
     password: Option<String>,
     enabled: bool,
+    webdav_uses_proxy: bool,
 ) -> Result<(AppSettings, Secrets), AppError> {
     let mut current = settings::load_from(config_path)?;
     let mut secrets = Secrets::load(secrets_path)?;
     let url = url.trim();
     let username = username.trim();
+    // 与地址存不存在无关：清空地址时保留用户对 WebDAV 的选择，重新填地址后不用再勾一次。
+    current.proxy.webdav_uses_proxy = webdav_uses_proxy;
 
     if url.is_empty() {
         // 清空地址就是回到直连，认证信息一并清掉，避免留下无法使用的残留。
@@ -329,6 +335,31 @@ pub fn set_enabled_agents_at(
     config_path: &std::path::Path,
     agent_ids: Vec<String>,
 ) -> Result<AppSettings, AppError> {
+    let unique = unique_known_agents(agent_ids)?;
+    let mut current = settings::load_from(config_path)?;
+    current.enabled_agents = Some(unique);
+    settings::save_to(config_path, &current)?;
+    Ok(current)
+}
+
+pub fn set_agent_order(agent_ids: Vec<String>) -> Result<AppSettings, AppError> {
+    set_agent_order_at(&settings::settings_path()?, agent_ids)
+}
+
+/// 空数组等于「恢复注册表顺序」，存 None，不留一个无意义的空顺序。
+pub fn set_agent_order_at(
+    config_path: &std::path::Path,
+    agent_ids: Vec<String>,
+) -> Result<AppSettings, AppError> {
+    let unique = unique_known_agents(agent_ids)?;
+    let mut current = settings::load_from(config_path)?;
+    current.agent_order = if unique.is_empty() { None } else { Some(unique) };
+    settings::save_to(config_path, &current)?;
+    Ok(current)
+}
+
+/// 只接受内置 agent，去重并保持传入顺序。
+fn unique_known_agents(agent_ids: Vec<String>) -> Result<Vec<String>, AppError> {
     let known: Vec<String> = builtin_agents().into_iter().map(|agent| agent.id).collect();
     let mut unique = Vec::new();
     for id in agent_ids {
@@ -339,10 +370,7 @@ pub fn set_enabled_agents_at(
             unique.push(id);
         }
     }
-    let mut current = settings::load_from(config_path)?;
-    current.enabled_agents = Some(unique);
-    settings::save_to(config_path, &current)?;
-    Ok(current)
+    Ok(unique)
 }
 
 /// 只改写设置文件；store/index 在启动时绑定，因此切换后需要重启才生效。
@@ -377,6 +405,26 @@ mod tests {
         assert!(set_enabled_agents_at(&config, vec!["nope".into()]).is_err());
         let empty = set_enabled_agents_at(&config, Vec::new()).unwrap();
         assert_eq!(empty.enabled_agents, Some(Vec::new()), "空数组表示全部禁用");
+    }
+
+    #[test]
+    fn set_agent_order_validates_and_deduplicates() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let updated =
+            set_agent_order_at(&config, vec!["pi".into(), "claude".into(), "pi".into()]).unwrap();
+        assert_eq!(
+            updated.agent_order,
+            Some(vec!["pi".to_string(), "claude".to_string()])
+        );
+        assert!(set_agent_order_at(&config, vec!["nope".into()]).is_err());
+
+        let cleared = set_agent_order_at(&config, Vec::new()).unwrap();
+        assert_eq!(cleared.agent_order, None, "空数组等于恢复注册表顺序");
+        assert_eq!(
+            cleared.enabled_agents, None,
+            "改顺序不该动启用范围；None 仍是「全部启用」"
+        );
     }
 
     #[test]
@@ -519,6 +567,7 @@ mod tests {
             " me ".into(),
             Some("p@ss".into()),
             true,
+            true,
         )
         .unwrap();
         assert_eq!(updated.proxy.url.as_deref(), Some("http://127.0.0.1:7890"));
@@ -533,6 +582,7 @@ mod tests {
                 username: Some("me".into()),
                 has_password: true,
                 enabled: true,
+                webdav_uses_proxy: true,
             }
         );
         assert_eq!(secrets.get(&proxy_secret_ref()), Some("p@ss"));
@@ -544,6 +594,7 @@ mod tests {
             "http://127.0.0.1:7891".into(),
             "me".into(),
             None,
+            true,
             true,
         )
         .unwrap();
@@ -557,6 +608,7 @@ mod tests {
             "me".into(),
             Some(String::new()),
             true,
+            true,
         )
         .unwrap();
         assert!(!proxy_view(&cleared, &cleared_secrets).has_password);
@@ -568,12 +620,45 @@ mod tests {
             String::new(),
             None,
             true,
+            true,
         )
         .unwrap();
         assert!(empty.proxy.url.is_none());
         assert!(empty.proxy.username.is_none());
         assert!(!empty.proxy.enabled);
         assert!(!proxy_view(&empty, &empty_secrets).has_password);
+    }
+
+    #[test]
+    fn webdav_proxy_switch_persists_independently_of_the_proxy_toggle() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let secrets_path = dir.path().join("secrets.local.json");
+
+        let (updated, _) = set_proxy_at(
+            &config,
+            &secrets_path,
+            "http://127.0.0.1:7890".into(),
+            "me".into(),
+            Some("p@ss".into()),
+            true,
+            false,
+        )
+        .unwrap();
+        assert!(updated.proxy.enabled, "全局代理仍开着");
+        assert!(!updated.proxy.webdav_uses_proxy, "WebDAV 可以单独不走代理");
+
+        let (restored, _) = set_proxy_at(
+            &config,
+            &secrets_path,
+            String::new(),
+            String::new(),
+            None,
+            true,
+            true,
+        )
+        .unwrap();
+        assert!(restored.proxy.webdav_uses_proxy, "清空地址也保留这次选择");
     }
 
     #[test]
@@ -589,6 +674,7 @@ mod tests {
             "me".into(),
             Some("p@ss".into()),
             true,
+            true,
         )
         .unwrap();
 
@@ -599,6 +685,7 @@ mod tests {
             "me".into(),
             None,
             false,
+            true,
         )
         .unwrap();
         assert!(!disabled.proxy.enabled);
@@ -617,6 +704,7 @@ mod tests {
             "me".into(),
             None,
             true,
+            true,
         )
         .unwrap();
         assert!(enabled.proxy.enabled);
@@ -634,6 +722,7 @@ mod tests {
             "ftp://127.0.0.1:21".into(),
             String::new(),
             None,
+            true,
             true
         )
         .is_err());
@@ -644,6 +733,7 @@ mod tests {
                 "http://user:pw@127.0.0.1:7890".into(),
                 String::new(),
                 None,
+                true,
                 true
             )
             .is_err(),
@@ -666,6 +756,7 @@ mod tests {
             "http://127.0.0.1:7890".into(),
             String::new(),
             None,
+            true,
             true,
         )
         .unwrap();

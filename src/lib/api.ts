@@ -102,6 +102,8 @@ export const api = {
   setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart", { enabled }),
   setEnabledAgents: (agentIds: string[]) =>
     invoke<AppSettings>("set_enabled_agents", { agentIds }),
+  setAgentOrder: (agentIds: string[]) =>
+    invoke<AppSettings>("set_agent_order", { agentIds }),
   getProxySettings: () => invoke<ProxySettingsView>("get_proxy_settings"),
   /** password: null = 保留已保存密码，空串 = 清除；enabled=false 只停用代理，配置保留。 */
   setProxySettings: (
@@ -109,12 +111,14 @@ export const api = {
     username: string,
     password: string | null,
     enabled: boolean,
+    webdavUsesProxy: boolean,
   ) =>
     invoke<ProxySettingsView>("set_proxy_settings", {
       url,
       username,
       password,
       enabled,
+      webdavUsesProxy,
     }),
   testProxySettings: (url: string, username: string, password: string | null) =>
     invoke<ProxyTestResult>("test_proxy_settings", { url, username, password }),

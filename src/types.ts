@@ -44,6 +44,8 @@ export interface AppSettings {
   theme: Theme;
   /** null = 全部启用；空数组 = 全部禁用。 */
   enabledAgents: string[] | null;
+  /** Agents 页的显示顺序；null = 按内置注册表顺序，未列出的排在最后。 */
+  agentOrder: string[] | null;
   /** 关闭窗口时隐藏到托盘。 */
   closeToTray: boolean;
   proxy: { url: string | null; username: string | null };
@@ -206,6 +208,8 @@ export interface ProxySettingsView {
   hasPassword: boolean;
   /** 实际生效的开关；没有填写地址时恒为 false。 */
   enabled: boolean;
+  /** WebDAV 云备份是否也用这个代理；关闭后云备份直连。 */
+  webdavUsesProxy: boolean;
 }
 
 export interface ProxyTestResult {

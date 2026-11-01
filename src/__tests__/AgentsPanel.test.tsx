@@ -3,13 +3,27 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { AgentsPanel } from "../panels/AgentsPanel";
 import { api } from "../lib/api";
 import { agentStatus, capabilities } from "../test/agents";
+import type { AppSettings } from "../types";
 
 vi.mock("../lib/api", () => ({
   api: {
     listAgents: vi.fn(),
     setEnabledAgents: vi.fn(),
+    setAgentOrder: vi.fn(),
   },
 }));
+
+const savedSettings: AppSettings = {
+  storeRoot: "C:/Users/me/.ccswitchx",
+  theme: "system",
+  enabledAgents: ["claude", "pi"],
+  agentOrder: null,
+  closeToTray: true,
+  proxy: { url: null, username: null },
+  skillRepos: null,
+  backup: { intervalHours: 24, retainCount: 10, git: { enabled: false, autoCommit: true, autoPull: true, remote: null, branch: "main" } },
+  cloud: { autoUpload: false, baseUrl: "", username: "", remoteDir: "ccswitchx" },
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -25,16 +39,8 @@ beforeEach(() => {
       capabilities: capabilities({ mcp: "unverified" }),
     }),
   ]);
-  vi.mocked(api.setEnabledAgents).mockResolvedValue({
-    storeRoot: "C:/Users/me/.ccswitchx",
-    theme: "system",
-    enabledAgents: ["claude", "pi"],
-    closeToTray: true,
-    proxy: { url: null, username: null },
-    skillRepos: null,
-      backup: { intervalHours: 24, retainCount: 10, git: { enabled: false, autoCommit: true, autoPull: true, remote: null, branch: "main" } },
-      cloud: { autoUpload: false, baseUrl: "", username: "", remoteDir: "ccswitchx" },
-  });
+  vi.mocked(api.setEnabledAgents).mockResolvedValue(savedSettings);
+  vi.mocked(api.setAgentOrder).mockResolvedValue(savedSettings);
 });
 
 test("lists all agents with CLI and config state", async () => {
@@ -74,4 +80,25 @@ test("a failed save surfaces the backend reason", async () => {
   render(<AgentsPanel />);
   fireEvent.click(await screen.findByRole("checkbox", { name: "启用 Pi Coding Agent" }));
   expect(await screen.findByText(/未知的 agent/)).toBeInTheDocument();
+});
+
+test("dragging a row onto another persists the new order", async () => {
+  render(<AgentsPanel />);
+  const first = (await screen.findByText("Claude Code")).closest("li")!;
+  const second = screen.getByText("Pi Coding Agent").closest("li")!;
+  const dataTransfer = {
+    effectAllowed: "",
+    dropEffect: "",
+    setData: vi.fn(),
+    getData: vi.fn(() => ""),
+  };
+
+  fireEvent.dragStart(first, { dataTransfer });
+  fireEvent.dragOver(second, { dataTransfer });
+  fireEvent.drop(second, { dataTransfer });
+
+  await waitFor(() =>
+    expect(api.setAgentOrder).toHaveBeenCalledWith(["pi", "claude"]),
+  );
+  expect(await screen.findByText(/已调整 Agent 顺序/)).toBeInTheDocument();
 });
