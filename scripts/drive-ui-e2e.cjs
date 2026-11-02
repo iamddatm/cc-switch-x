@@ -53,6 +53,72 @@ async function main() {
   log.trendingFailed = await target.getByText("趋势榜读取失败").count();
   await shot("00-skills-trend");
 
+  // ── 用户级 Skills：发现未纳管 → 导入并接管（真机 Windows junction 场景）───
+  const foreignDir = path.join(SANDBOX, ".claude", "skills", "hand-made");
+  const storeSkillDir = path.join(STORE, "assets", "skills", "hand-made");
+  if (!fs.existsSync(foreignDir)) {
+    log.unmanaged = "跳过：seed 里没有 .claude/skills/hand-made 这份外来目录";
+  } else {
+    // 先用后端口径确认「发现」结果：junction 部署的那份不能被当成外来内容。
+    const before = await target.evaluate(() =>
+      window.__TAURI_INTERNALS__.invoke("scan_unmanaged_skills"),
+    );
+    log.unmanagedBefore = {
+      skills: before.skills.map((s) => s.directory),
+      conflicts: before.conflicts.map((s) => s.directory),
+      skipped: before.skipped.map((s) => `${s.dir}:${s.reason}`),
+      roots: before.roots.length,
+      ourJunctionDetected: before.skills.some((s) => s.directory === "managed-skill"),
+    };
+
+    await target.getByRole("tab", { name: /未纳管/ }).click();
+    await target.waitForTimeout(600);
+    await shot("01-skills-unmanaged");
+    await target.getByRole("checkbox", { name: "选择 手工装的" }).click();
+    await target.getByRole("button", { name: "导入所选并接管" }).click();
+    const dialog = target.getByRole("alertdialog");
+    await dialog.waitFor();
+    log.takeoverCheckedByDefault = await dialog
+      .getByRole("checkbox", { name: "接管 Claude Code" })
+      .isChecked();
+    await shot("02-skills-unmanaged-confirm");
+    await dialog.getByRole("button", { name: "导入并接管" }).click();
+    await target.waitForTimeout(2000);
+    log.importLine = await target.getByText(/^hand-made：/).first().textContent();
+    await shot("03-skills-unmanaged-done");
+
+    const backups = fs
+      .readdirSync(path.join(STORE, "backups", "skills"))
+      .filter((name) => name.includes("adopt_claude_hand-made"));
+    const meta = JSON.parse(read(path.join(storeSkillDir, ".meta.json")));
+    log.afterImport = {
+      // 真源
+      canonicalHasBody: read(path.join(storeSkillDir, "SKILL.md")).includes("外来正文"),
+      canonicalOrigin: `${meta.sourceKind} <- ${meta.sourceUrl}`,
+      // 别人的部署标记不能混进真源
+      canonicalHasStaleMarker: fs.existsSync(path.join(storeSkillDir, ".ccswitchx")),
+      // 盘上那份已经换成指向真源的部署
+      deployedIsOurs:
+        fs.lstatSync(foreignDir).isSymbolicLink() ||
+        fs.existsSync(path.join(foreignDir, ".ccswitchx")),
+      deployedReadable: read(path.join(foreignDir, "SKILL.md")).includes("外来正文"),
+      // 删除前留的底还在，内容是原样
+      backupKeepsOriginal:
+        backups.length === 1 &&
+        read(path.join(STORE, "backups", "skills", backups[0], "SKILL.md")).includes("外来正文"),
+      backupNames: backups,
+    };
+    // 启用状态必须等于磁盘事实：矩阵里 claude 已经勾上，且再扫一次什么都没剩下。
+    const agents = await target.evaluate(() => window.__TAURI_INTERNALS__.invoke("list_agents"));
+    const after = await target.evaluate(() =>
+      window.__TAURI_INTERNALS__.invoke("scan_unmanaged_skills"),
+    );
+    log.enabledOnClaude = (
+      agents.find((agent) => agent.id === "claude") || { enabledSkills: [] }
+    ).enabledSkills.includes("hand-made");
+    log.unmanagedAfter = after.skills.map((s) => s.directory);
+  }
+
   // ── MCP ────────────────────────────────────────────
   await sidebar("MCP");
   await target.waitForTimeout(500);

@@ -138,6 +138,9 @@ pub fn set_proxy_at(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudSettingsView {
+    /// 通道是否启用（参与「远端备份方式」单选）。
+    pub enabled: bool,
+    /// 变化后是否自动上传；`enabled` 为假时恒为假。
     pub auto_upload: bool,
     pub base_url: String,
     pub username: String,
@@ -154,6 +157,7 @@ pub fn cloud_secret_ref() -> SecretRef {
 
 pub fn cloud_view(settings: &AppSettings, secrets: &Secrets) -> CloudSettingsView {
     CloudSettingsView {
+        enabled: settings.cloud.enabled,
         auto_upload: settings.cloud.auto_upload,
         base_url: settings.cloud.base_url.clone(),
         username: settings.cloud.username.clone(),
@@ -165,6 +169,7 @@ pub fn cloud_view(settings: &AppSettings, secrets: &Secrets) -> CloudSettingsVie
 }
 
 /// 密码语义：None = 保留旧密码，Some("") = 清除，Some(v) = 覆盖。
+/// 「通道启用」与「自动上传」分开存：自动上传必须先启用通道，关闭通道会一并停掉自动上传。
 pub fn set_cloud_settings_at(
     config_path: &std::path::Path,
     secrets_path: &std::path::Path,
@@ -172,6 +177,7 @@ pub fn set_cloud_settings_at(
     username: String,
     password: Option<String>,
     remote_dir: String,
+    enabled: bool,
     auto_upload: bool,
 ) -> Result<(AppSettings, Secrets), AppError> {
     let mut current = settings::load_from(config_path)?;
@@ -179,11 +185,13 @@ pub fn set_cloud_settings_at(
     let base_url = webdav::normalize_base_url(&base_url)?;
     let username = username.trim().to_string();
     let remote_dir = webdav::validate_remote_dir(&remote_dir)?;
+    let auto_upload = enabled && auto_upload;
 
     if base_url.is_empty() {
         current.cloud.base_url.clear();
         current.cloud.username.clear();
         current.cloud.remote_dir = remote_dir;
+        current.cloud.enabled = false;
         current.cloud.auto_upload = false;
         secrets.remove(&cloud_secret_ref());
     } else {
@@ -204,11 +212,12 @@ pub fn set_cloud_settings_at(
         current.cloud.base_url = base_url;
         current.cloud.username = username;
         current.cloud.remote_dir = remote_dir;
+        current.cloud.enabled = enabled;
         current.cloud.auto_upload = auto_upload;
         secrets.insert(&cloud_secret_ref(), &next_password);
     }
-    if current.cloud.auto_upload {
-        // 远端备份只能选一种：开启 WebDAV 自动上传时停用 Git 自动同步。
+    if current.cloud.enabled {
+        // 远端备份只能选一种：启用 WebDAV 通道时停用 Git 自动同步。
         current.backup.git.enabled = false;
     }
 
@@ -308,7 +317,8 @@ pub fn set_backup_settings_at(
     let mut current = settings::load_from(config_path)?;
     current.backup = backup;
     if current.backup.git.enabled {
-        // 远端备份只能选一种：开启 Git 自动同步时停用 WebDAV 自动上传。
+        // 远端备份只能选一种：开启 Git 自动同步时停用整条 WebDAV 通道。
+        current.cloud.enabled = false;
         current.cloud.auto_upload = false;
     }
     settings::save_to(config_path, &current)?;
@@ -477,8 +487,10 @@ mod tests {
             Some("pw".into()),
             "ccswitchx".into(),
             true,
+            true,
         )
         .unwrap();
+        assert!(with_cloud.cloud.enabled);
         assert!(with_cloud.cloud.auto_upload);
 
         let with_git = set_backup_settings_at(
@@ -495,8 +507,8 @@ mod tests {
         .unwrap();
         assert!(with_git.backup.git.enabled);
         assert!(
-            !with_git.cloud.auto_upload,
-            "启用 Git 自动同步时应停用 WebDAV 自动上传"
+            !with_git.cloud.enabled && !with_git.cloud.auto_upload,
+            "启用 Git 自动同步时应停用整条 WebDAV 通道"
         );
 
         let (with_cloud_again, _) = set_cloud_settings_at(
@@ -507,13 +519,50 @@ mod tests {
             None,
             "ccswitchx".into(),
             true,
+            true,
         )
         .unwrap();
         assert!(with_cloud_again.cloud.auto_upload);
         assert!(
             !with_cloud_again.backup.git.enabled,
-            "启用 WebDAV 自动上传时应停用 Git 自动同步"
+            "启用 WebDAV 通道时应停用 Git 自动同步"
         );
+    }
+
+    #[test]
+    fn cloud_auto_upload_requires_enabled_channel() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let secrets_path = dir.path().join("secrets.local.json");
+
+        let (saved, _) = set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            "https://dav.example.com/dav".into(),
+            "me".into(),
+            Some("pw".into()),
+            "ccswitchx".into(),
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(!saved.cloud.enabled, "通道未启用时不能打开自动上传");
+        assert!(!saved.cloud.auto_upload);
+
+        // 只启用通道、不开自动上传 = 手动上传模式。
+        let (manual, _) = set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            "https://dav.example.com/dav".into(),
+            "me".into(),
+            None,
+            "ccswitchx".into(),
+            true,
+            false,
+        )
+        .unwrap();
+        assert!(manual.cloud.enabled);
+        assert!(!manual.cloud.auto_upload);
     }
 
     #[test]
@@ -845,8 +894,10 @@ mod tests {
             Some("app-password".into()),
             "ccswitchx".into(),
             true,
+            true,
         )
         .unwrap();
+        assert!(saved.cloud.enabled);
         assert!(saved.cloud.auto_upload);
         assert_eq!(secrets.get(&cloud_secret_ref()), Some("app-password"));
         assert!(!std::fs::read_to_string(&config)
@@ -861,10 +912,12 @@ mod tests {
             "me".into(),
             None,
             "ccswitchx".into(),
+            true,
             false,
         )
         .unwrap();
         assert_eq!(kept_secrets.get(&cloud_secret_ref()), Some("app-password"));
+        assert!(kept.cloud.enabled);
         assert!(!kept.cloud.auto_upload);
 
         let cleared = set_cloud_settings_at(
@@ -875,9 +928,11 @@ mod tests {
             None,
             "ccswitchx".into(),
             true,
+            true,
         )
         .unwrap();
         assert!(cleared.1.get(&cloud_secret_ref()).is_none());
+        assert!(!cleared.0.cloud.enabled);
         assert!(!cleared.0.cloud.auto_upload);
 
         assert!(set_cloud_settings_at(
@@ -887,6 +942,7 @@ mod tests {
             "me".into(),
             Some(String::new()),
             "ccswitchx".into(),
+            false,
             false,
         )
         .is_err());

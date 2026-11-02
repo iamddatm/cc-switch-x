@@ -60,6 +60,9 @@ import type {
   SessionSearchHit,
   SessionSummary,
   Theme,
+  UnmanagedImportInput,
+  UnmanagedImportReport,
+  UnmanagedSkillReport,
   UpdateInfo,
 } from "../types";
 
@@ -177,6 +180,11 @@ export const api = {
     invoke<SkillInstallOutcome>("install_discovered_skill", { input, policy }),
   searchSkillsSh: (query: string, limit: number, offset: number) =>
     invoke<SkillsShSearchResult>("search_skills_sh", { query, limit, offset }),
+  /** 扫描各 agent 的 skills 落点，列出不是我们落的 Skill（只读）。 */
+  scanUnmanagedSkills: () => invoke<UnmanagedSkillReport>("scan_unmanaged_skills"),
+  /** 收进真源，并按选择把盘上那份外来目录接管成指向真源的部署。 */
+  importUnmanagedSkills: (inputs: UnmanagedImportInput[], policy: ConflictPolicy) =>
+    invoke<UnmanagedImportReport>("import_unmanaged_skills", { inputs, policy }),
   listSkillsShTrending: (page: number) =>
     invoke<SkillsShTrendingResult>("list_skills_sh_trending", { page }),
   checkAppUpdate: () => invoke<UpdateInfo | null>("check_app_update"),

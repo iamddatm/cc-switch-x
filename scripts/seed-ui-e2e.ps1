@@ -41,6 +41,7 @@ New-Item -ItemType Directory -Path (Join-Path $store "assets/rules") -Force | Ou
 New-Item -ItemType Directory -Path (Join-Path $store "assets/subagents") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $store "assets/hooks") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $store "assets/mcp") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $store "assets/skills") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $store "local/agents") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $store "state/applied") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $sandbox ".qoder-cn/rules") -Force | Out-Null
@@ -111,6 +112,31 @@ Set-Content -Encoding utf8NoBOM -Path (Join-Path $store "state/applied/qoder-cn.
 $userHook = '{"model":"haiku","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo user-own"}]}]}}'
 Set-Content -Encoding utf8NoBOM -Path (Join-Path $sandbox ".qoder-cn/settings.json") -Value $userHook
 Set-Content -Encoding utf8NoBOM -Path (Join-Path $sandbox ".claude/settings.json") -Value $userHook
+
+# 用户级 Skills 的「未纳管发现 → 导入接管」素材：
+# - managed-skill：真源里已有，并用 junction 部署到 Claude 的 skills 落点 —— 验 Windows junction 不会被当成外来内容；
+# - hand-made：用户在 Claude 目录里手工放的一份，真源里没有 —— 这才是要被发现并接管的。
+New-Item -ItemType Directory -Path (Join-Path $store "assets/skills/managed-skill") -Force | Out-Null
+Set-Content -Encoding utf8NoBOM -Path (Join-Path $store "assets/skills/managed-skill/SKILL.md") -Value @'
+---
+name: managed-skill
+description: 已由中央库管理
+---
+
+真源正文。
+'@
+New-Item -ItemType Directory -Path (Join-Path $sandbox ".claude/skills/hand-made") -Force | Out-Null
+Set-Content -Encoding utf8NoBOM -Path (Join-Path $sandbox ".claude/skills/hand-made/SKILL.md") -Value @'
+---
+name: 手工装的
+description: 用户自己放在 Claude 目录里的 skill
+---
+
+外来正文，导入前要原样保留在备份里。
+'@
+New-Item -ItemType Junction `
+  -Path (Join-Path $sandbox ".claude/skills/managed-skill") `
+  -Target (Join-Path $store "assets/skills/managed-skill") | Out-Null
 
 # 临时项目仓库：只给 Claude 写了一份 skill，正是「忘了同步到 Qoder」的真实痛点。
 # 不建 .ccswitchx/，让应用自己去登记 v2 台账；此时 .claude/skills/probe 属于「未跟踪」，

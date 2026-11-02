@@ -1,5 +1,6 @@
 pub mod adapters;
 pub mod auto_launch;
+pub mod change_signal;
 pub mod commands;
 pub mod domain;
 pub mod error;
@@ -65,6 +66,7 @@ pub fn run() {
                 services::git_sync::spawn_worker(app.handle().clone(), rx);
             }
             services::backup::spawn_periodic(app.handle().clone());
+            services::backup::spawn_change_worker(app.handle().clone());
             let Ok(mut index) = app_state.index.lock() else {
                 eprintln!("跳过漂移检查：index 锁已被 panic 污染，请用面板上的「重新检查」");
                 return Ok(());
@@ -141,8 +143,10 @@ pub fn run() {
             commands::skills::get_skill_repos,
             commands::skills::install_discovered_skill,
             commands::skills::install_skill,
+            commands::skills::import_unmanaged_skills,
             commands::skills::list_skills_sh_trending,
             commands::skills::preview_skill_source,
+            commands::skills::scan_unmanaged_skills,
             commands::skills::search_skills_sh,
             commands::skills::set_skill_repos,
             commands::skills::set_skills_enabled,

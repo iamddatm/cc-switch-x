@@ -5,7 +5,7 @@ import { SkillsPanel } from "../panels/SkillsPanel";
 import { api } from "../lib/api";
 import { resetSkillUpdateCheck } from "../hooks/useSkillUpdateCheck";
 import { agentStatus } from "../test/agents";
-import type { SkillCheckReport } from "../types";
+import type { SkillCheckReport, UnmanagedSkillReport } from "../types";
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -27,6 +27,8 @@ vi.mock("../lib/api", () => ({
     installDiscoveredSkill: vi.fn(),
     searchSkillsSh: vi.fn(),
     listSkillsShTrending: vi.fn(),
+    scanUnmanagedSkills: vi.fn(),
+    importUnmanagedSkills: vi.fn(),
   },
 }));
 
@@ -135,6 +137,14 @@ beforeEach(() => {
     ],
     hasMore: false,
   });
+  vi.mocked(api.scanUnmanagedSkills).mockResolvedValue({
+    skills: [],
+    conflicts: [],
+    skipped: [],
+    roots: [],
+    warnings: [],
+  });
+  vi.mocked(api.importUnmanagedSkills).mockResolvedValue({ outcomes: [] });
 });
 
 test("shows the link kind the backend actually used", async () => {
@@ -659,4 +669,204 @@ test("deleting one selected skill keeps the others selected", async () => {
 
   // 只把删掉的那条从勾选里摘出去，剩下的还得能继续批量操作。
   expect(screen.getByText("已选 1 个")).toBeInTheDocument();
+});
+
+// ── 未纳管 Skill：发现 → 查看 → 导入接管 ──────────────────────────
+
+function unmanagedFixture(overrides: Partial<UnmanagedSkillReport> = {}): UnmanagedSkillReport {
+  return {
+    skills: [
+      {
+        directory: "hand-made",
+        suggestedId: "hand-made",
+        name: "手工装的",
+        description: "自己放的",
+        path: "C:/Users/me/.claude/skills/hand-made",
+        foundIn: [
+          {
+            sourceId: "claude",
+            label: "Claude Code",
+            path: "C:/Users/me/.claude/skills/hand-made",
+            linkTarget: null,
+            takeoverPossible: true,
+          },
+          {
+            sourceId: "gemini",
+            label: "Gemini CLI",
+            path: "C:/Users/me/.gemini/skills/hand-made",
+            linkTarget: null,
+            takeoverPossible: false,
+          },
+        ],
+        idRenamed: false,
+      },
+    ],
+    conflicts: [],
+    skipped: [],
+    roots: [
+      {
+        sourceId: "claude",
+        label: "Claude Code",
+        path: "C:/Users/me/.claude/skills",
+        exists: true,
+        sandboxed: false,
+      },
+    ],
+    warnings: [],
+    ...overrides,
+  };
+}
+
+test("the unmanaged tab counts the scan result and banners the installed view", async () => {
+  vi.mocked(api.scanUnmanagedSkills).mockResolvedValue(unmanagedFixture());
+  render(<SkillsPanel />);
+
+  const tab = await screen.findByRole("tab", { name: /未纳管/ });
+  expect(tab).toHaveTextContent("1");
+  expect(screen.getByText(/发现 1 个未纳管 Skill/)).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "知道了" }));
+  expect(screen.queryByText(/发现 1 个未纳管 Skill/)).not.toBeInTheDocument();
+});
+
+test("the unmanaged banner stays out of an empty library", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([]);
+  vi.mocked(api.scanUnmanagedSkills).mockResolvedValue(unmanagedFixture());
+  render(<SkillsPanel />);
+
+  expect(await screen.findByRole("tab", { name: /未纳管/ })).toBeInTheDocument();
+  expect(screen.queryByText(/发现 1 个未纳管 Skill/)).not.toBeInTheDocument();
+});
+
+test("unmanaged rows show where each copy was found and which spots cannot be taken over", async () => {
+  vi.mocked(api.scanUnmanagedSkills).mockResolvedValue(unmanagedFixture());
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("tab", { name: /未纳管/ }));
+
+  const row = (await screen.findByText("手工装的")).closest("li");
+  expect(row).not.toBeNull();
+  // 两个发现位置各有徽标，title 指到具体路径。
+  expect(within(row as HTMLElement).getByText("Claude Code")).toBeInTheDocument();
+  // 未实测的落点照样列出来，但标成「只收进真源」。
+  expect(within(row as HTMLElement).getByTitle("落点未实测，只收进真源")).toBeInTheDocument();
+});
+
+test("importing takes over only the locations the user checked", async () => {
+  vi.mocked(api.scanUnmanagedSkills).mockResolvedValue(unmanagedFixture());
+  vi.mocked(api.importUnmanagedSkills).mockResolvedValue({
+    outcomes: [
+      {
+        directory: "hand-made",
+        id: "hand-made",
+        status: "installed",
+        takenOver: [
+          {
+            sourceId: "claude",
+            label: "Claude Code",
+            status: "linked",
+            detail: "已用指向真源的部署替换原目录；启用方式：junction",
+            backupPath: "store/backups/skills/1_adopt_claude_hand-made",
+          },
+        ],
+        warnings: [],
+      },
+    ],
+  });
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("tab", { name: /未纳管/ }));
+
+  fireEvent.click(await screen.findByRole("checkbox", { name: "选择 手工装的" }));
+  fireEvent.click(screen.getByRole("button", { name: "导入所选并接管" }));
+
+  const dialog = await screen.findByRole("alertdialog");
+  // 默认勾上已实测的落点；未实测的 Gemini 落点根本不该出现在接管列表里。
+  expect(within(dialog).getByRole("checkbox", { name: "接管 Claude Code" })).toBeChecked();
+  expect(
+    within(dialog).queryByRole("checkbox", { name: "接管 Gemini CLI" }),
+  ).not.toBeInTheDocument();
+
+  fireEvent.click(within(dialog).getByRole("button", { name: "导入并接管" }));
+  await waitFor(() =>
+    expect(api.importUnmanagedSkills).toHaveBeenCalledWith(
+      [{ directory: "hand-made", takeOver: ["claude"] }],
+      "skip",
+    ),
+  );
+  expect(await screen.findByText(/启用方式：junction/)).toBeInTheDocument();
+  // 导入之后要重扫，这份内容已经不再是未纳管。
+  await waitFor(() => expect(api.scanUnmanagedSkills).toHaveBeenCalledTimes(2));
+});
+
+test("a failed takeover is shown verbatim instead of a success line", async () => {
+  vi.mocked(api.scanUnmanagedSkills).mockResolvedValue(unmanagedFixture());
+  vi.mocked(api.importUnmanagedSkills).mockResolvedValue({
+    outcomes: [
+      {
+        directory: "hand-made",
+        id: "hand-made",
+        status: "failed",
+        takenOver: [
+          {
+            sourceId: "claude",
+            label: "Claude Code",
+            status: "refused",
+            detail: "盘上这份与真源内容不一致，已保留原目录",
+          },
+        ],
+        warnings: [],
+        error: "写入真源失败：磁盘满",
+      },
+    ],
+  });
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("tab", { name: /未纳管/ }));
+
+  fireEvent.click(await screen.findByRole("button", { name: "导入并接管" }));
+  const dialog = await screen.findByRole("alertdialog");
+  fireEvent.click(within(dialog).getByRole("button", { name: "导入并接管" }));
+
+  expect(await screen.findByText(/写入真源失败：磁盘满/)).toBeInTheDocument();
+  expect(screen.getByText(/已保留原目录/)).toBeInTheDocument();
+  expect(screen.getByText(/^hand-made：失败/)).toBeInTheDocument();
+});
+
+test("conflicts only offer saving under a new id and never take over", async () => {
+  const report = unmanagedFixture();
+  vi.mocked(api.scanUnmanagedSkills).mockResolvedValue({
+    ...report,
+    skills: [],
+    conflicts: report.skills,
+  });
+  vi.mocked(api.importUnmanagedSkills).mockResolvedValue({
+    outcomes: [
+      {
+        directory: "hand-made",
+        id: "hand-made-2",
+        status: "installed",
+        takenOver: [],
+        warnings: [],
+      },
+    ],
+  });
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("tab", { name: /未纳管/ }));
+
+  fireEvent.click(await screen.findByRole("button", { name: "另存为新 ID" }));
+  await waitFor(() =>
+    expect(api.importUnmanagedSkills).toHaveBeenCalledWith(
+      [{ directory: "hand-made", takeOver: [] }],
+      "keepBoth",
+    ),
+  );
+});
+
+test("a scan error is reported in the unmanaged view rather than shown as empty", async () => {
+  vi.mocked(api.scanUnmanagedSkills).mockRejectedValue(new Error("读不了目录"));
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("tab", { name: /未纳管/ }));
+
+  expect(await screen.findByText(/读不了目录/)).toBeInTheDocument();
+  // 扫描失败是「不知道」，不能报成「没有未纳管」。
+  expect(screen.getByText("还没有扫描结果")).toBeInTheDocument();
+  expect(screen.queryByText(/没有未纳管的 Skill/)).not.toBeInTheDocument();
 });

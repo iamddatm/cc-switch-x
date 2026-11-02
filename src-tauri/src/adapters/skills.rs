@@ -47,12 +47,28 @@ pub enum RefreshOutcome {
 /// 复制落地时留在目录里的归属标记：只有它才允许我们整目录删掉。
 const MARKER: &str = ".ccswitchx";
 
-fn skills_dir(
+pub(crate) fn skills_dir(
     agent: &AgentDescriptor,
     home: &Path,
     base_override: Option<&Path>,
 ) -> Result<PathBuf, AppError> {
     Ok(expand_root(&agent.paths.skills_dir, base_override, home))
+}
+
+/// 目录本身是不是链接（symlink 或 Windows junction）。
+///
+/// Windows 上 `DirEntry::file_type()` 认不出 junction，必须 `symlink_metadata`
+/// 加 `read_link` 双保险；项目级扫描也用这一份，别再复制第二份判定。
+pub(crate) fn is_link(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    metadata.file_type().is_symlink() || std::fs::read_link(path).is_ok()
+}
+
+/// 链接指向的目标（原样返回，未规范化）；普通目录读不到链接就是 None。junction 同样有效。
+pub(crate) fn link_target(path: &Path) -> Option<PathBuf> {
+    std::fs::read_link(path).ok()
 }
 
 pub fn deploy(
@@ -83,11 +99,10 @@ pub fn deploy(
         std::fs::create_dir_all(parent)?;
     }
 
-    for kind in [LinkKind::Symlink, LinkKind::Junction] {
-        if try_link(kind, &source, &target) {
-            save_link_kind(store, &agent.id, kind)?;
-            return Ok(Deployed::Linked(kind));
-        }
+    // 链接能力按符号链接 → junction 依次实测；都不行才降级成 copy。
+    if let Ok(kind) = link_dir(&source, &target) {
+        save_link_kind(store, &agent.id, kind)?;
+        return Ok(Deployed::Linked(kind));
     }
     copy_dir(&source, &target)?;
     write_marker(&target, &source)?;
@@ -160,18 +175,78 @@ fn marker_matches(target: &Path, source: &Path) -> bool {
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
-    let normalize =
-        |path: &Path| -> PathBuf { path.canonicalize().unwrap_or_else(|_| path.to_path_buf()) };
-    let (left, right) = (normalize(left), normalize(right));
-    let fold = |value: &Path| -> String {
-        let text = value.to_string_lossy().replace('\\', "/");
-        if cfg!(windows) {
-            text.to_lowercase()
+    fold_path(normalize_path(left)) == fold_path(normalize_path(right))
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// 统一成可比较的字符串形态：分隔符归一，Windows 再忽略大小写。
+fn fold_path(path: PathBuf) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        text.to_lowercase()
+    } else {
+        text
+    }
+}
+
+fn is_under(root: &Path, path: &Path) -> bool {
+    let root = fold_path(normalize_path(root));
+    let path = fold_path(normalize_path(path));
+    path == root || path.starts_with(&format!("{root}/"))
+}
+
+/// 一份目录相对中央库真源的归属。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ownership {
+    /// 链接指向 `<store>/assets/skills/` 底下。改名后留下的旧链接也算我们的。
+    OursLink,
+    /// 复制落地，`.ccswitchx` 指向一个仍然存在的真源目录。
+    OursCopy,
+    /// 存在，但不是我们落的：手工放的、别的工具装的、或指向别处的链接。
+    Foreign,
+    /// 不存在。
+    Absent,
+}
+
+/// 「这一份是不是我们管理的内容」——扫描与接管用的宽判定。
+///
+/// 与 `deploy`/`remove`/`refresh` 里的 `links_to`/`marker_matches` 有意不同：
+/// 那两个问的是「这个 ID 的目标是否正好指向它的真源」，必须精确，否则改名后的
+/// 旧链接会被当成已完成；这里问的是「这块地盘上的内容归不归我们管」，
+/// 只要落在真源目录下就算，免得把自家副本当成外来内容去接管。
+pub(crate) fn ownership(store: &Store, dir: &Path) -> Ownership {
+    if dir.symlink_metadata().is_err() {
+        return Ownership::Absent;
+    }
+    let skills_root = store.asset_dir(AssetType::Skill);
+    if let Some(target) = link_target(dir) {
+        return if is_under(&skills_root, &target) {
+            Ownership::OursLink
         } else {
-            text
-        }
+            Ownership::Foreign
+        };
+    }
+    let Ok(text) = std::fs::read_to_string(dir.join(MARKER)) else {
+        return Ownership::Foreign;
     };
-    fold(&left) == fold(&right)
+    let marked = Path::new(text.trim());
+    if is_under(&skills_root, marked) && marked.join("SKILL.md").is_file() {
+        return Ownership::OursCopy;
+    }
+    Ownership::Foreign
+}
+
+/// 清除部署标记。外来目录里的 `.ccswitchx` 记的是**别人那次部署**的绝对路径，
+/// 跟着收进真源既会让新副本自称是他人的部署，也会污染目录指纹造成假 diff。
+pub(crate) fn strip_marker(dir: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(dir.join(MARKER)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn write_marker(target: &Path, source: &Path) -> Result<(), AppError> {
@@ -187,6 +262,20 @@ fn try_link(kind: LinkKind, source: &Path, target: &Path) -> bool {
     }
 }
 
+/// 把 `target` 链到 `source`：先试符号链接，再试 junction，回报实测用到的方式。
+/// `deploy` 与「接管失败后还原原链接」共用这一份链接能力口径。
+pub(crate) fn link_dir(source: &Path, target: &Path) -> Result<LinkKind, AppError> {
+    for kind in [LinkKind::Symlink, LinkKind::Junction] {
+        if try_link(kind, source, target) {
+            return Ok(kind);
+        }
+    }
+    Err(AppError::InvalidInput(format!(
+        "本机既建不了符号链接也建不了 junction：{}",
+        target.display()
+    )))
+}
+
 #[cfg(windows)]
 fn symlink_dir(source: &Path, target: &Path) -> bool {
     std::os::windows::fs::symlink_dir(source, target).is_ok()
@@ -200,13 +289,21 @@ fn symlink_dir(source: &Path, target: &Path) -> bool {
 /// junction 没有 std 支持，只能借 `mklink /J`；报告里注明来源是命令。
 #[cfg(windows)]
 fn junction(source: &Path, target: &Path) -> bool {
-    let link = target.to_string_lossy().to_string();
-    let origin = source.to_string_lossy().to_string();
+    let link = for_cmd(target);
+    let origin = for_cmd(source);
     hidden_command("cmd")
         .args(["/C", "mklink", "/J", &link, &origin])
         .output()
         .map(|output| output.status.success() && target.symlink_metadata().is_ok())
         .unwrap_or(false)
+}
+
+/// `expand_root` 会保留声明里的 `/`（Windows API 能吃），但 `cmd` 的 `mklink`
+/// 把混用分隔符的路径判成「无效参数」，junction 就会永远悄悄降级成 copy。
+/// 交给 cmd 前一律换成反斜杠。
+#[cfg(windows)]
+fn for_cmd(path: &Path) -> String {
+    path.to_string_lossy().replace('/', "\\")
 }
 
 #[cfg(not(windows))]
@@ -215,7 +312,8 @@ fn junction(_source: &Path, _target: &Path) -> bool {
 }
 
 /// 删链接：Windows 上 symlink 与 junction 都可能出现 `remove_dir` 失败，退回 `remove_file`。
-fn remove_link(target: &Path) -> Result<(), AppError> {
+/// 只能用于链接本身 —— 对 junction 递归 `remove_dir_all` 会一路删进链接指向的真身。
+pub(crate) fn remove_link(target: &Path) -> Result<(), AppError> {
     match std::fs::remove_dir(target) {
         Ok(()) => Ok(()),
         Err(first) => std::fs::remove_file(target)
@@ -409,6 +507,30 @@ mod tests {
             RefreshOutcome::Absent
         );
         assert!(!target.exists());
+    }
+
+    /// `expand_root` 会保留声明里的 `/`。Windows API 能吃这种混用分隔符的路径，
+    /// 但 `cmd` 的 `mklink` 判它「无效参数」—— 只有符号链接不可用时才走 junction，
+    /// 那条路不能被分隔符悄悄打死，否则这台机器永远只能 copy 部署。
+    #[cfg(windows)]
+    #[test]
+    fn junction_accepts_the_mixed_separators_expand_root_leaves_behind() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real").join("skill");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("box").join("skills").join("skill");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        let mixed = PathBuf::from(link.to_string_lossy().replace('\\', "/"));
+        assert!(mixed.to_string_lossy().contains('/'), "样本必须是混用分隔符");
+
+        std::fs::write(real.join("SKILL.md"), "真身\n").unwrap();
+        assert!(junction(&real, &mixed), "混用分隔符也要能建 junction");
+        assert!(is_link(&mixed));
+        assert_eq!(
+            std::fs::read_to_string(mixed.join("SKILL.md")).unwrap(),
+            "真身\n",
+            "建好的 junction 要能读到真身内容"
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ import { SkillFormSheet } from "../components/skills/SkillFormSheet";
 import { SkillInstallSheet } from "../components/skills/SkillInstallSheet";
 import { SkillSourceBadge } from "../components/skills/SkillSourceBadge";
 import { SkillRepoFilter } from "../components/skills/SkillRepoFilter";
-import { SkillViewTabs } from "../components/skills/SkillViewTabs";
+import { SkillViewTabs, type SkillView } from "../components/skills/SkillViewTabs";
 import { useSkillFilters } from "../components/skills/useSkillFilters";
 import { projectRow, projectScope } from "../components/skills/skillScope";
 import { checkFailureLines } from "../components/skills/skillFilters";
@@ -188,7 +188,8 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
   const [autoSync, setAutoSync] = useState(project.autoSync);
   const autoSyncedFor = useRef<string | null>(null);
 
-  const [view, setView] = useState<"installed" | "discover">("installed");
+  // 项目级没有「未纳管」页签（那里的内容来自用户级落点扫描），但视图类型与标签组件共用一份。
+  const [view, setView] = useState<SkillView>("installed");
   const [discoverMounted, setDiscoverMounted] = useState(false);
   const [dirFilter, setDirFilter] = useState("all");
   const [stateFilter, setStateFilter] = useState<"all" | ProjectDirState>("all");

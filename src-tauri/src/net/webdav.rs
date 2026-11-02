@@ -6,10 +6,13 @@
 use crate::error::AppError;
 use crate::net::ProxyConfig;
 use reqwest::blocking::{Body, Client};
-use reqwest::header::{HeaderMap, CONTENT_LENGTH, CONTENT_TYPE, ETAG, LAST_MODIFIED};
+use reqwest::header::{
+    HeaderMap, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, LAST_MODIFIED, RANGE,
+};
 use reqwest::{Method, StatusCode, Url};
+use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -22,6 +25,25 @@ pub const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_REMOTE_DIR: &str = "ccswitchx";
 /// PROPFIND 应答只用来取几个属性，正常几百字节；超长说明响应异常，截断后按解析失败处理。
 const MAX_PROPINFO_BYTES: u64 = 64 * 1024;
+/// 控制类请求（PROPFIND / HEAD / MKCOL / MOVE / DELETE / manifest）的上限。
+/// 云备份任务是串行的，一个卡死的控制请求会把界面和自动上传一起拖住。
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+/// 传输类请求的保底预算：300 秒起步，再按 16 KiB/s 的保底带宽随包大小增长。
+/// 固定总时长会在慢网下截断健康的整包下载（换机恢复大包时最容易撞上）。
+const TRANSFER_BASE_TIMEOUT_SECS: u64 = 300;
+const TRANSFER_MIN_BYTES_PER_SEC: u64 = 16 * 1024;
+/// 同一次下载内允许的续传重试次数；用尽后把最后一次错误报给用户。
+const MAX_DOWNLOAD_ATTEMPTS: usize = 3;
+/// 进度回调的最小跨度，避免每读一小块就跨线程发一次事件。
+const PROGRESS_STEP_BYTES: u64 = 256 * 1024;
+const READ_CHUNK_BYTES: usize = 64 * 1024;
+
+/// 传输类请求的整体超时预算。
+fn transfer_timeout(bytes: u64) -> Duration {
+    Duration::from_secs(
+        TRANSFER_BASE_TIMEOUT_SECS.saturating_add(bytes / TRANSFER_MIN_BYTES_PER_SEC),
+    )
+}
 /// 只问 PROPFIND 要用到的属性，避免服务器回整份死属性集。
 const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:"><d:prop><d:getcontentlength/><d:getlastmodified/><d:getetag/></d:prop></d:propfind>"#;
@@ -53,6 +75,14 @@ impl RemoteObject {
     }
 }
 
+/// 下载结果：远端元数据 + 与写入字节同步算出的整包 sha256。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadOutcome {
+    pub remote: RemoteObject,
+    /// 下载内容的 sha256（小写十六进制）。
+    pub sha256: String,
+}
+
 pub struct WebDavClient {
     client: Client,
     config: WebDavConfig,
@@ -74,10 +104,11 @@ impl WebDavClient {
             ..config
         };
 
+        // 默认按控制类超时兜底；整包传输在发起处用 `transfer_timeout` 覆盖成更大的预算。
         let mut builder = Client::builder()
             .user_agent(concat!("cc-switch-x/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(30))
-            .timeout(Duration::from_secs(600))
+            .connect_timeout(CONTROL_TIMEOUT)
+            .timeout(CONTROL_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none());
         if let Some(proxy) = proxy {
             builder = proxy.apply_blocking(builder)?;
@@ -243,50 +274,168 @@ impl WebDavClient {
         Ok(Some(bytes))
     }
 
-    pub fn get_to_file(&self, dest: &Path, max_bytes: u64) -> Result<RemoteObject, AppError> {
-        let mut response = self
-            .request(Method::GET, self.object_url()?)
-            .send()
-            .map_err(transport_error("GET"))?;
-        let status = response.status();
-        match status.as_u16() {
-            200 => {}
-            404 => {
-                return Err(AppError::Cloud(
-                    "云端还没有备份，请先上传".into(),
-                ))
-            }
-            401 | 403 => return Err(auth_error(status)),
-            _ => return Err(status_error("GET", status)),
-        }
-
-        let headers = response.headers().clone();
-        if let Some(length) = header_u64(&headers, CONTENT_LENGTH) {
-            if length > max_bytes {
-                return Err(oversize_error(max_bytes));
-            }
-        }
+    /// 下载备份包到 `dest`。
+    ///
+    /// 与普通 GET 的差别：
+    /// - 整体超时按包大小缩放（见 [`transfer_timeout`]），慢网不会被固定预算截断；
+    /// - 连接中途断开时用 `Range` 续传，最多 [`MAX_DOWNLOAD_ATTEMPTS`] 次；
+    /// - 边写边算整包 sha256，调用方不必再读一遍文件；
+    /// - `on_progress(已收到字节, 总字节)`，总字节未知时传 0。
+    pub fn get_to_file(
+        &self,
+        dest: &Path,
+        max_bytes: u64,
+        on_progress: Option<&dyn Fn(u64, u64)>,
+    ) -> Result<DownloadOutcome, AppError> {
+        let url = self.object_url()?;
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut file = fs::File::create(dest)?;
-        let mut limited = response.by_ref().take(max_bytes + 1);
-        let result = (|| -> Result<u64, AppError> {
-            let copied = std::io::copy(&mut limited, &mut file)?;
-            if copied > max_bytes {
-                return Err(oversize_error(max_bytes));
+
+        let mut written = 0u64;
+        let mut total: Option<u64> = None;
+        let mut hasher = Sha256::new();
+        let mut headers = HeaderMap::new();
+        let mut last_error: Option<AppError> = None;
+        let mut completed = false;
+
+        for _ in 1..=MAX_DOWNLOAD_ATTEMPTS {
+            let mut request = self
+                .request(Method::GET, url.clone())
+                .timeout(transfer_timeout(total.unwrap_or(max_bytes)));
+            if written > 0 {
+                request = request.header(RANGE, format!("bytes={written}-"));
+            }
+            let mut response = match request.send() {
+                Ok(response) => response,
+                Err(error) => {
+                    last_error = Some(transport_error("GET")(error));
+                    continue;
+                }
+            };
+
+            let status = response.status();
+            match status.as_u16() {
+                200 => {
+                    // 服务器忽略 Range 时只能从头来，已写的进度与哈希一并作废。
+                    if written > 0 {
+                        written = 0;
+                        hasher = Sha256::new();
+                    }
+                    let declared = header_u64(response.headers(), CONTENT_LENGTH);
+                    if declared.is_some_and(|size| size > max_bytes) {
+                        return Err(oversize_error(max_bytes));
+                    }
+                    total = declared.or(total);
+                }
+                206 => {
+                    let Some((start, size)) = content_range(response.headers()) else {
+                        return Err(AppError::Cloud("云端返回的分段应答无法解析".into()));
+                    };
+                    if start != written {
+                        // 服务端给的起点和本地半成品对不上，丢弃重来。
+                        written = 0;
+                        hasher = Sha256::new();
+                        total = None;
+                        continue;
+                    }
+                    if size > max_bytes {
+                        return Err(oversize_error(max_bytes));
+                    }
+                    total = Some(size);
+                }
+                404 => return Err(AppError::Cloud("云端还没有备份，请先上传".into())),
+                416 => {
+                    // 两次尝试之间远端内容变了（偏移越界）：丢弃半成品重下。
+                    written = 0;
+                    hasher = Sha256::new();
+                    total = None;
+                    continue;
+                }
+                401 | 403 => return Err(auth_error(status)),
+                _ => return Err(status_error("GET", status)),
+            }
+            headers = response.headers().clone();
+
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(dest)?;
+            file.set_len(written)?;
+            file.seek(SeekFrom::Start(written))?;
+            let mut buffer = vec![0u8; READ_CHUNK_BYTES];
+            let mut reported = written;
+            let mut broken: Option<AppError> = None;
+            {
+                let mut limited = response
+                    .by_ref()
+                    .take(max_bytes.saturating_sub(written).saturating_add(1));
+                loop {
+                    match limited.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            file.write_all(&buffer[..read])?;
+                            hasher.update(&buffer[..read]);
+                            written += read as u64;
+                            if written > max_bytes {
+                                drop(limited);
+                                let _ = fs::remove_file(dest);
+                                return Err(oversize_error(max_bytes));
+                            }
+                            if let Some(callback) = on_progress {
+                                if written - reported >= PROGRESS_STEP_BYTES
+                                    || total.is_some_and(|size| written >= size)
+                                {
+                                    reported = written;
+                                    callback(written, total.unwrap_or(0));
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            broken = Some(AppError::Cloud(format!(
+                                "下载云端备份中断（已收到 {written} 字节）：{error}"
+                            )));
+                            break;
+                        }
+                    }
+                }
             }
             file.flush()?;
-            Ok(copied)
-        })();
-        match result {
-            Ok(copied) => Ok(remote_from_headers(&headers, Some(copied), true)),
-            Err(error) => {
-                drop(file);
-                let _ = fs::remove_file(dest);
-                Err(error)
+
+            if let Some(error) = broken {
+                last_error = Some(error);
+                continue;
             }
+            // 声明的总长还没下完就读到 EOF，同样按中断处理，下一轮续传。
+            if let Some(size) = total {
+                if written < size {
+                    last_error = Some(AppError::Cloud(format!(
+                        "下载云端备份中断（已收到 {written}/{size} 字节）"
+                    )));
+                    continue;
+                }
+            }
+            completed = true;
+            break;
         }
+
+        if !completed {
+            let _ = fs::remove_file(dest);
+            return Err(last_error.unwrap_or_else(|| {
+                AppError::Cloud("下载云端备份失败：多次尝试后仍未拿到完整内容".into())
+            }));
+        }
+        if let Some(callback) = on_progress {
+            callback(written, total.unwrap_or(0));
+        }
+        let mut remote = remote_from_headers(&headers, Some(written), true);
+        // 206 应答的 Content-Length 只是这一段的长度；整包大小以 Content-Range 为准。
+        remote.size_bytes = total.or(Some(written));
+        Ok(DownloadOutcome {
+            remote,
+            sha256: format!("{:x}", hasher.finalize()),
+        })
     }
 
     /// 连接测试：目录可创建 / 已存在，对象可 HEAD；404 视为成功。
@@ -373,6 +522,7 @@ impl WebDavClient {
         let file = fs::File::open(source)?;
         let response = self
             .request(Method::PUT, url)
+            .timeout(transfer_timeout(length))
             .header(CONTENT_TYPE, "application/zip")
             .header(CONTENT_LENGTH, length)
             .body(Body::sized(file, length))
@@ -463,6 +613,16 @@ fn auth_error(status: StatusCode) -> AppError {
 
 fn oversize_error(max_bytes: u64) -> AppError {
     AppError::Cloud(format!("云端备份超过下载上限（{max_bytes} 字节）"))
+}
+
+/// 解析 `Content-Range: bytes <start>-<end>/<total>`，返回（起点，整包大小）。
+fn content_range(headers: &HeaderMap) -> Option<(u64, u64)> {
+    let value = headers.get(CONTENT_RANGE)?.to_str().ok()?;
+    let rest = value.trim().strip_prefix("bytes")?.trim();
+    let (range, total) = rest.split_once('/')?;
+    let start = range.split('-').next()?.trim().parse().ok()?;
+    let total = total.trim().parse().ok()?;
+    Some((start, total))
 }
 
 fn header_u64(headers: &HeaderMap, name: reqwest::header::HeaderName) -> Option<u64> {
@@ -682,6 +842,11 @@ pub(crate) mod test_support {
         unsupported_propfind: bool,
         /// 模拟坚果云：GET 不存在的对象时返回 409 而不是 404。
         missing_get_conflict: bool,
+        /// 模拟传输中断：第一次 GET 只发这么多字节就断开，客户端应带 Range 续传。
+        drop_get_after: Option<usize>,
+        drop_get_consumed: bool,
+        /// 每次 GET 都只发这么多字节就断开，用于验证重试用尽后的清理。
+        drop_get_always: Option<usize>,
     }
 
     pub(crate) struct FakeWebDav {
@@ -711,6 +876,9 @@ pub(crate) mod test_support {
                 head_zero_length: false,
                 unsupported_propfind: false,
                 missing_get_conflict: false,
+                drop_get_after: None,
+                drop_get_consumed: false,
+                drop_get_always: None,
             }));
             let thread_state = state.clone();
             std::thread::spawn(move || {
@@ -812,6 +980,18 @@ pub(crate) mod test_support {
         pub(crate) fn set_missing_get_conflict(&self, conflict: bool) {
             self.state.lock().unwrap().missing_get_conflict = conflict;
         }
+
+        /// 第一次 GET 只发 `bytes` 个字节后断开，用于验证 Range 续传。
+        pub(crate) fn set_drop_get_after(&self, bytes: Option<usize>) {
+            let mut state = self.state.lock().unwrap();
+            state.drop_get_after = bytes;
+            state.drop_get_consumed = false;
+        }
+
+        /// 每次 GET 都只发 `bytes` 个字节后断开，用于验证重试用尽后的清理。
+        pub(crate) fn set_drop_get_always(&self, bytes: Option<usize>) {
+            self.state.lock().unwrap().drop_get_always = bytes;
+        }
     }
 
     fn normalize_path(path: &str) -> String {
@@ -899,10 +1079,56 @@ pub(crate) mod test_support {
                 state.objects.remove(&path);
                 respond(&mut stream, "204 No Content", &[], b"");
             }
-            "GET" => match state.objects.get(&path) {
+            "GET" => match state.objects.get(&path).cloned() {
                 Some(bytes) => {
-                    let headers = object_headers();
-                    respond(&mut stream, "200 OK", &headers, bytes);
+                    let range_start = headers
+                        .get("range")
+                        .and_then(|value| value.strip_prefix("bytes="))
+                        .and_then(|value| value.split('-').next())
+                        .and_then(|value| value.parse::<usize>().ok());
+                    let start = range_start.unwrap_or(0);
+                    if start > bytes.len() {
+                        respond(&mut stream, "416 Range Not Satisfiable", &[], b"");
+                        return;
+                    }
+                    let mut response_headers = object_headers();
+                    let status = if range_start.is_some() {
+                        response_headers.push((
+                            "Content-Range",
+                            format!(
+                                "bytes {}-{}/{}",
+                                start,
+                                bytes.len().saturating_sub(1),
+                                bytes.len()
+                            ),
+                        ));
+                        "206 Partial Content"
+                    } else {
+                        "200 OK"
+                    };
+                    let body = &bytes[start..];
+
+                    let dropping = state.drop_get_always.is_some()
+                        || (state.drop_get_after.is_some() && !state.drop_get_consumed);
+                    if dropping {
+                        if state.drop_get_always.is_none() {
+                            state.drop_get_consumed = true;
+                        }
+                        let limit = state
+                            .drop_get_always
+                            .or(state.drop_get_after)
+                            .unwrap_or(0);
+                        let send = limit.min(body.len());
+                        respond_truncated(
+                            &mut stream,
+                            status,
+                            body.len() as u64,
+                            &response_headers,
+                            &body[..send],
+                        );
+                        return;
+                    }
+                    respond(&mut stream, status, &response_headers, body);
                 }
                 None if state.missing_get_conflict => {
                     respond(&mut stream, "409 Conflict", &[], b"")
@@ -1032,6 +1258,26 @@ pub(crate) mod test_support {
         let _ = stream.flush();
     }
 
+    /// 按声明的完整长度发头和状态行，只写前一段正文就关连接——模拟传输中途断开。
+    fn respond_truncated(
+        stream: &mut TcpStream,
+        status: &str,
+        content_length: u64,
+        headers: &[(&str, String)],
+        body: &[u8],
+    ) {
+        let mut response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {content_length}\r\nConnection: close\r\n"
+        );
+        for (key, value) in headers {
+            response.push_str(&format!("{key}: {value}\r\n"));
+        }
+        response.push_str("\r\n");
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(body);
+        let _ = stream.flush();
+    }
+
     fn respond_head(
         stream: &mut TcpStream,
         status: &str,
@@ -1127,9 +1373,10 @@ mod tests {
         let client = client_for(&server);
         let dir = tempdir().unwrap();
         let dest = dir.path().join("download.zip");
-        let remote = client.get_to_file(&dest, MAX_CLOUD_BYTES).unwrap();
+        let downloaded = client.get_to_file(&dest, MAX_CLOUD_BYTES, None).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"zip-bytes");
-        assert_eq!(remote.size_bytes, Some(9));
+        assert_eq!(downloaded.remote.size_bytes, Some(9));
+        assert_eq!(downloaded.sha256, crate::index::sha256_hex(b"zip-bytes"));
     }
 
     #[test]
@@ -1139,8 +1386,75 @@ mod tests {
         let client = client_for(&server);
         let dir = tempdir().unwrap();
         let dest = dir.path().join("download.zip");
-        assert!(client.get_to_file(&dest, 8).is_err());
+        assert!(client.get_to_file(&dest, 8, None).is_err());
         assert!(!dest.exists());
+    }
+
+    #[test]
+    fn get_reports_progress_until_complete() {
+        let server = FakeWebDav::start("me", "pw");
+        let body = vec![7u8; PROGRESS_STEP_BYTES as usize * 2 + 10];
+        server.put_object("/dav/ccswitchx/ccswitchx-backup.zip", body.clone());
+        let client = client_for(&server);
+        let dir = tempdir().unwrap();
+        let dest = dir.path().join("download.zip");
+        let seen = std::sync::Mutex::new(Vec::new());
+        let callback = |received: u64, total: u64| {
+            seen.lock().unwrap().push((received, total));
+        };
+        let downloaded = client
+            .get_to_file(&dest, MAX_CLOUD_BYTES, Some(&callback))
+            .unwrap();
+
+        let seen = seen.into_inner().unwrap();
+        assert!(seen.len() >= 2, "至少应有中途一次与完成时一次进度");
+        assert_eq!(seen.last().copied(), Some((body.len() as u64, body.len() as u64)));
+        assert_eq!(downloaded.remote.size_bytes, Some(body.len() as u64));
+    }
+
+    #[test]
+    fn get_resumes_after_dropped_connection() {
+        let server = FakeWebDav::start("me", "pw");
+        let body: Vec<u8> = (0..4096u32).map(|value| (value % 251) as u8).collect();
+        server.put_object("/dav/ccswitchx/ccswitchx-backup.zip", body.clone());
+        server.set_drop_get_after(Some(1000));
+        let client = client_for(&server);
+        let dir = tempdir().unwrap();
+        let dest = dir.path().join("download.zip");
+
+        let downloaded = client.get_to_file(&dest, MAX_CLOUD_BYTES, None).unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), body, "续传后内容应与远端一致");
+        assert_eq!(downloaded.remote.size_bytes, Some(body.len() as u64));
+        assert_eq!(downloaded.sha256, crate::index::sha256_hex(&body));
+        assert_eq!(server.request_count("GET"), 2, "中断后应带 Range 再请求一次");
+    }
+
+    #[test]
+    fn get_discards_partial_file_when_every_attempt_breaks() {
+        let server = FakeWebDav::start("me", "pw");
+        server.put_object("/dav/ccswitchx/ccswitchx-backup.zip", vec![3u8; 4096]);
+        server.set_drop_get_always(Some(1000));
+        let client = client_for(&server);
+        let dir = tempdir().unwrap();
+        let dest = dir.path().join("download.zip");
+
+        let error = client
+            .get_to_file(&dest, MAX_CLOUD_BYTES, None)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("中断"), "{error}");
+        assert!(!dest.exists(), "重试用尽后不能留下半成品");
+        assert_eq!(server.request_count("GET"), MAX_DOWNLOAD_ATTEMPTS);
+    }
+
+    #[test]
+    fn transfer_timeout_grows_with_payload_size() {
+        assert_eq!(transfer_timeout(0), Duration::from_secs(300));
+        let large = MAX_CLOUD_BYTES;
+        assert!(transfer_timeout(large) > transfer_timeout(0));
+        assert!(transfer_timeout(large) > Duration::from_secs(3600));
     }
 
     #[test]

@@ -10,6 +10,8 @@ export interface ConfirmDialogProps {
   cancelLabel?: string;
   danger?: boolean;
   pending?: boolean;
+  /** 只锁确认按钮、仍允许取消：用于打开弹框后还要先做一次网络确认的场景。 */
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -23,6 +25,7 @@ export function ConfirmDialog({
   cancelLabel = "取消",
   danger = false,
   pending = false,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -41,6 +44,7 @@ export function ConfirmDialog({
             variant={danger ? "dangerSolid" : "primary"}
             onClick={onConfirm}
             loading={pending}
+            disabled={pending || confirmDisabled}
           >
             {confirmLabel}
           </Button>

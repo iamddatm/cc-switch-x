@@ -351,6 +351,18 @@ cc-switch 切换 provider 时可能整份改写 agent 配置文件。CC Switch X
 - 扫描范围可包含项目级目录，但只读；首版不向项目级写入。
 - 扫描只读，不移动、不删除原生文件。
 
+### 7.4 用户级 Skills：发现未纳管与导入接管
+
+对齐上游 cc-switch 的「未纳管 Skills」能力，但纳管集合按我们的文本真源算，不依赖任何库表。
+
+- **纳管集合**：`<storeRoot>/assets/skills/` 的目录名。磁盘归属沿用 `adapters/skills` 的判定：链接（symlink 或 junction）指向真源目录下，或 copy 部署留下的 `.ccswitchx` 指向仍然存在的真源条目 —— 两者都不是才算「不是我们落的」。
+- **扫描根**：注册表里每个有 `skills_dir` 的 agent（各自解析 `baseOverride`）+ 跨工具约定的 `~/.agents/skills`。只卡 `supported`（有没有这个落点），不卡 `switchable` —— 只读发现不受能力闸限制；写盘侧照旧卡。不把真源目录本身当扫描根。
+- **候选判定**：一层目录、非点开头、含 `SKILL.md`；名称/描述走 `domain::describe`。按目录名跨根合并成一条并记 `found_in`；同名而内容不同只报警告并只导入先发现的那份。不是候选的（散文件、缺 SKILL.md、目录名推不出合法 ID）逐条点名，不静默丢。
+- **冲突**：`slug(目录名)` 命中真源已有 ID 但盘上这份不是我们落的 → 单独分区，只允许「另存为新 ID」，**永不接管**（要删的那份内容并不在真源里）。
+- **导入**：复用 `skill_source::install` 的本地目录分支（备份 → 暂存 → `replace_dir` → 回读），来源记 `sourceKind=local` + `sourceUrl=原路径`；收进真源时清除自带的 `.ccswitchx`。
+- **接管**：复制不移动不够用 —— 那份外来目录留在原地就会永远启不起来。所以按用户勾选把它换成指向真源的部署：真目录必须先证明真源保存的是同一份（目录指纹一致）并整份留底到 `backups/skills/`（`<毫秒>_adopt_<agent>_<目录>`，与既有 skill 备份共用保留策略）才允许删；链接**只解链**，绝不递归删（Windows 上对 junction 递归会一路删进真身）。替换后一律交回 `skill_source::set_enabled` 落启用矩阵，启用失败就把原样还回去。
+- 未纳管信息只在扫描时现算，不写 `index.db`、不落任何文件。
+
 ## 8. 同步
 
 ### 8.1 Git

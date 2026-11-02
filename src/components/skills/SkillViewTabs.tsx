@@ -1,17 +1,26 @@
 import { cn } from "../../lib/cn";
 
 /**
- * Skills 面板的「已安装 / 发现」视图切换。用户级与项目级两处形状一致，
- * 只有已安装条数来自各自的行数据，所以标签收在这里。
+ * Skills 面板的视图。`unmanaged` 只有用户级面板有：项目级的「未跟踪」走的是
+ * 另一套台账，不在这里出现。
+ */
+export type SkillView = "installed" | "discover" | "unmanaged";
+
+/**
+ * Skills 面板的视图切换。用户级与项目级两处形状一致，
+ * 只有已安装条数与是否有「未纳管」页签来自各自的数据，所以标签收在这里。
  */
 export function SkillViewTabs({
   view,
   installedCount,
+  unmanagedCount,
   onSelect,
 }: {
-  view: "installed" | "discover";
+  view: SkillView;
   installedCount: number;
-  onSelect: (next: "installed" | "discover") => void;
+  /** 传了才渲染「未纳管」页签；数字是本次扫描的待处理条数。 */
+  unmanagedCount?: number;
+  onSelect: (next: SkillView) => void;
 }) {
   const tabClass = (active: boolean) =>
     cn(
@@ -46,6 +55,18 @@ export function SkillViewTabs({
       >
         发现
       </button>
+      {unmanagedCount !== undefined && (
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === "unmanaged"}
+          onClick={() => onSelect("unmanaged")}
+          className={tabClass(view === "unmanaged")}
+        >
+          未纳管
+          <span className="ms-1.5 text-caption text-fg-3">{unmanagedCount}</span>
+        </button>
+      )}
     </div>
   );
 }

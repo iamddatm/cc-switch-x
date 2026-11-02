@@ -1,4 +1,5 @@
-//! Skill 来源安装、上游检查/更新、卸载与批量启停命令。
+//! Skill 来源安装、上游检查/更新、卸载与批量启停命令，
+//! 外加本地未纳管 Skill 的扫描（只读）与导入接管（写盘）。
 //!
 //! 网络与整目录文件操作都放进 `spawn_blocking`；await 期间不持 index/settings 锁，
 //! 完成后单独锁 index 重建（索引始终是可丢弃的派生缓存）。
@@ -10,9 +11,13 @@ use crate::services::settings as settings_service;
 use crate::services::skill_discovery::{
     self, SkillDiscoveryReport, SkillsShSearchResult, SkillsShTrendingResult,
 };
+use crate::services::skill_local_scan::{self, UnmanagedSkillReport};
 use crate::services::skill_source::{
     self, InstallSelection, SkillBatchReport, SkillInstallOutcome, SkillInstallReport,
     SkillSourceInput, SkillSourcePreview, SkillUninstallReport,
+};
+use crate::services::skill_takeover::{
+    self, UnmanagedImportInput, UnmanagedImportReport,
 };
 use crate::services::skill_update::{self, SkillCheckReport, SkillUpdateReport};
 use crate::settings::{effective_skill_repos, SkillRepo};
@@ -309,4 +314,39 @@ pub async fn list_skills_sh_trending(
 ) -> Result<SkillsShTrendingResult, AppError> {
     let proxy = state.proxy_config()?;
     run_blocking(move || skill_discovery::trending_skills_sh(Some(&proxy), page)).await
+}
+
+/// 扫描各 agent 的 skills 落点，列出**不是我们落的** Skill。
+///
+/// 只读遍历本地目录：不占 Skill 写任务锁，也不碰真源（与 `discover_available_skills` 同一口径）。
+#[tauri::command]
+pub async fn scan_unmanaged_skills(
+    state: State<'_, AppState>,
+) -> Result<UnmanagedSkillReport, AppError> {
+    let store = state.store.clone();
+    let home = state.home.clone();
+    run_blocking(move || skill_local_scan::scan(&store, &home)).await
+}
+
+/// 导入未纳管的 Skill：收进中央库真源，并按用户选择接管盘上那份外来目录。
+#[tauri::command]
+pub async fn import_unmanaged_skills(
+    state: State<'_, AppState>,
+    inputs: Vec<UnmanagedImportInput>,
+    policy: ConflictPolicy,
+) -> Result<UnmanagedImportReport, AppError> {
+    let _guard = state.begin_skill_job()?;
+    let store = state.store.clone();
+    let home = state.home.clone();
+    let maintenance = state.maintenance.clone();
+    let report = run_blocking(move || {
+        let _write = maintenance
+            .read()
+            .map_err(|_| AppError::InvalidInput("maintenance 锁失败".into()))?;
+        skill_takeover::import(&store, &home, &inputs, policy)
+    })
+    .await?;
+    rebuild_index(&state)?;
+    state.notify_git("skill: import unmanaged");
+    Ok(report)
 }

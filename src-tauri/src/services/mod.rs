@@ -16,5 +16,7 @@ pub mod scan;
 pub mod sessions;
 pub mod settings;
 pub mod skill_discovery;
+pub mod skill_local_scan;
 pub mod skill_source;
+pub mod skill_takeover;
 pub mod skill_update;

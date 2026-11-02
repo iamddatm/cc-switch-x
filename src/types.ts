@@ -100,6 +100,9 @@ export interface RestoreBackupReport {
 }
 
 export interface CloudBackupSettings {
+  /** 通道是否启用（参与「远端备份方式」单选）。 */
+  enabled: boolean;
+  /** 真源变化后是否自动上传；通道未启用时恒为 false。 */
   autoUpload: boolean;
   baseUrl: string;
   username: string;
@@ -115,7 +118,7 @@ export type CloudSettingsInput = CloudBackupSettings & {
   password: string | null;
 };
 
-export type CloudTestInput = Omit<CloudSettingsInput, "autoUpload">;
+export type CloudTestInput = Omit<CloudSettingsInput, "enabled" | "autoUpload">;
 
 export interface CloudRemoteStatus {
   exists: boolean;
@@ -547,6 +550,81 @@ export interface SkillBatchOk {
 export interface SkillBatchReport {
   ok: SkillBatchOk[];
   failed: SkillItemFailure[];
+}
+
+// ── 本地未纳管 Skills ─────────────────────────────────────────────
+
+/** 一份未纳管副本被发现的位置。`sourceId` 为 null 是跨工具共享目录，我们不会往它写。 */
+export interface FoundLocation {
+  sourceId: string | null;
+  label: string;
+  path: string;
+  linkTarget?: string | null;
+  /** 能否接管并启用给这一处（能力闸：落点未实测就只能收进真源）。 */
+  takeoverPossible: boolean;
+}
+
+export interface UnmanagedSkill {
+  /** 磁盘上的目录名，导入按它定位。 */
+  directory: string;
+  suggestedId: string;
+  name: string;
+  description: string | null;
+  /** 先被发现的那份路径，导入的内容以它为准。 */
+  path: string;
+  foundIn: FoundLocation[];
+  /** 目录名含非法字符，导入会改名。 */
+  idRenamed: boolean;
+}
+
+export interface SkippedDir {
+  dir: string;
+  reason: string;
+}
+
+export interface ScannedRoot {
+  sourceId: string | null;
+  label: string;
+  path: string;
+  exists: boolean;
+  sandboxed: boolean;
+}
+
+export interface UnmanagedSkillReport {
+  skills: UnmanagedSkill[];
+  /** 真源里已有同名 ID、但盘上这份不是我们落的：只允许另存，不能接管。 */
+  conflicts: UnmanagedSkill[];
+  skipped: SkippedDir[];
+  roots: ScannedRoot[];
+  warnings: string[];
+}
+
+export interface UnmanagedImportInput {
+  directory: string;
+  /** 要接管并启用给的 agent id；空数组就是只收进真源、不改盘。 */
+  takeOver: string[];
+}
+
+export interface TakeoverOutcome {
+  sourceId: string;
+  label: string;
+  status: "linked" | "already" | "refused";
+  /** 实测落地方式或拒绝原因。 */
+  detail?: string | null;
+  backupPath?: string | null;
+}
+
+export interface UnmanagedImportOutcome {
+  directory: string;
+  id: string;
+  status: "installed" | "overwritten" | "skipped" | "failed";
+  takenOver: TakeoverOutcome[];
+  warnings: string[];
+  error?: string | null;
+}
+
+export interface UnmanagedImportReport {
+  outcomes: UnmanagedImportOutcome[];
 }
 
 // ── 项目级 Skills ─────────────────────────────────────────────────

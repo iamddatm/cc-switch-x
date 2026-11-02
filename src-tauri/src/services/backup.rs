@@ -731,6 +731,8 @@ pub fn restore(
     if !zip.is_file() {
         return Err(AppError::NotFound(format!("快照不存在：{name}")));
     }
+    // 恢复期间不触发自动上传：批量覆盖只是中间状态，不属于用户编辑。
+    let _quiet = crate::change_signal::SuppressionGuard::new();
     // 清理交给调用方：这里 prune 有可能把正在恢复的源快照删掉。
     let safety = create(store, None, SnapshotKind::PreRestore)?;
     let safety_zip = snapshot_path(store, &safety.name)?;
@@ -1127,6 +1129,43 @@ pub fn spawn_periodic(app: tauri::AppHandle) {
         });
 }
 
+/// 自动上传的防抖窗口：写入停下 1 秒后上传；持续写入最多合并 10 秒。
+const AUTO_UPLOAD_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(1000);
+const AUTO_UPLOAD_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 监听真源写入，安静下来后自动上传：对齐 cc-switch 的「变更即备份」，
+/// 但保留内容指纹比对，没变化不重复上传。
+pub fn spawn_change_worker(app: tauri::AppHandle) {
+    use tauri::Manager;
+    let Some(rx) = crate::change_signal::install() else {
+        return;
+    };
+    let _ = std::thread::Builder::new()
+        .name("cc-switch-x-auto-upload".into())
+        .spawn(move || {
+            while rx.recv().is_ok() {
+                let started = std::time::Instant::now();
+                loop {
+                    let elapsed = started.elapsed();
+                    if elapsed >= AUTO_UPLOAD_MAX_WAIT {
+                        break;
+                    }
+                    let wait = AUTO_UPLOAD_DEBOUNCE.min(AUTO_UPLOAD_MAX_WAIT - elapsed);
+                    match rx.recv_timeout(wait) {
+                        Ok(()) => continue,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+                if let Some(state) = app.try_state::<crate::state::AppState>() {
+                    if let Err(error) = auto_upload_if_needed(&state) {
+                        eprintln!("自动上传云备份失败：{error}");
+                    }
+                }
+            }
+        });
+}
+
 pub(crate) fn periodic_once(state: &crate::state::AppState) {
     let (interval_hours, retain) = match state.settings.lock() {
         Ok(settings) => (
@@ -1135,20 +1174,19 @@ pub(crate) fn periodic_once(state: &crate::state::AppState) {
         ),
         Err(_) => return,
     };
-    if interval_hours == 0 {
-        return;
+    if interval_hours > 0 {
+        let latest = list(&state.store)
+            .ok()
+            .and_then(|items| items.first().map(|snapshot| snapshot.created_at))
+            .unwrap_or(0);
+        let due = latest + interval_hours * 3600 * 1000;
+        if chrono::Utc::now().timestamp_millis() >= due {
+            if let Err(error) = auto_snapshot_if_changed(state, retain) {
+                eprintln!("自动备份失败：{error}");
+            }
+        }
     }
-    let latest = list(&state.store)
-        .ok()
-        .and_then(|items| items.first().map(|snapshot| snapshot.created_at))
-        .unwrap_or(0);
-    let due = latest + interval_hours * 3600 * 1000;
-    if chrono::Utc::now().timestamp_millis() < due {
-        return;
-    }
-    if let Err(error) = auto_snapshot_if_changed(state, retain) {
-        eprintln!("自动备份失败：{error}");
-    }
+    // 自动上传不跟快照间隔绑定：关闭应用期间的改动也要在下次检查时补传。
     if let Err(error) = auto_upload_if_needed(state) {
         eprintln!("自动上传云备份失败：{error}");
     }
@@ -1178,14 +1216,18 @@ pub(crate) fn auto_snapshot_if_changed(
     Ok(Some(info))
 }
 
-/// 云端只有一份包，它应当等于本地最新快照：内容有变、或云端还不是这份内容时才上传覆盖。
-/// 基线独立于「是否新建了快照」，所以手动备份过的内容、以及上次上传失败的内容都能被补传。
+/// 云端只有一份包，它代表当前真源：内容有变、或云端还不是这份内容时才上传覆盖。
+/// 基线独立于「是否新建了快照」，所以手动上传过的内容、以及上次失败的内容都能被补传。
 pub(crate) fn auto_upload_if_needed(state: &crate::state::AppState) -> Result<(), AppError> {
-    let (auto_upload, git) = match state.settings.lock() {
-        Ok(settings) => (settings.cloud.auto_upload, settings.backup.git.clone()),
+    let (enabled, auto_upload, git) = match state.settings.lock() {
+        Ok(settings) => (
+            settings.cloud.enabled,
+            settings.cloud.auto_upload,
+            settings.backup.git.clone(),
+        ),
         Err(_) => return Ok(()),
     };
-    if !auto_upload {
+    if !enabled || !auto_upload {
         return Ok(());
     }
     // 远端备份只能选一种：Git 自动同步生效时不再上传 WebDAV。
@@ -1195,16 +1237,16 @@ pub(crate) fn auto_upload_if_needed(state: &crate::state::AppState) -> Result<()
     if git_active {
         return Ok(());
     }
-    let Some(newest) = list(&state.store)?.into_iter().next() else {
-        return Ok(());
-    };
-    let archive = snapshot_path(&state.store, &newest.name)?;
-    let fingerprint = fingerprint_of_archive(&archive)?;
+    let fingerprint = content_fingerprint(&state.store)?;
     let runtime = crate::services::cloud_backup::load_runtime_status(&state.store);
     if runtime.remote_fingerprint.as_deref() == Some(fingerprint.as_str()) {
         return Ok(());
     }
-    crate::services::cloud_backup::upload_archive(state, &archive).map(|_| ())
+    match crate::services::cloud_backup::upload_current(state, SnapshotKind::Auto) {
+        // 连接配置不完整（例如密码被清掉）不是故障，等用户补齐后再传。
+        Err(AppError::InvalidInput(_)) => Ok(()),
+        other => other.map(|_| ()),
+    }
 }
 
 #[cfg(test)]
@@ -1231,6 +1273,7 @@ mod tests {
         let settings = AppSettings {
             store_root: dir.path().join("store"),
             cloud: CloudBackupSettings {
+                enabled: auto_upload,
                 auto_upload,
                 base_url,
                 username: "me".into(),
@@ -1665,6 +1708,76 @@ mod tests {
             list(&state.store).unwrap().len(),
             1,
             "最新快照内容就是当前内容，不该再造 Auto 快照"
+        );
+    }
+
+    #[test]
+    fn auto_upload_sends_current_truth_without_creating_a_snapshot() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
+        assert!(list(&state.store).unwrap().is_empty());
+
+        auto_upload_if_needed(&state).unwrap();
+        assert!(server
+            .object("/dav/ccswitchx/ccswitchx-backup.zip")
+            .is_some());
+        assert!(
+            list(&state.store).unwrap().is_empty(),
+            "自动上传只打包当前真源，不该顺带建本地快照"
+        );
+        assert_eq!(
+            load_runtime_status(&state.store)
+                .remote_fingerprint
+                .as_deref(),
+            Some(content_fingerprint(&state.store).unwrap().as_str())
+        );
+
+        // 改一处内容：云端应跟着变，而不是继续传旧快照。
+        write_mcp(&state.store, "other", "Other");
+        let puts = server.request_count("PUT");
+        auto_upload_if_needed(&state).unwrap();
+        assert_eq!(
+            server.request_count("PUT"),
+            puts + 2,
+            "包与 manifest 各写一次"
+        );
+        assert_eq!(
+            load_runtime_status(&state.store)
+                .remote_fingerprint
+                .as_deref(),
+            Some(content_fingerprint(&state.store).unwrap().as_str())
+        );
+    }
+
+    #[test]
+    fn auto_upload_requires_enabled_channel() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
+        state.settings.lock().unwrap().cloud.enabled = false;
+
+        auto_upload_if_needed(&state).unwrap();
+
+        assert_eq!(
+            server.request_count("PUT"),
+            0,
+            "通道未启用时即使 autoUpload 为真也不能上传"
+        );
+    }
+
+    #[test]
+    fn periodic_once_uploads_even_when_snapshots_are_off() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
+        state.settings.lock().unwrap().backup.interval_hours = 0;
+
+        periodic_once(&state);
+
+        assert!(server
+            .object("/dav/ccswitchx/ccswitchx-backup.zip")
+            .is_some());
+        assert!(
+            list(&state.store).unwrap().is_empty(),
+            "快照间隔关闭只停本地快照，不应连带关掉自动上传"
         );
     }
 

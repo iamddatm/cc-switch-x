@@ -141,6 +141,7 @@ pub fn run(
                 ..Default::default()
             };
             write_meta(&target, &meta)?;
+            crate::change_signal::notify();
             report.imported += 1;
         }
         let skill_bytes = std::fs::read(target.join("SKILL.md"))?;

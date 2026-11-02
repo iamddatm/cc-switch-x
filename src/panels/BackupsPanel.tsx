@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { ArchiveRestore, HardDrive } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
@@ -80,6 +81,43 @@ export function BackupsPanel() {
     null,
   );
   const [cloudRestoreOpen, setCloudRestoreOpen] = useState(false);
+  const [cloudRefreshing, setCloudRefreshing] = useState(false);
+  const [restoreProgress, setRestoreProgress] = useState<{
+    received: number;
+    total: number;
+  } | null>(null);
+
+  // 恢复期间后端按块推下载进度；确认框关掉就断开监听。
+  useEffect(() => {
+    if (!cloudRestoreOpen) {
+      setRestoreProgress(null);
+      return;
+    }
+    let cancelled = false;
+    let unlisten: UnlistenFn | undefined;
+    void listen<{ received: number; total: number }>(
+      "cloud-restore-progress",
+      (event) => setRestoreProgress(event.payload),
+    ).then((stop) => {
+      if (cancelled) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [cloudRestoreOpen]);
+
+  /** 打开确认框后先拉一次远端状态：缓存可能已经过期，不能拿旧包信息确认覆盖。 */
+  const openCloudRestore = async () => {
+    setCloudRestoreOpen(true);
+    setCloudRefreshing(true);
+    try {
+      await refreshCloudStatus();
+    } finally {
+      setCloudRefreshing(false);
+    }
+  };
 
   const act = async (key: string, action: () => Promise<unknown>, success?: string) => {
     setNotice(null);
@@ -261,6 +299,7 @@ export function BackupsPanel() {
           username: draft.username.trim(),
           password: draft.password,
           remoteDir: draft.remoteDir.trim(),
+          enabled: cloud?.enabled ?? false,
           autoUpload: cloud?.autoUpload ?? false,
         }),
       );
@@ -270,6 +309,21 @@ export function BackupsPanel() {
       // 错误已展示
       return null;
     }
+  };
+
+  /** 自动备份是策略而非草稿：切换即保存，避免和连接字段的「保存」混在一起。 */
+  const toggleCloudAuto = (autoUpload: boolean) => {
+    if (!cloud || !cloud.enabled) return;
+    void act("cloud-auto", () =>
+      api.setCloudSettings({
+        baseUrl: cloud.baseUrl,
+        username: cloud.username,
+        password: null,
+        remoteDir: cloud.remoteDir,
+        enabled: true,
+        autoUpload,
+      }),
+    );
   };
 
   const testCloud = async (draft: CloudDraft) => {
@@ -324,7 +378,7 @@ export function BackupsPanel() {
   const method: BackupMethod =
     settings?.git.enabled && git?.remoteVerified
       ? "git"
-      : cloud?.autoUpload
+      : cloud?.enabled
         ? "webdav"
         : "none";
   const gitMethodReady =
@@ -366,7 +420,9 @@ export function BackupsPanel() {
             username: cloud.username,
             password: null,
             remoteDir: cloud.remoteDir,
-            autoUpload: true,
+            enabled: true,
+            // 通道与自动上传分开：只启用通道时保留原有的自动备份偏好。
+            autoUpload: cloud.autoUpload,
           }),
         "已启用 WebDAV 云备份",
       );
@@ -381,17 +437,18 @@ export function BackupsPanel() {
             git: { ...settings.git, enabled: false },
           });
         }
-        if (cloud.autoUpload) {
+        if (cloud.enabled || cloud.autoUpload) {
           await api.setCloudSettings({
             baseUrl: cloud.baseUrl,
             username: cloud.username,
             password: null,
             remoteDir: cloud.remoteDir,
+            enabled: false,
             autoUpload: false,
           });
         }
       },
-      "已关闭远端自动备份",
+      "已关闭远端备份",
     );
   };
 
@@ -431,7 +488,7 @@ export function BackupsPanel() {
               <div className="min-w-0 flex-1">
                 <h3 className="text-strong text-fg-1">远端备份方式</h3>
                 <p className="text-caption text-fg-3">
-                  Git 与 WebDAV 只能启用一种；本机快照不受影响。Git 需先初始化并验证远端，WebDAV 需先保存完整连接配置。
+                  Git 与 WebDAV 只能启用一种；本机快照不受影响。Git 需先初始化并验证远端，WebDAV 需先保存完整连接配置，启用后可在下方单独打开「自动备份」。
                 </p>
               </div>
               <SegmentedControl
@@ -452,8 +509,9 @@ export function BackupsPanel() {
             onRefreshStatus={() => void refreshCloudStatus()}
             onTest={(draft) => void testCloud(draft)}
             onSave={saveCloud}
+            onToggleAuto={toggleCloudAuto}
             onUpload={() => void uploadCloud()}
-            onOpenRestore={() => setCloudRestoreOpen(true)}
+            onOpenRestore={() => void openCloudRestore()}
           />
 
           <section className="rounded-panel border border-border bg-surface">
@@ -692,15 +750,45 @@ export function BackupsPanel() {
         body={
           <div className="space-y-3">
             <CloudBackupMeta status={cloudStatus} />
+            {cloudRefreshing && (
+              <p className="text-caption text-fg-3">正在向云端确认最新状态…</p>
+            )}
             <p>
               将下载云端最新包并覆盖 <code>assets/</code> 与 <code>agents/</code>，
               删除包中不存在的资产。恢复前会自动创建安全快照；本机{" "}
               <code>local/</code>、密钥与索引不会被动。
             </p>
+            {busy === "cloud-restore" && restoreProgress && (
+              <div className="space-y-1" role="status">
+                <p className="text-caption text-fg-2">
+                  正在下载云端备份：{formatBytes(restoreProgress.received)}
+                  {restoreProgress.total > 0
+                    ? ` / ${formatBytes(restoreProgress.total)}（${Math.min(
+                        100,
+                        Math.floor((restoreProgress.received / restoreProgress.total) * 100),
+                      )}%）`
+                    : ""}
+                </p>
+                {restoreProgress.total > 0 && (
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-subtle">
+                    <div
+                      className="h-full bg-action transition-[width] duration-200"
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          (restoreProgress.received / restoreProgress.total) * 100,
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         }
         confirmLabel="恢复"
         pending={busy === "cloud-restore"}
+        confirmDisabled={cloudRefreshing}
         onConfirm={() => void confirmCloudRestore()}
         onCancel={() => setCloudRestoreOpen(false)}
       />

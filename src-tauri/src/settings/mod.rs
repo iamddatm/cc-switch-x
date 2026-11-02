@@ -90,6 +90,11 @@ impl Default for GitBackupSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudBackupSettings {
+    /// 通道是否启用：决定它参与「远端备份方式」单选，与 Git 互斥。
+    /// 关闭只停自动上传，不影响手动「立即上传」。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 真源变化后是否自动上传；必须先启用通道。
     #[serde(default)]
     pub auto_upload: bool,
     #[serde(default)]
@@ -103,6 +108,7 @@ pub struct CloudBackupSettings {
 impl Default for CloudBackupSettings {
     fn default() -> Self {
         Self {
+            enabled: false,
             auto_upload: false,
             base_url: String::new(),
             username: String::new(),
@@ -328,7 +334,12 @@ pub fn load_from(path: &Path) -> Result<AppSettings, SettingsError> {
         return Ok(AppSettings::default());
     }
     let bytes = std::fs::read(path)?;
-    Ok(serde_json::from_slice(&bytes)?)
+    let mut settings: AppSettings = serde_json::from_slice(&bytes)?;
+    // 旧设置文件只有 autoUpload：开过自动上传的视为通道已启用，否则升级后会自动上传失效。
+    if settings.cloud.auto_upload {
+        settings.cloud.enabled = true;
+    }
+    Ok(settings)
 }
 
 pub fn save(settings: &AppSettings) -> Result<(), SettingsError> {
@@ -388,6 +399,7 @@ mod tests {
                 },
             },
             cloud: CloudBackupSettings {
+                enabled: true,
                 auto_upload: true,
                 base_url: "https://dav.example.com/dav".into(),
                 username: "me".into(),
@@ -550,6 +562,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
 
         let loaded = load_from(&path).unwrap();
+        assert!(!loaded.cloud.enabled);
         assert!(!loaded.cloud.auto_upload);
         assert_eq!(loaded.cloud.base_url, "");
         assert_eq!(loaded.cloud.username, "");
@@ -562,6 +575,7 @@ mod tests {
         let path = dir.path().join("settings.json");
         let settings = AppSettings {
             cloud: CloudBackupSettings {
+                enabled: true,
                 auto_upload: true,
                 base_url: "https://dav.example.com/dav".into(),
                 username: "me".into(),
@@ -571,5 +585,25 @@ mod tests {
         };
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path).unwrap(), settings);
+    }
+
+    #[test]
+    fn legacy_auto_upload_setting_implies_enabled_channel() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let legacy = serde_json::json!({
+            "storeRoot": dir.path().join("data"),
+            "cloud": {
+                "autoUpload": true,
+                "baseUrl": "https://dav.example.com/dav",
+                "username": "me",
+                "remoteDir": "ccswitchx"
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let loaded = load_from(&path).unwrap();
+        assert!(loaded.cloud.enabled, "旧文件开过自动上传，升级后通道应视为已启用");
+        assert!(loaded.cloud.auto_upload);
     }
 }

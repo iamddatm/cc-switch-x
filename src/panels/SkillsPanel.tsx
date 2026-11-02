@@ -9,10 +9,11 @@ import { SkillBatchBar } from "../components/skills/SkillBatchBar";
 import { SkillDetailSheet } from "../components/skills/SkillDetailSheet";
 import { SkillDiscoveryPanel } from "../components/skills/SkillDiscoveryPanel";
 import { SkillInstallSheet } from "../components/skills/SkillInstallSheet";
+import { SkillUnmanagedPanel } from "../components/skills/SkillUnmanagedPanel";
 import { originRepoLabel, SkillSourceBadge } from "../components/skills/SkillSourceBadge";
 import { SkillFormSheet } from "../components/skills/SkillFormSheet";
 import { SkillRepoFilter } from "../components/skills/SkillRepoFilter";
-import { SkillViewTabs } from "../components/skills/SkillViewTabs";
+import { SkillViewTabs, type SkillView } from "../components/skills/SkillViewTabs";
 import { useSkillFilters } from "../components/skills/useSkillFilters";
 import { storeScope } from "../components/skills/skillScope";
 import { checkFailureLines } from "../components/skills/skillFilters";
@@ -33,7 +34,7 @@ import { useSkillUpdateCheck } from "../hooks/useSkillUpdateCheck";
 import { api } from "../lib/api";
 import { parseSkill, type SkillForm } from "../lib/canonical";
 import { formatRelativeTime } from "../lib/format";
-import { enabledFor, supported, type AssetSummary } from "../types";
+import { enabledFor, supported, type AssetSummary, type UnmanagedSkillReport } from "../types";
 
 type Editing =
   | { mode: "create"; id: string; form: SkillForm }
@@ -53,8 +54,14 @@ export function SkillsPanel() {
   const { items, error, loading, refresh } = useAssets("skill");
   const { agents, enabledAgents, refresh: refreshAgents } = useAgents();
   const skillCheck = useSkillUpdateCheck();
-  const [view, setView] = useState<"installed" | "discover">("installed");
+  const [view, setView] = useState<SkillView>("installed");
   const [discoverMounted, setDiscoverMounted] = useState(false);
+  const [unmanagedMounted, setUnmanagedMounted] = useState(false);
+  // 未纳管扫描是只读的本地目录遍历：进面板时扫一次即可，结果同时供页签计数与横幅使用。
+  const [unmanaged, setUnmanaged] = useState<UnmanagedSkillReport | null>(null);
+  const [unmanagedLoading, setUnmanagedLoading] = useState(false);
+  const [unmanagedError, setUnmanagedError] = useState<string | null>(null);
+  const [dismissedUnmanaged, setDismissedUnmanaged] = useState<number | null>(null);
   const [agentFilter, setAgentFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "on" | "off">("all");
   const [editing, setEditing] = useState<Editing | null>(null);
@@ -109,6 +116,26 @@ export function SkillsPanel() {
     void refresh();
     void refreshAgents();
   };
+
+  const rescanUnmanaged = async () => {
+    setUnmanagedLoading(true);
+    setUnmanagedError(null);
+    try {
+      setUnmanaged(await api.scanUnmanagedSkills());
+    } catch (reason) {
+      setUnmanagedError(String(reason));
+    } finally {
+      setUnmanagedLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    // 与上游同一时机：进 Skills 页就发现一次，用户不必先点某个按钮才知道有漏管。
+    void rescanUnmanaged();
+  }, []);
+
+  const unmanagedCount =
+    (unmanaged?.skills.length ?? 0) + (unmanaged?.conflicts.length ?? 0);
 
   useEffect(() => {
     if (agentFilter === "all") return;
@@ -388,9 +415,11 @@ export function SkillsPanel() {
       <SkillViewTabs
         view={view}
         installedCount={items.length}
+        unmanagedCount={unmanagedCount}
         onSelect={(next) => {
           setView(next);
           if (next === "discover") setDiscoverMounted(true);
+          if (next === "unmanaged") setUnmanagedMounted(true);
         }}
       />
 
@@ -448,6 +477,29 @@ export function SkillsPanel() {
             {visible.length} / {items.length} 个 Skill
           </span>
         </div>
+
+      {unmanagedCount > 0 && items.length > 0 && dismissedUnmanaged !== unmanagedCount && (
+        <div className="px-6 pb-3">
+          <Notice tone="warning">
+            <div className="flex flex-wrap items-center gap-2">
+              <span>发现 {unmanagedCount} 个未纳管 Skill（含手工放的与别处装的）。</span>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setView("unmanaged");
+                  setUnmanagedMounted(true);
+                }}
+              >
+                查看并导入
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setDismissedUnmanaged(unmanagedCount)}>
+                知道了
+              </Button>
+            </div>
+          </Notice>
+        </div>
+      )}
 
       {(error || actionError || checkError || actionMessage) && (
         <FeedbackBar>
@@ -648,6 +700,21 @@ export function SkillsPanel() {
             }}
             onInstalled={refreshAll}
             onShowInstalled={() => setView("installed")}
+          />
+        </div>
+      )}
+
+      {unmanagedMounted && (
+        <div className={view === "unmanaged" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+          <SkillUnmanagedPanel
+            report={unmanaged}
+            scanning={unmanagedLoading}
+            error={unmanagedError}
+            onRescan={() => void rescanUnmanaged()}
+            onImported={() => {
+              refreshAll();
+              void rescanUnmanaged();
+            }}
           />
         </div>
       )}

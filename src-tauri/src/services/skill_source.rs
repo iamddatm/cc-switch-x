@@ -628,7 +628,10 @@ impl<'a> SkillSink<'a> {
     /// 项目真源则把渲染留给同步引擎（唯一入口永远是 sync_project）。
     pub fn after_write(&self, id: &str) -> Vec<String> {
         match self {
-            SkillSink::Store { store, home } => refresh_deployed(store, home, id),
+            SkillSink::Store { store, home } => {
+                crate::change_signal::notify();
+                refresh_deployed(store, home, id)
+            }
             SkillSink::Project { .. } => Vec::new(),
         }
     }
@@ -761,6 +764,10 @@ fn install_one(
     let prepared = staging_root.join("prepared");
     let result = (|| -> Result<(), AppError> {
         copy_dir(&source_dir, &prepared)?;
+        // 来源目录如果是别处 copy 部署过的（自带 `.ccswitchx`），标记记的是那台机器的
+        // 绝对路径：跟着提交进真源会让副本自称是他人的部署，也会污染目录指纹造成假 diff。
+        crate::adapters::skills::strip_marker(&prepared)
+            .map_err(|error| AppError::Source(format!("清除部署标记失败：{error}")))?;
         if sink.writes_meta() {
             let old_meta = read_meta(&target);
             let mut meta = build_meta(context, selection, old_meta.as_ref(), &prepared)?;

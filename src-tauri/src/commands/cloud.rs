@@ -6,7 +6,10 @@ use crate::services::settings::{cloud_view, set_cloud_settings_at, CloudSettings
 use crate::settings as settings_file;
 use crate::state::AppState;
 use crate::store::secrets::secrets_path;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+/// 恢复下载进度事件名；载荷为 `{ received, total }`（字节，未知时 total 为 0）。
+const RESTORE_PROGRESS_EVENT: &str = "cloud-restore-progress";
 
 async fn run_blocking<T, F>(task: F) -> Result<T, AppError>
 where
@@ -39,6 +42,7 @@ pub fn set_cloud_settings(
     username: String,
     password: Option<String>,
     remote_dir: String,
+    enabled: bool,
     auto_upload: bool,
 ) -> Result<CloudSettingsView, AppError> {
     let (updated, secrets) = set_cloud_settings_at(
@@ -48,6 +52,7 @@ pub fn set_cloud_settings(
         username,
         password,
         remote_dir,
+        enabled,
         auto_upload,
     )?;
     let mut current = state
@@ -106,7 +111,17 @@ pub async fn cloud_upload_now(app: AppHandle) -> Result<CloudStatus, AppError> {
 pub async fn cloud_restore_latest(app: AppHandle) -> Result<CloudRestoreReport, AppError> {
     run_blocking(move || {
         let state = app.state::<AppState>();
-        cloud_backup::restore_latest(&state)
+        // 大包下载可能持续几分钟；把进度推给前端，避免只有一个转圈的按钮。
+        let emitter = app.clone();
+        let progress = move |received: u64, total: u64| {
+            if let Err(error) = emitter.emit(
+                RESTORE_PROGRESS_EVENT,
+                serde_json::json!({ "received": received, "total": total }),
+            ) {
+                eprintln!("发送云备份恢复进度失败：{error}");
+            }
+        };
+        cloud_backup::restore_latest(&state, Some(&progress))
     })
     .await
 }

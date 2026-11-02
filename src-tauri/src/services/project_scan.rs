@@ -140,11 +140,9 @@ fn collect_files(
 }
 
 /// 普通目录的 `read_link` 会失败；Windows junction 能读到目标，必须一并拒绝。
+/// 判定单点在 `adapters::skills::is_link`（用户级 Skills 的归属判定共用同一份）。
 pub(crate) fn is_link(path: &Path) -> bool {
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
-    metadata.file_type().is_symlink() || std::fs::read_link(path).is_ok()
+    crate::adapters::skills::is_link(path)
 }
 
 pub fn scan(paths: &ProjectPaths, keys: &[ProjectSkillDirKey]) -> Result<ProjectScan, AppError> {

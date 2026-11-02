@@ -159,6 +159,8 @@ where
     };
     change(&mut matrix);
     crate::store::atomic::write_atomic(&path, &serde_json::to_vec_pretty(&matrix)?)?;
+    // `agents/<id>.json` 也在可移植真源里，改动同样要触发自动备份。
+    crate::change_signal::notify();
     Ok(())
 }
 

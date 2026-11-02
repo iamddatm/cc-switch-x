@@ -758,3 +758,9 @@ test("发现 tab 复用同一个市场面板，落点选择器给的是项目目
   // 落点措辞来自作用域适配器：项目说「目录」，全局说「Agent」。
   expect(await screen.findByText("安装到：全部目录（2）")).toBeInTheDocument();
 });
+
+test("项目面板没有「未纳管」页签：那是用户级落点的扫描", async () => {
+  render(<ProjectSkillsPanel project={projectView()} />);
+  await screen.findByRole("tab", { name: /发现/ });
+  expect(screen.queryByRole("tab", { name: /未纳管/ })).not.toBeInTheDocument();
+});

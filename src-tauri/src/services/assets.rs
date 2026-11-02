@@ -101,6 +101,10 @@ impl AssetService {
             )));
         }
         copy_dir(source, &target)?;
+        // 与来源安装同一口径：外来目录自带的 `.ccswitchx` 不属于真源内容。
+        crate::adapters::skills::strip_marker(&target)
+            .map_err(|error| AppError::InvalidInput(format!("清除部署标记失败：{error}")))?;
+        crate::change_signal::notify();
         let now = chrono::Utc::now().timestamp_millis();
         write_meta(
             &target,

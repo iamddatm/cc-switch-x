@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import { BackupsPanel } from "../panels/BackupsPanel";
 import { api } from "../lib/api";
@@ -8,6 +8,17 @@ import type {
   CloudStatus,
   GitStatus,
 } from "../types";
+
+// jsdom 里没有 Tauri 事件桥：只记录恢复进度监听的回调，供进度用例手动触发。
+const eventBridge = vi.hoisted(() => ({
+  handler: null as null | ((event: { payload: { received: number; total: number } }) => void),
+}));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (_name: string, handler: typeof eventBridge.handler) => {
+    eventBridge.handler = handler;
+    return () => {};
+  }),
+}));
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -85,6 +96,7 @@ const commit = {
 };
 
 const cloudView: CloudSettingsView = {
+  enabled: false,
   autoUpload: false,
   baseUrl: "https://dav.example.com/dav",
   username: "me",
@@ -160,7 +172,13 @@ function mockBase(git: GitStatus = healthyGit) {
     proxy: { url: null, username: null },
     skillRepos: null,
     backup: settings,
-    cloud: { autoUpload: false, baseUrl: "", username: "", remoteDir: "ccswitchx" },
+    cloud: {
+      enabled: false,
+      autoUpload: false,
+      baseUrl: "",
+      username: "",
+      remoteDir: "ccswitchx",
+    },
   });
   vi.mocked(api.deleteBackupCategory).mockResolvedValue(1024);
   vi.mocked(api.revealBackupLocation).mockResolvedValue(undefined);
@@ -184,6 +202,7 @@ function mockBase(git: GitStatus = healthyGit) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  eventBridge.handler = null;
   mockBase();
 });
 
@@ -275,9 +294,33 @@ test("enables webdav through the method selector", async () => {
       username: cloudView.username,
       password: null,
       remoteDir: cloudView.remoteDir,
+      enabled: true,
+      autoUpload: false,
+    }),
+  );
+});
+
+test("toggles webdav auto backup after the channel is enabled", async () => {
+  vi.mocked(api.getCloudSettings).mockResolvedValue({ ...cloudView, enabled: true });
+  render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  fireEvent.click(screen.getByLabelText("自动备份"));
+  await waitFor(() =>
+    expect(api.setCloudSettings).toHaveBeenCalledWith({
+      baseUrl: cloudView.baseUrl,
+      username: cloudView.username,
+      password: null,
+      remoteDir: cloudView.remoteDir,
+      enabled: true,
       autoUpload: true,
     }),
   );
+});
+
+test("auto backup needs an enabled channel first", async () => {
+  render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  expect(screen.getByLabelText("自动备份")).toBeDisabled();
 });
 
 test("disables git backup until the remote is verified", async () => {
@@ -387,6 +430,7 @@ test("saves cloud settings without overwriting the saved password", async () => 
       username: "me",
       password: null,
       remoteDir: "ccswitchx",
+      enabled: false,
       autoUpload: false,
     }),
   );
@@ -422,7 +466,10 @@ test("uploads and restores only after confirmation", async () => {
   fireEvent.click(screen.getByRole("button", { name: "从云端恢复" }));
   const dialog = await screen.findByRole("alertdialog", { name: "从云端恢复？" });
   expect(api.cloudRestoreLatest).not.toHaveBeenCalled();
-  fireEvent.click(within(dialog).getByRole("button", { name: "恢复" }));
+  // 弹框同时会去云端确认最新状态，确认按钮要等这次刷新结束才可用。
+  const confirm = within(dialog).getByRole("button", { name: "恢复" });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  fireEvent.click(confirm);
   await waitFor(() => expect(api.cloudRestoreLatest).toHaveBeenCalled());
 });
 
@@ -440,8 +487,61 @@ test("shows the cloud backup identity before restoring", async () => {
   expect(api.cloudRestoreLatest).not.toHaveBeenCalled();
 });
 
+test("blocks upload and restore while the cloud form has unsaved changes", async () => {
+  render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  fireEvent.change(screen.getByLabelText("WebDAV 地址"), {
+    target: { value: "https://other.example.com/dav" },
+  });
+
+  // 上传与恢复走的是已保存的连接，草稿没保存时不能让人以为操作的是新地址。
+  expect(screen.getByText(/配置有未保存的更改/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "立即上传" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "从云端恢复" })).toBeDisabled();
+});
+
+test("disables restore when the remote backup is incompatible", async () => {
+  vi.mocked(api.getCloudStatus).mockResolvedValue({
+    ...cloudStatus,
+    manifest: { ...cloudStatus.manifest!, schema: 99, compatible: false },
+  });
+  render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  expect(screen.getByRole("button", { name: "从云端恢复" })).toBeDisabled();
+});
+
+test("disables restore when the remote has no backup", async () => {
+  vi.mocked(api.getCloudStatus).mockResolvedValue({
+    ...cloudStatus,
+    remote: { ...cloudStatus.remote!, exists: false },
+  });
+  render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  expect(screen.getByRole("button", { name: "从云端恢复" })).toBeDisabled();
+});
+
+test("shows download progress while restoring", async () => {
+  vi.mocked(api.cloudRestoreLatest).mockImplementation(
+    () => new Promise(() => {}),
+  );
+  render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  fireEvent.click(screen.getByRole("button", { name: "从云端恢复" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "从云端恢复？" });
+  const confirm = within(dialog).getByRole("button", { name: "恢复" });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  fireEvent.click(confirm);
+
+  await waitFor(() => expect(eventBridge.handler).not.toBeNull());
+  act(() => eventBridge.handler?.({ payload: { received: 512, total: 2048 } }));
+
+  expect(await within(dialog).findByText(/512 B/)).toBeInTheDocument();
+  expect(within(dialog).getByText(/25%/)).toBeInTheDocument();
+});
+
 test("disables cloud actions without config", async () => {
   vi.mocked(api.getCloudSettings).mockResolvedValue({
+    enabled: false,
     autoUpload: false,
     baseUrl: "",
     username: "",

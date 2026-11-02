@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Cloud, Eye, EyeOff, RefreshCw } from "lucide-react";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
+import { Checkbox } from "../ui/Checkbox";
 import { Field } from "../ui/Field";
 import { IconButton } from "../ui/IconButton";
 import { Input } from "../ui/Input";
@@ -42,6 +43,7 @@ export function CloudSection({
   onRefreshStatus,
   onTest,
   onSave,
+  onToggleAuto,
   onUpload,
   onOpenRestore,
 }: {
@@ -52,6 +54,7 @@ export function CloudSection({
   onRefreshStatus: () => void;
   onTest: (draft: CloudDraft) => void;
   onSave: (draft: CloudDraft) => Promise<CloudSettingsView | null>;
+  onToggleAuto: (enabled: boolean) => void;
   onUpload: () => void;
   onOpenRestore: () => void;
 }) {
@@ -96,6 +99,15 @@ export function CloudSection({
     ? `${baseUrl.trim().replace(/\/+$/, "")}/${remoteDir.trim().replace(/^\/+/, "")}/ccswitchx-backup.zip`
     : "—";
   const badge = cloudState(cloudStatus);
+  // 上传与恢复走的是已保存的连接：草稿没保存就动手，操作的是旧地址、旧账号。
+  const draftDirty =
+    passwordDirty ||
+    baseUrl !== (cloud?.baseUrl ?? "") ||
+    username !== (cloud?.username ?? "") ||
+    remoteDir !== (cloud?.remoteDir ?? "");
+  const restoreBlocked =
+    cloudStatus?.manifest?.compatible === false ||
+    cloudStatus?.remote?.exists === false;
 
   return (
     <section className="rounded-panel border border-border bg-surface">
@@ -174,9 +186,25 @@ export function CloudSection({
                 />
               </Field>
             </div>
-            <p className="text-caption text-fg-3">
-              在页面顶部选择「WebDAV 云备份」后，内容有变化才会打包上传覆盖；与 Git 备份互斥。
-            </p>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <Checkbox
+                id="cloud-auto-upload"
+                label="自动备份"
+                checked={cloud.autoUpload}
+                disabled={!cloud.enabled || !!busy}
+                onChange={(event) => onToggleAuto(event.target.checked)}
+              />
+              <p className="text-caption text-fg-3">
+                {cloud.enabled
+                  ? "真源变化后约 1 秒自动打包上传；内容没变不会重复覆盖。"
+                  : "选中上方「WebDAV 云备份」启用通道，才能开启自动备份。"}
+              </p>
+            </div>
+            {draftDirty && (
+              <Notice tone="warning">
+                配置有未保存的更改：上传与恢复会使用已保存的连接，请先保存。
+              </Notice>
+            )}
             <div className="flex flex-wrap gap-2">
               <Button
                 onClick={() => onTest(draft())}
@@ -195,11 +223,24 @@ export function CloudSection({
               <Button
                 onClick={onUpload}
                 loading={busy === "cloud-upload"}
-                disabled={!cloudStatus?.configured || (!!busy && busy !== "cloud-upload")}
+                disabled={
+                  !cloudStatus?.configured ||
+                  draftDirty ||
+                  (!!busy && busy !== "cloud-upload")
+                }
               >
                 立即上传
               </Button>
-              <Button variant="danger" disabled={!cloudStatus?.configured || !!busy} onClick={onOpenRestore}>
+              <Button
+                variant="danger"
+                disabled={!cloudStatus?.configured || !!busy || draftDirty || restoreBlocked}
+                title={
+                  restoreBlocked
+                    ? "云端没有可恢复的备份，或该备份与当前版本不兼容"
+                    : undefined
+                }
+                onClick={onOpenRestore}
+              >
                 从云端恢复
               </Button>
             </div>

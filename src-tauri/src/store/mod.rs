@@ -131,6 +131,7 @@ impl Store {
             path
         };
         atomic::write_atomic(&path, bytes)?;
+        crate::change_signal::notify();
         Ok(())
     }
 
@@ -149,6 +150,7 @@ impl Store {
         } else {
             fs::remove_file(path)?;
         }
+        crate::change_signal::notify();
         Ok(true)
     }
 
@@ -226,6 +228,40 @@ impl Store {
         // 备份成功后尽力清理；清理失败不能把已经成功的备份报成失败。
         let _ = self.prune_skill_backups(SKILL_BACKUP_KEEP);
         Ok(Some(target))
+    }
+
+    /// 接管 agent 目录里那份**外来** skill 前的整份留底，落 `backups/skills/<毫秒>_adopt_<agent>_<目录名>/`。
+    ///
+    /// 与 `backup_skill` 共用一棵树和同一保留策略：接管成功后原字节已经在真源里
+    /// 并逐字节核对过，这份只是冗余，被 `SKILL_BACKUP_KEEP` 挤掉可接受；
+    /// 接管中途失败走的是原位还原，不依赖这里。
+    pub fn backup_adopted(&self, agent_id: &str, source: &Path) -> Result<PathBuf, StoreError> {
+        if !is_safe_id(agent_id) {
+            return Err(StoreError::InvalidId(agent_id.to_string()));
+        }
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| *name != "." && *name != "..")
+            .ok_or_else(|| StoreError::InvalidId(source.display().to_string()))?;
+        if !source.is_dir() {
+            return Err(StoreError::Io(std::io::Error::other(format!(
+                "要留底的目录不存在：{name}"
+            ))));
+        }
+        let base = self.root.join("backups").join("skills");
+        fs::create_dir_all(&base)?;
+        let stamp = chrono::Utc::now().timestamp_millis();
+        let label = format!("{stamp}_adopt_{agent_id}_{name}");
+        let mut target = base.join(&label);
+        let mut suffix = 1;
+        while target.exists() {
+            suffix += 1;
+            target = base.join(format!("{label}_{suffix}"));
+        }
+        copy_dir(source, &target)?;
+        let _ = self.prune_skill_backups(SKILL_BACKUP_KEEP);
+        Ok(target)
     }
 
     /// 只保留最近 `keep` 份 skill 备份，返回删除的份数。
