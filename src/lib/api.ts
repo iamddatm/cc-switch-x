@@ -43,6 +43,7 @@ import type {
   ScanReport,
   SkillBatchReport,
   SkillCheckReport,
+  SkillDeploymentIssue,
   SkillDiscoveryReport,
   SkillInstallOutcome,
   SkillInstallReport,
@@ -233,6 +234,9 @@ export const api = {
   listDrifts: () => invoke<DriftRecord[]>("list_drifts"),
   resolveDrift: (id: number, action: ResolveAction, agentId: string) =>
     invoke<ResolveOutcome>("resolve_drift", { id, action, agentId }),
+  /** Skill 侧的落盘核对：勾选说已启用，落点还是不是我们那一份（只读，现算）。 */
+  verifySkillDeployments: () =>
+    invoke<SkillDeploymentIssue[]>("verify_skill_deployments"),
 
   scanSessions: () => invoke<SessionScanReport>("scan_sessions"),
   listSessions: (agentId?: string, query?: string, offset?: number, limit?: number) =>

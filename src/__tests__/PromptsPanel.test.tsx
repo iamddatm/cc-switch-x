@@ -16,6 +16,7 @@ vi.mock("../lib/api", () => ({
     deleteAsset: vi.fn(),
     listDrifts: vi.fn(),
     rescanDrift: vi.fn(),
+    verifySkillDeployments: vi.fn().mockResolvedValue([]),
     resolveDrift: vi.fn(),
   },
 }));

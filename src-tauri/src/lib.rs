@@ -152,6 +152,7 @@ pub fn run() {
             commands::skills::set_skills_enabled,
             commands::skills::uninstall_skills,
             commands::skills::update_skills,
+            commands::skills::verify_skill_deployments,
             commands::projects::add_project,
             commands::projects::adopt_project_skill,
             commands::projects::check_project_skill_updates,

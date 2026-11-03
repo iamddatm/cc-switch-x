@@ -8,6 +8,7 @@ import { ImportDialog } from "../components/ImportDialog";
 import { SkillBatchBar } from "../components/skills/SkillBatchBar";
 import { SkillDetailSheet } from "../components/skills/SkillDetailSheet";
 import { SkillDiscoveryPanel } from "../components/skills/SkillDiscoveryPanel";
+import { SkillDeploymentNotice } from "../components/skills/SkillDeploymentNotice";
 import { SkillInstallSheet } from "../components/skills/SkillInstallSheet";
 import { SkillUnmanagedPanel } from "../components/skills/SkillUnmanagedPanel";
 import { originRepoLabel, SkillSourceBadge } from "../components/skills/SkillSourceBadge";
@@ -477,6 +478,8 @@ export function SkillsPanel() {
             {visible.length} / {items.length} 个 Skill
           </span>
         </div>
+
+      <SkillDeploymentNotice />
 
       {unmanagedCount > 0 && items.length > 0 && dismissedUnmanaged !== unmanagedCount && (
         <div className="px-6 pb-3">

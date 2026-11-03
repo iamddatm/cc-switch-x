@@ -367,6 +367,20 @@ export interface DriftRecord {
 
 export type ResolveAction = "adoptDisk" | "repushSource";
 
+export type SkillDeploymentStatus = "foreign" | "missing" | "sourceGone";
+
+/**
+ * 后端 skill_verify::SkillDeploymentIssue：启用矩阵说这个 Skill 已启用，
+ * 但落点上的内容已经不是我们那一份（被别的工具接走、被删掉，或真源已不在）。
+ */
+export interface SkillDeploymentIssue {
+  agentId: string;
+  skillId: string;
+  status: SkillDeploymentStatus;
+  targetPath: string;
+  detail: string;
+}
+
 export type ResolveOutcome =
   | { kind: "adopted"; path: string }
   | { kind: "repushed"; path: string; written: number; skipped: number };

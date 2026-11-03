@@ -21,6 +21,7 @@ vi.mock("../lib/api", () => ({
     listSessions: vi.fn().mockResolvedValue([]),
     listDrifts: vi.fn().mockResolvedValue([]),
     rescanDrift: vi.fn().mockResolvedValue([]),
+    verifySkillDeployments: vi.fn().mockResolvedValue([]),
   },
 }));
 

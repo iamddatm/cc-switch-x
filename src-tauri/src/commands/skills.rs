@@ -20,6 +20,7 @@ use crate::services::skill_takeover::{
     self, UnmanagedImportInput, UnmanagedImportReport,
 };
 use crate::services::skill_update::{self, SkillCheckReport, SkillUpdateReport};
+use crate::services::skill_verify::{self, SkillDeploymentIssue};
 use crate::settings::{effective_skill_repos, SkillRepo};
 use crate::state::AppState;
 use serde::Deserialize;
@@ -326,6 +327,19 @@ pub async fn scan_unmanaged_skills(
     let store = state.store.clone();
     let home = state.home.clone();
     run_blocking(move || skill_local_scan::scan(&store, &home)).await
+}
+
+/// 核对启用矩阵里的 Skill 勾选：落点还在不在、还是不是我们那一份。
+///
+/// 与 `scan_unmanaged_skills` 是同一枚硬币的两面（那个从未勾选项出发，这个从矩阵出发）。
+/// 纯只读 stat 遍历，不占 Skill 写任务锁；报告只给用户看，不会顺手补链接。
+#[tauri::command]
+pub async fn verify_skill_deployments(
+    state: State<'_, AppState>,
+) -> Result<Vec<SkillDeploymentIssue>, AppError> {
+    let store = state.store.clone();
+    let home = state.home.clone();
+    run_blocking(move || skill_verify::verify(&store, &home)).await
 }
 
 /// 导入未纳管的 Skill：收进中央库真源，并按用户选择接管盘上那份外来目录。
