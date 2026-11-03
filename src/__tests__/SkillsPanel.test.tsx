@@ -4,7 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { SkillsPanel } from "../panels/SkillsPanel";
 import { api } from "../lib/api";
 import { resetSkillUpdateCheck } from "../hooks/useSkillUpdateCheck";
-import { agentStatus } from "../test/agents";
+import { agentStatus, capabilities } from "../test/agents";
 import type { SkillCheckReport, UnmanagedSkillReport } from "../types";
 
 vi.mock("../lib/api", () => ({
@@ -929,4 +929,67 @@ test("a scan error is reported in the unmanaged view rather than shown as empty"
   // 扫描失败是「不知道」，不能报成「没有未纳管」。
   expect(screen.getByText("还没有扫描结果")).toBeInTheDocument();
   expect(screen.queryByText(/没有未纳管的 Skill/)).not.toBeInTheDocument();
+});
+
+// ── 列头批量开关 ─────────────────────────────────────────────────
+// 列头点下去是给「整列」做批量，最容易出的事故是范围超出用户看见的那些，
+// 所以这几条都盯着传给后端的 ids。
+
+test("column header enables the rest of the list in one action", async () => {
+  render(<SkillsPanel />);
+  fireEvent.click(
+    await screen.findByRole("button", { name: /Claude Code：当前列表已启用 0 \/ 1 个/ }),
+  );
+  fireEvent.click(screen.getByRole("menuitem", { name: "启用剩余 1 个" }));
+
+  await waitFor(() =>
+    expect(api.setSkillsEnabled).toHaveBeenCalledWith(["demo"], "claude", true),
+  );
+});
+
+test("column header bulk stays inside the filtered rows", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([
+    { assetType: "skill", id: "demo", name: "demo", updatedAt: 1, hash: "h" },
+    { assetType: "skill", id: "other", name: "other", updatedAt: 1, hash: "h2" },
+  ]);
+  render(<SkillsPanel />);
+  fireEvent.change(await screen.findByLabelText("搜索 Skill"), {
+    target: { value: "demo" },
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: /已启用 0 \/ 1 个，点击批量开关/ }));
+  // 脚注要在菜单还开着的时候看：动作一执行菜单就收了
+  expect(screen.getByText(/仅当前筛选结果 · 1 个/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("menuitem", { name: "启用剩余 1 个" }));
+
+  await waitFor(() =>
+    expect(api.setSkillsEnabled).toHaveBeenCalledWith(["demo"], "claude", true),
+  );
+  // 筛出来的「全部启用」不能顺手把看不见的 other 也铺上去
+  expect(vi.mocked(api.setSkillsEnabled).mock.calls[0][0]).not.toContain("other");
+});
+
+test("column header bulk reports per-item failures", async () => {
+  vi.mocked(api.setSkillsEnabled).mockResolvedValue({
+    ok: [{ id: "demo", label: "junction" }],
+    failed: [{ id: "ghost", error: "落点被别处占据" }],
+  });
+  render(<SkillsPanel />);
+  fireEvent.click(
+    await screen.findByRole("button", { name: /点击批量开关/ }),
+  );
+  fireEvent.click(screen.getByRole("menuitem", { name: "启用剩余 1 个" }));
+
+  expect(await screen.findByText(/启用完成：成功 1 个，失败 1 个/)).toBeInTheDocument();
+  expect(screen.getByText(/落点被别处占据/)).toBeInTheDocument();
+});
+
+test("an unverified skill column exposes no bulk action", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agentStatus({ capabilities: capabilities({ skill: "unverified" }) }),
+  ]);
+  render(<SkillsPanel />);
+
+  await screen.findByText("demo");
+  expect(screen.queryByRole("button", { name: /点击批量开关/ })).not.toBeInTheDocument();
 });

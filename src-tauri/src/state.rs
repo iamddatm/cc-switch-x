@@ -88,7 +88,7 @@ impl AppState {
     pub fn begin_skill_job(&self) -> Result<SkillJobGuard, AppError> {
         self.skill_busy
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .map_err(|_| AppError::InvalidInput("已有 Skill 检查/更新任务在进行".into()))?;
+            .map_err(|_| AppError::InvalidInput("已有 Skill 检查/更新/批量启停任务在进行".into()))?;
         Ok(SkillJobGuard {
             busy: self.skill_busy.clone(),
         })

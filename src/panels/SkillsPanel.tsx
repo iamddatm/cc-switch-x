@@ -329,13 +329,14 @@ export function SkillsPanel() {
     }
   };
 
-  const setEnabledFor = async (agentId: string, enabled: boolean) => {
-    if (selectedIds.length === 0) return;
+  /** 一批 Skill 启停到某个 agent。批量条（选中项）与列头（整列可见项）共用这条路径与它的播报。 */
+  const applyBatch = async (agentId: string, ids: string[], enabled: boolean) => {
+    if (ids.length === 0) return;
     setBatchBusy(true);
     setActionError(null);
     setActionMessage(null);
     try {
-      const report = await api.setSkillsEnabled(selectedIds, agentId, enabled);
+      const report = await api.setSkillsEnabled(ids, agentId, enabled);
       const label = enabled ? "启用" : "停用";
       setActionMessage(
         `${label}完成：成功 ${report.ok.length} 个${report.failed.length ? `，失败 ${report.failed.length} 个` : ""}。`,
@@ -351,6 +352,23 @@ export function SkillsPanel() {
     } finally {
       setBatchBusy(false);
     }
+  };
+
+  // 列头批量的作用范围跟着筛选走：收窄过就只动看得见的那些，脚注必须把这件事说明白，
+  // 否则用户以为点的是整个库。
+  const narrowed =
+    query.trim() !== "" ||
+    sourceFilter !== "all" ||
+    agentFilter !== "all" ||
+    statusFilter !== "all" ||
+    (repoChoices.allKeys.length > 0 && !allReposSelected);
+  const bulkColumn = {
+    busy: batchBusy || checking || updating,
+    scopeNote: narrowed
+      ? `仅当前筛选结果 · ${visible.length} 个`
+      : `全部 Skill · ${visible.length} 个`,
+    onBulk: (agentId: string, ids: string[], enabled: boolean) =>
+      void applyBatch(agentId, ids, enabled),
   };
 
   // 一键处理前要把话说清：三档动作里只有「解链」会碰对侧工具在落点上留的东西，
@@ -637,8 +655,8 @@ export function SkillsPanel() {
                     .map((item) => item.id),
                 )
               }
-              onEnable={(agentId) => void setEnabledFor(agentId, true)}
-              onDisable={(agentId) => void setEnabledFor(agentId, false)}
+              onEnable={(agentId) => void applyBatch(agentId, selectedIds, true)}
+              onDisable={(agentId) => void applyBatch(agentId, selectedIds, false)}
               onDelete={() => setDeleting(selectedItems)}
               onClear={clear}
             />
@@ -685,7 +703,12 @@ export function SkillsPanel() {
                 />
               </span>
               <span className="flex-1 text-caption font-semibold text-fg-2">名称</span>
-              <AgentColumnsHeader assetType="skill" agents={agentsForType} items={visible} />
+              <AgentColumnsHeader
+                assetType="skill"
+                agents={agentsForType}
+                items={visible}
+                bulk={bulkColumn}
+              />
               <span className="w-12" />
             </div>
             <ul>

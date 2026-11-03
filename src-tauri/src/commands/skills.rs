@@ -182,6 +182,9 @@ pub async fn set_skills_enabled(
     agent_id: String,
     enabled: bool,
 ) -> Result<SkillBatchReport, AppError> {
+    // 与 update/uninstall 同一把锁：批量铺链会往 agent 目录里 link，撞上正在替换
+    // 真源目录的更新任务就会链到半份内容上，所以宁可让后点的这一次被拒。
+    let _guard = state.begin_skill_job()?;
     let store = state.store.clone();
     let home = state.home.clone();
     let maintenance = state.maintenance.clone();
