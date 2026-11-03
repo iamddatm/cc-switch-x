@@ -47,6 +47,7 @@ import type {
   SkillDiscoveryReport,
   SkillInstallOutcome,
   SkillInstallReport,
+  SkillRepairReport,
   SkillRepo,
   SkillSourceInput,
   SkillSourcePreview,
@@ -237,6 +238,11 @@ export const api = {
   /** Skill 侧的落盘核对：勾选说已启用，落点还是不是我们那一份（只读，现算）。 */
   verifySkillDeployments: () =>
     invoke<SkillDeploymentIssue[]>("verify_skill_deployments"),
+  /**
+   * 一键处理核对结果：重刷空落点、把对侧链接换成我们的、清掉真源已删的悬空勾选。
+   * 唯一会因核对结果动盘的入口，清单由服务端现算，调用前必须让用户确认过。
+   */
+  repairSkillDeployments: () => invoke<SkillRepairReport>("repair_skill_deployments"),
 
   scanSessions: () => invoke<SessionScanReport>("scan_sessions"),
   listSessions: (agentId?: string, query?: string, offset?: number, limit?: number) =>

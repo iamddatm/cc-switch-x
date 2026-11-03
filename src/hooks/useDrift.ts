@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../lib/api";
-import type { DriftRecord, ResolveAction, SkillDeploymentIssue } from "../types";
+import type {
+  DriftRecord,
+  ResolveAction,
+  SkillDeploymentIssue,
+  SkillRepairReport,
+} from "../types";
 
 /**
  * 一次落盘核对的两类结果。台账类资产比的是字节（drifts），Skill 是链接部署，
@@ -70,6 +75,29 @@ export function useDrift() {
     [run],
   );
 
+  /**
+   * 一键处理 Skill 的勾选与落点差异。清单由后端现算，这里只负责触发与收尾：
+   * 处置完必须重扫并广播，横幅与状态条才不会停在处理前的计数上。
+   *
+   * 与 `resolve` 不同，失败时会往外抛：面板要据此决定报「处理完成」还是保留原横幅，
+   * 拿到 `undefined` 报告当成成功会把失败说成没差异。
+   */
+  const repair = useCallback(async (): Promise<SkillRepairReport> => {
+    setBusy(true);
+    try {
+      const report = await api.repairSkillDeployments();
+      setChecks(await rescanDeployments());
+      setError(null);
+      return report;
+    } catch (e) {
+      setError(String(e));
+      throw e;
+    } finally {
+      setBusy(false);
+      setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -100,6 +128,7 @@ export function useDrift() {
     refresh,
     rescan,
     resolve,
+    repair,
     forAsset,
   };
 }

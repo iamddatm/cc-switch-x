@@ -381,6 +381,22 @@ export interface SkillDeploymentIssue {
   detail: string;
 }
 
+/**
+ * 后端 skill_repair::SkillRepairItem：一条核对差异的处置结局。
+ * refused 表示「按纪律没动它」，不是执行出错 —— 例如落点是一份与真源内容不同的外来目录。
+ */
+export interface SkillRepairItem {
+  agentId: string;
+  skillId: string;
+  status: "redeployed" | "reclaimed" | "already" | "detached" | "refused";
+  detail: string;
+}
+
+/** 后端 skill_repair::SkillRepairReport，逐条独立成败。 */
+export interface SkillRepairReport {
+  items: SkillRepairItem[];
+}
+
 export type ResolveOutcome =
   | { kind: "adopted"; path: string }
   | { kind: "repushed"; path: string; written: number; skipped: number };

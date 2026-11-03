@@ -146,6 +146,7 @@ pub fn run() {
             commands::skills::import_unmanaged_skills,
             commands::skills::list_skills_sh_trending,
             commands::skills::preview_skill_source,
+            commands::skills::repair_skill_deployments,
             commands::skills::scan_unmanaged_skills,
             commands::skills::search_skills_sh,
             commands::skills::set_skill_repos,

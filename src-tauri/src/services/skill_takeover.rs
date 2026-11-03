@@ -202,7 +202,15 @@ fn already(location: &FoundLocation, agent_id: &str, detail: &str) -> TakeoverOu
 }
 
 /// 接管一处外来副本。
-fn take_over_one(store: &Store, home: &Path, id: &str, location: &FoundLocation) -> TakeoverOutcome {
+///
+/// `skill_repair` 抢回被别的工具接走的落点走的是同一份逻辑：安全边界（只解链、
+/// 真目录先比指纹再留底、失败原位还原）必须只有一处，不能各写一遍。
+pub(crate) fn take_over_one(
+    store: &Store,
+    home: &Path,
+    id: &str,
+    location: &FoundLocation,
+) -> TakeoverOutcome {
     let Some(agent_id) = location.source_id.clone() else {
         return refused(
             "",

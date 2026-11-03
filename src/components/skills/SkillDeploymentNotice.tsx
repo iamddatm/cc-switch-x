@@ -6,18 +6,21 @@ import type { SkillDeploymentIssue } from "../../types";
  * Skill 勾选与落点不符的横幅：启用矩阵说「已启用」，盘上那份却不归我们管了
  * （被别的工具换成它自己的链接、被删掉，或真源已经不在了）。
  *
- * 只报告，不自动重刷：自动把落点抢回来会覆盖用户在对侧工具里的选择，方向必须由人来定。
- * 恢复办法写在文案里 —— 重新勾选（外来内容仍在时会被能力闸拒绝，这是对的），或者
- * 直接取消勾选退账（只清我们的记录，不删别人的文件）。
+ * 这个组件本身仍然只报告；「一键处理」只是把处置交给面板去确认与执行 ——
+ * 核对（`verify_skill_deployments`）永远只读，动盘的只有 `repair_skill_deployments` 那一条路。
+ * 抢不回来的（落点是一份与真源内容不同的外来目录）后端会原样保留并说明原因，
+ * 出路仍是「先在对侧工具里取消同名条目，再在这里重新勾选」。
  * 数据与重扫入口由面板传进来，与 `DriftBanner` 同一形状，不在这里再订阅一次盘。
  */
 export function SkillDeploymentNotice({
   issues,
   busy,
+  onRepair,
   onRescan,
 }: {
   issues: SkillDeploymentIssue[];
   busy: boolean;
+  onRepair: () => void;
   onRescan: () => void;
 }) {
   if (issues.length === 0) {
@@ -30,9 +33,12 @@ export function SkillDeploymentNotice({
           <div className="flex flex-wrap items-center gap-2">
             <span className="flex-1">
               {issues.length} 个 Skill 已勾选，但落点上的内容不是本工具部署的。
-              要让勾选重新生效，先在对侧工具里取消同名条目，再在这里重新勾选；
-              不想再管这一条，直接取消勾选即可，盘上别人的文件不会被删。
+              一键处理会重刷空掉的落点、把对侧的链接换成我们的、清掉真源已删的悬空勾选；
+              抢不回来的原样保留并逐条说明原因。
             </span>
+            <Button size="sm" variant="secondary" disabled={busy} onClick={onRepair}>
+              一键处理
+            </Button>
             <Button size="sm" variant="ghost" disabled={busy} onClick={onRescan}>
               重新检查
             </Button>

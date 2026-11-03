@@ -12,6 +12,7 @@ use crate::services::skill_discovery::{
     self, SkillDiscoveryReport, SkillsShSearchResult, SkillsShTrendingResult,
 };
 use crate::services::skill_local_scan::{self, UnmanagedSkillReport};
+use crate::services::skill_repair::{self, SkillRepairReport};
 use crate::services::skill_source::{
     self, InstallSelection, SkillBatchReport, SkillInstallOutcome, SkillInstallReport,
     SkillSourceInput, SkillSourcePreview, SkillUninstallReport,
@@ -340,6 +341,30 @@ pub async fn verify_skill_deployments(
     let store = state.store.clone();
     let home = state.home.clone();
     run_blocking(move || skill_verify::verify(&store, &home)).await
+}
+
+/// 一键处理核对报出的差异：重刷空落点、抢回被别处接走的链接、清掉真源已删的悬空勾选。
+///
+/// **这是唯一会因核对结果动盘的入口**，清单由服务端现算（不信任前端传来的列表），
+/// 前端调用前必须先过确认框。写任务互斥与 maintenance 锁照 `import_unmanaged_skills` 那一套。
+#[tauri::command]
+pub async fn repair_skill_deployments(
+    state: State<'_, AppState>,
+) -> Result<SkillRepairReport, AppError> {
+    let _guard = state.begin_skill_job()?;
+    let store = state.store.clone();
+    let home = state.home.clone();
+    let maintenance = state.maintenance.clone();
+    let report = run_blocking(move || {
+        let _write = maintenance
+            .read()
+            .map_err(|_| AppError::InvalidInput("maintenance 锁失败".into()))?;
+        skill_repair::repair(&store, &home)
+    })
+    .await?;
+    rebuild_index(&state)?;
+    state.notify_git("skill: repair deployments");
+    Ok(report)
 }
 
 /// 导入未纳管的 Skill：收进中央库真源，并按用户选择接管盘上那份外来目录。

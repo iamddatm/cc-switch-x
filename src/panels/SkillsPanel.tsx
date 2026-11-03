@@ -36,7 +36,13 @@ import { useSkillUpdateCheck } from "../hooks/useSkillUpdateCheck";
 import { api } from "../lib/api";
 import { parseSkill, type SkillForm } from "../lib/canonical";
 import { formatRelativeTime } from "../lib/format";
-import { enabledFor, supported, type AssetSummary, type UnmanagedSkillReport } from "../types";
+import {
+  enabledFor,
+  supported,
+  type AssetSummary,
+  type SkillRepairItem,
+  type UnmanagedSkillReport,
+} from "../types";
 
 type Editing =
   | { mode: "create"; id: string; form: SkillForm }
@@ -51,6 +57,15 @@ const SOURCE_FILTERS = [
   { value: "local", label: "本地目录" },
   { value: "cc-switch", label: "cc-switch 导入" },
 ] as const;
+
+/** 一键处理的结局分档：`refused` 不是执行出错，是按纪律没动它（后端会说明原因）。 */
+const REPAIR_LABELS: Record<SkillRepairItem["status"], string> = {
+  redeployed: "重刷落点",
+  reclaimed: "抢回落点",
+  already: "本来一致",
+  detached: "取消勾选",
+  refused: "未处理",
+};
 
 export function SkillsPanel() {
   const { items, error, loading, refresh } = useAssets("skill");
@@ -79,6 +94,8 @@ export function SkillsPanel() {
   const [updateTargets, setUpdateTargets] = useState<string[] | null>(null);
   const [updating, setUpdating] = useState(false);
   const [batchBusy, setBatchBusy] = useState(false);
+  const [pendingRepair, setPendingRepair] = useState(false);
+  const [repairing, setRepairing] = useState(false);
 
   const {
     report: checkReport,
@@ -336,6 +353,49 @@ export function SkillsPanel() {
     }
   };
 
+  // 一键处理前要把话说清：三档动作里只有「解链」会碰对侧工具在落点上留的东西，
+  // 而那份东西的真身在别处，一个字节都不会少 —— 这句话说错了用户就不敢点。
+  const repairPlan = useMemo(() => {
+    const counts = { missing: 0, foreign: 0, sourceGone: 0 };
+    for (const issue of deployment.skillIssues) {
+      counts[issue.status] += 1;
+    }
+    return counts;
+  }, [deployment.skillIssues]);
+
+  const runRepair = async () => {
+    setRepairing(true);
+    setActionError(null);
+    setActionMessage(null);
+    try {
+      const report = await deployment.repair();
+      const counted = new Map<SkillRepairItem["status"], number>();
+      for (const item of report.items) {
+        counted.set(item.status, (counted.get(item.status) ?? 0) + 1);
+      }
+      // 按 REPAIR_LABELS 的固定顺序播报，避免同一份结果每次措辞顺序都不同
+      const summary = (Object.keys(REPAIR_LABELS) as SkillRepairItem["status"][])
+        .filter((status) => counted.has(status))
+        .map((status) => `${REPAIR_LABELS[status]} ${counted.get(status)} 个`);
+      setActionMessage(
+        summary.length > 0
+          ? `处理完成：${summary.join("、")}。`
+          : "核对清单已经空了，没有需要处理的差异。",
+      );
+      const refused = report.items.filter((item) => item.status === "refused");
+      if (refused.length > 0) {
+        setActionError(
+          refused.map((item) => `${item.agentId} / ${item.skillId}：${item.detail}`).join("；"),
+        );
+      }
+      setPendingRepair(false);
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setRepairing(false);
+    }
+  };
+
   const rowMenuItems = (item: AssetSummary): MenuItem[] => {
     const menu: MenuItem[] = [
       { label: "查看", onSelect: () => void openView(item) },
@@ -487,6 +547,7 @@ export function SkillsPanel() {
       <SkillDeploymentNotice
         issues={deployment.skillIssues}
         busy={deployment.busy}
+        onRepair={() => setPendingRepair(true)}
         onRescan={deployment.rescan}
       />
 
@@ -834,6 +895,33 @@ export function SkillsPanel() {
         }
         onConfirm={() => void confirmDelete()}
         onCancel={() => setDeleting(null)}
+      />
+
+      <ConfirmDialog
+        open={pendingRepair}
+        title={`处理 ${deployment.skillIssues.length} 处勾选与落点不符？`}
+        pending={repairing}
+        confirmLabel="确认处理"
+        body={
+          <div className="space-y-2">
+            {repairPlan.missing > 0 && (
+              <p>重刷 {repairPlan.missing} 个空落点：按现有真源重新部署，不覆盖任何东西。</p>
+            )}
+            {repairPlan.foreign > 0 && (
+              <p>
+                抢回 {repairPlan.foreign} 个被别处接走的落点：落点是对侧链接的只解链再换成我们的，
+                对侧目录本身不动（对侧工具之后可能因此报它自己的漂移）；落点是一份与真源内容不同的
+                外来目录的原样保留，只报告。
+              </p>
+            )}
+            {repairPlan.sourceGone > 0 && (
+              <p>清掉 {repairPlan.sourceGone} 条真源已删的悬空勾选：只退账，盘上不留我们的残留。</p>
+            )}
+            <p>清单以点下去那一刻的磁盘为准，与这份预览不一致时按实际处置。</p>
+          </div>
+        }
+        onConfirm={() => void runRepair()}
+        onCancel={() => setPendingRepair(false)}
       />
     </div>
   );

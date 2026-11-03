@@ -17,6 +17,7 @@ vi.mock("../lib/api", () => ({
     listDrifts: vi.fn().mockResolvedValue([]),
     rescanDrift: vi.fn().mockResolvedValue([]),
     verifySkillDeployments: vi.fn().mockResolvedValue([]),
+    repairSkillDeployments: vi.fn().mockResolvedValue({ items: [] }),
     setSkillEnabled: vi.fn(),
     previewSkillSource: vi.fn(),
     installSkill: vi.fn(),
@@ -159,6 +160,60 @@ test("shows the link kind the backend actually used", async () => {
   expect(api.setSkillEnabled).toHaveBeenCalledTimes(1);
   // 勾选动过盘，落点核对要跟着重读：挂载时一次，开关之后再一次，横幅不能停在旧计数上
   await vi.waitFor(() => expect(api.verifySkillDeployments).toHaveBeenCalledTimes(2));
+});
+
+test("一键处理先讲清要动什么，确认后才动盘并重读核对", async () => {
+  vi.mocked(api.verifySkillDeployments).mockResolvedValue([
+    {
+      agentId: "claude",
+      skillId: "demo",
+      status: "missing",
+      targetPath: "C:/Users/me/.claude/skills/demo",
+      detail: "落点上已经没有这个目录（被外部删掉，或从未部署成功）",
+    },
+    {
+      agentId: "claude",
+      skillId: "other",
+      status: "foreign",
+      targetPath: "C:/Users/me/.claude/skills/other",
+      detail: "落点现在是指向 C:/Users/me/.cc-switch/skills/other 的链接，不再是我们的真源",
+    },
+  ]);
+  vi.mocked(api.repairSkillDeployments).mockResolvedValue({
+    items: [
+      {
+        agentId: "claude",
+        skillId: "demo",
+        status: "redeployed",
+        detail: "已重新部署到落点（junction）",
+      },
+      {
+        agentId: "claude",
+        skillId: "other",
+        status: "refused",
+        detail: "盘上这份与真源内容不一致，已保留原目录；请先比对清楚再处理",
+      },
+    ],
+  });
+  render(<SkillsPanel />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "一键处理" }));
+  const dialog = await screen.findByRole("alertdialog");
+  expect(within(dialog).getByText(/重刷 1 个空落点/)).toBeInTheDocument();
+  expect(within(dialog).getByText(/抢回 1 个被别处接走的落点/)).toBeInTheDocument();
+  // 确认框只是预览：没点确认就一个字节都不许动
+  expect(api.repairSkillDeployments).not.toHaveBeenCalled();
+
+  const readsBefore = vi.mocked(api.verifySkillDeployments).mock.calls.length;
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认处理" }));
+  await vi.waitFor(() => expect(api.repairSkillDeployments).toHaveBeenCalledTimes(1));
+  expect(await screen.findByText("处理完成：重刷落点 1 个、未处理 1 个。")).toBeInTheDocument();
+  // 抢不回来的那条要逐条说原因，不能只报个数字
+  expect(screen.getByText(/other：盘上这份与真源内容不一致/)).toBeInTheDocument();
+  // 处置完以磁盘为准重读：横幅不能停在处理前的计数上
+  await vi.waitFor(() =>
+    expect(api.verifySkillDeployments).toHaveBeenCalledTimes(readsBefore + 1),
+  );
 });
 
 test("creates a skill from the form", async () => {
