@@ -104,7 +104,7 @@ pub fn set_mcp_enabled(
     Ok(report)
 }
 
-/// 返回实测的落地方式（`symlink` / `junction` / `copy` / `already` / `removed`），
+/// 返回实测的落地方式（`symlink` / `junction` / `copy` / `already` / `removed` / `detached`），
 /// UI 显示的是它而不是配置意图。
 #[tauri::command]
 pub fn set_skill_enabled(
@@ -131,11 +131,10 @@ pub fn set_skill_enabled(
         match skills::remove(&state.store, &descriptor, &id, &state.home, base.as_deref())? {
             Removed::Ours(_) => "removed".to_string(),
             Removed::Absent => "absent".to_string(),
-            Removed::Foreign => {
-                return Err(AppError::InvalidInput(format!(
-                    "{agent_id} 的 skills/{id} 不是我们部署的，拒绝删除"
-                )))
-            }
+            // 位置上是别人的东西：不删别人的目录，但勾选要能退掉。
+            // 拒绝的话这条既启不了也关不掉，只能手改 agents/<id>.json。
+            // 与 `uninstall_one` 以及 `skill_source::set_enabled` 的取消分支同一口径。
+            Removed::Foreign => "detached".to_string(),
         }
     };
     update_matrix(&state.store, &agent_id, |matrix| {

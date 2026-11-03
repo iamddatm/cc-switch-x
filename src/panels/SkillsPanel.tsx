@@ -31,6 +31,7 @@ import { SearchField } from "../components/ui/SearchField";
 import { Select } from "../components/ui/Select";
 import { useAgents } from "../hooks/useAgents";
 import { useAssets } from "../hooks/useAssets";
+import { useDrift } from "../hooks/useDrift";
 import { useSkillUpdateCheck } from "../hooks/useSkillUpdateCheck";
 import { api } from "../lib/api";
 import { parseSkill, type SkillForm } from "../lib/canonical";
@@ -55,6 +56,7 @@ export function SkillsPanel() {
   const { items, error, loading, refresh } = useAssets("skill");
   const { agents, enabledAgents, refresh: refreshAgents } = useAgents();
   const skillCheck = useSkillUpdateCheck();
+  const deployment = useDrift();
   const [view, setView] = useState<SkillView>("installed");
   const [discoverMounted, setDiscoverMounted] = useState(false);
   const [unmanagedMounted, setUnmanagedMounted] = useState(false);
@@ -116,6 +118,9 @@ export function SkillsPanel() {
   const refreshAll = () => {
     void refresh();
     void refreshAgents();
+    // 勾选就是磁盘事实的一部分：任何一次开关（含外来落点退账）之后都要重读盘并广播，
+    // 否则横幅会停在改动前的计数上，继续点名已经处理好的那条。
+    void deployment.rescan();
   };
 
   const rescanUnmanaged = async () => {
@@ -479,7 +484,11 @@ export function SkillsPanel() {
           </span>
         </div>
 
-      <SkillDeploymentNotice />
+      <SkillDeploymentNotice
+        issues={deployment.skillIssues}
+        busy={deployment.busy}
+        onRescan={deployment.rescan}
+      />
 
       {unmanagedCount > 0 && items.length > 0 && dismissedUnmanaged !== unmanagedCount && (
         <div className="px-6 pb-3">

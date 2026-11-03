@@ -1102,25 +1102,29 @@ pub fn set_enabled(
     for id in ids {
         let outcome = if enabled {
             skills::deploy(store, &descriptor, id, home, base.as_deref())
+                .map(|deployed| (deployed, String::new()))
         } else {
             skills::remove(store, &descriptor, id, home, base.as_deref()).map(|removed| {
-                match removed {
-                    Removed::Ours(_) => Deployed::Already,
-                    Removed::Absent => Deployed::Already,
-                    Removed::Foreign => Deployed::Foreign,
-                }
+                // 取消勾选遇到外来落点：退账就好，别人的目录一个字节都不动。
+                // 与 `uninstall_one` 同一口径 —— 那里foreign 也是「保留 + 清矩阵」。
+                // 若在这里也拒绝，这条勾选就既启不了也关不掉，只能手改 agents/<id>.json。
+                let label = match removed {
+                    Removed::Ours(_) | Removed::Absent => "removed",
+                    Removed::Foreign => "detached",
+                };
+                (Deployed::Already, label.to_string())
             })
         };
         match outcome {
-            Ok(Deployed::Linked(kind)) => report.ok.push(SkillBatchOk {
+            Ok((Deployed::Linked(kind), _)) => report.ok.push(SkillBatchOk {
                 id: id.clone(),
                 label: format!("{kind:?}").to_lowercase(),
             }),
-            Ok(Deployed::Already) => report.ok.push(SkillBatchOk {
+            Ok((Deployed::Already, label)) => report.ok.push(SkillBatchOk {
                 id: id.clone(),
-                label: if enabled { "already" } else { "removed" }.to_string(),
+                label: if enabled { "already".to_string() } else { label },
             }),
-            Ok(Deployed::Foreign) => report.failed.push(SkillItemFailure {
+            Ok((Deployed::Foreign, _)) => report.failed.push(SkillItemFailure {
                 id: id.clone(),
                 error: format!("{agent_id} 的 skills/{id} 不是本工具部署的，未做改动"),
             }),
@@ -1387,6 +1391,48 @@ mod tests {
             std::fs::read_to_string(foreign.join("SKILL.md")).unwrap(),
             "别人的\n"
         );
+    }
+
+    #[test]
+    fn unchecking_a_foreign_deployment_detaches_the_row_without_deleting_their_files() {
+        let (dir, store, home) = fixture();
+        let source = local_source(&dir.path().join("incoming"));
+        let input = SkillSourceInput::Directory { path: source };
+        install(
+            SkillSink::Store {
+                store: &store,
+                home: &home,
+            },
+            &input,
+            None,
+            &[InstallSelection {
+                relative_path: ".".into(),
+                id: "demo".into(),
+            }],
+            ConflictPolicy::Skip,
+        )
+        .unwrap();
+        let foreign = home.join(".claude/skills/demo");
+        fs::create_dir_all(&foreign).unwrap();
+        fs::write(foreign.join("SKILL.md"), "别人的\n").unwrap();
+        // 既成事实：勾选已经登记在矩阵里，而落点被别的工具占着
+        update_matrix(&store, "claude", |matrix| {
+            matrix.enable(AssetType::Skill, "demo");
+        })
+        .unwrap();
+
+        let report = set_enabled(&store, &home, &["demo".into()], "claude", false).unwrap();
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert_eq!(report.ok[0].label, "detached", "{report:?}");
+        assert!(
+            read_matrix(&store, "claude")
+                .unwrap()
+                .enabled_for(AssetType::Skill)
+                .is_empty(),
+            "退账必须真的清掉勾选，否则这条既启不了也关不掉"
+        );
+        assert!(foreign.is_dir(), "取消勾选不许删别人的目录");
+        assert_eq!(fs::read_to_string(foreign.join("SKILL.md")).unwrap(), "别人的\n");
     }
 
     struct NoFetch;

@@ -197,7 +197,7 @@ export const api = {
   revertLast: () => invoke<ApplyReport>("revert_last"),
   setMcpEnabled: (id: string, agentId: string, enabled: boolean) =>
     invoke<ApplyReport>("set_mcp_enabled", { id, agentId, enabled }),
-  /** 返回实测的落地方式：symlink / junction / copy / already / removed */
+  /** 返回实测的落地方式：symlink / junction / copy / already / removed / absent / detached（落点是别人的东西，只退勾选不删文件） */
   setSkillEnabled: (id: string, agentId: string, enabled: boolean) =>
     invoke<string>("set_skill_enabled", { id, agentId, enabled }),
   activatePrompt: (

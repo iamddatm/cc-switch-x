@@ -157,6 +157,8 @@ test("shows the link kind the backend actually used", async () => {
   expect(api.setSkillEnabled).toHaveBeenCalledWith("demo", "claude", true);
   // 点一次只该发一次请求：控件嵌在 <label> 里时真实浏览器会触发两次 change
   expect(api.setSkillEnabled).toHaveBeenCalledTimes(1);
+  // 勾选动过盘，落点核对要跟着重读：挂载时一次，开关之后再一次，横幅不能停在旧计数上
+  await vi.waitFor(() => expect(api.verifySkillDeployments).toHaveBeenCalledTimes(2));
 });
 
 test("creates a skill from the form", async () => {
