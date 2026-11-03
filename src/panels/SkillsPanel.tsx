@@ -362,8 +362,10 @@ export function SkillsPanel() {
     agentFilter !== "all" ||
     statusFilter !== "all" ||
     (repoChoices.allKeys.length > 0 && !allReposSelected);
+  // 批量条与列头是同一件事的两个入口，忙碌口径必须一致：任一检查或更新在飞时两边都不给点。
+  const bulkBusy = batchBusy || checking || updating;
   const bulkColumn = {
-    busy: batchBusy || checking || updating,
+    busy: bulkBusy,
     scopeNote: narrowed
       ? `仅当前筛选结果 · ${visible.length} 个`
       : `全部 Skill · ${visible.length} 个`,
@@ -644,7 +646,7 @@ export function SkillsPanel() {
                 label: agent.displayName,
               }))}
               updatableCount={updatableSelected}
-              busy={batchBusy || checking || updating}
+              busy={bulkBusy}
               wording={scope.wording}
               noneEnabledLabel="没有已启用的 Agent"
               onCheck={() => void checkUpdates(selectedIds)}

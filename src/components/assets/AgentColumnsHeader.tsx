@@ -36,7 +36,6 @@ export function AgentColumnsHeader({
       {visible.map((agent) => {
         const enabled = new Set(enabledFor(agent, assetType));
         const onIds = items.filter((item) => enabled.has(item.id)).map((item) => item.id);
-        const restIds = items.filter((item) => !enabled.has(item.id)).map((item) => item.id);
         const count = onIds.length;
         const cell = (
           <span className="flex flex-col items-center gap-0.5">
@@ -55,6 +54,8 @@ export function AgentColumnsHeader({
             </span>
           );
         }
+        // 「启用剩余」要的那份 id 只有真给了批量入口才算得出来，静态列不必陪着铺两遍。
+        const restIds = items.filter((item) => !enabled.has(item.id)).map((item) => item.id);
         const menuItems: MenuItem[] = [
           {
             label: `已启用 ${count} / ${items.length} 个`,

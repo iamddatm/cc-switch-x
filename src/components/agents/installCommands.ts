@@ -13,7 +13,7 @@ export interface InstallCommand {
   command: string;
 }
 
-export const AGENT_INSTALL_COMMANDS: Record<string, InstallCommand[]> = {
+const AGENT_INSTALL_COMMANDS: Record<string, InstallCommand[]> = {
   claude: [
     {
       label: "npm 全局安装 / 升级",

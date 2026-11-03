@@ -6,32 +6,26 @@
 
 use std::cmp::Ordering;
 
-/// 已解析的版本号。`prerelease` 为空表示正式版；`build` 是 `+` 后面的元数据。
+/// 已解析的版本号。`prerelease` 为空表示正式版；`+` 后面的构建元数据按 semver 既不参与
+/// 比较也不参与相等，所以不存进结构体（存了会让 derive 出来的 `Eq` 与手写的 `Ord` 打架）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Version {
-    pub core: [u64; 3],
-    pub prerelease: Vec<String>,
-    pub build: Option<String>,
-}
-
-impl Version {
-    /// 按 semver 优先级比较：正式版 > 同核心的预发布版。
-    pub fn compare(&self, other: &Version) -> Ordering {
-        self.core
-            .cmp(&other.core)
-            .then_with(|| compare_prerelease(&self.prerelease, &other.prerelease))
-    }
+struct Version {
+    core: [u64; 3],
+    prerelease: Vec<String>,
 }
 
 impl PartialOrd for Version {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.compare(other))
+        Some(self.cmp(other))
     }
 }
 
 impl Ord for Version {
+    /// 按 semver 优先级比较：正式版 > 同核心的预发布版。
     fn cmp(&self, other: &Self) -> Ordering {
-        self.compare(other)
+        self.core
+            .cmp(&other.core)
+            .then_with(|| compare_prerelease(&self.prerelease, &other.prerelease))
     }
 }
 
@@ -79,19 +73,18 @@ pub fn first_version_token(text: &str) -> Option<&str> {
     })
 }
 
-/// 解析 `x.y.z[-prerelease][+build]`。核心段不是 1~3 个纯数字就返回 None。
-pub fn parse_version(text: &str) -> Option<Version> {
+/// 解析 `x.y.z[-prerelease][+build]`。核心段得是 2~3 个纯数字（`first_version_token` 已经
+/// 保证 2 段起、且每段可解析），四段不是 semver，宁可不判。
+fn parse_version(text: &str) -> Option<Version> {
     let token = first_version_token(text)?;
-    let (head, build) = match token.split_once('+') {
-        Some((head, build)) => (head, Some(build)),
-        None => (token, None),
-    };
+    // 构建元数据必须先剥掉，否则 `+` 后面的内容会被当成预发布段。
+    let head = token.split('+').next().unwrap_or(token);
     let (core, prerelease) = match head.split_once('-') {
         Some((core, pre)) => (core, Some(pre)),
         None => (head, None),
     };
     let parts: Vec<&str> = core.split('.').collect();
-    if parts.is_empty() || parts.len() > 3 {
+    if parts.len() > 3 {
         return None;
     }
     let mut core_numbers = [0_u64; 3];
@@ -103,13 +96,12 @@ pub fn parse_version(text: &str) -> Option<Version> {
         prerelease: prerelease
             .map(|raw| raw.split('.').map(str::to_string).collect())
             .unwrap_or_default(),
-        build: build.map(str::to_string).filter(|raw| !raw.is_empty()),
     })
 }
 
 /// 开发构建：`+238.gdeadbeef` 这类 git describe 戳，或带 canary/nightly/dev/dirty/snapshot。
 /// 这些版本和 registry 的 `latest` 不同源，比出来的「旧」是假信号。
-pub fn is_dev_build(text: &str) -> bool {
+fn is_dev_build(text: &str) -> bool {
     let lower = text.to_lowercase();
     if ["canary", "nightly", "snapshot", "dirty", "dev"]
         .iter()
@@ -155,11 +147,15 @@ mod tests {
     }
 
     #[test]
-    fn parses_core_prerelease_and_build() {
+    fn parses_core_and_prerelease() {
         let parsed = parse_version("1.2.3-beta.7+exp.sha.5114f85").unwrap();
         assert_eq!(parsed.core, [1, 2, 3]);
         assert_eq!(parsed.prerelease, vec!["beta".to_string(), "7".to_string()]);
-        assert_eq!(parsed.build.as_deref(), Some("exp.sha.5114f85"));
+        // 构建元数据不入库：`1.2.3+a` 与 `1.2.3+b` 必须既相等又判等，才和 semver 一致。
+        assert_eq!(
+            parse_version("1.2.3+a").unwrap(),
+            parse_version("1.2.3+b").unwrap()
+        );
         // 段数不足也认：1.2 视为 1.2.0
         assert_eq!(parse_version("1.2").unwrap().core, [1, 2, 0]);
         // 四段核心不是 semver，宁可不判

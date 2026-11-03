@@ -37,12 +37,12 @@ export function useAgentVersionCheck() {
     () => state,
   );
 
-  const check = useCallback(async (ids?: string[]) => {
+  const check = useCallback(async () => {
     if (inFlight) return inFlight;
     emit({ checking: true, error: null });
     inFlight = (async () => {
       try {
-        const report = await api.checkAgentVersions(ids);
+        const report = await api.checkAgentVersions();
         emit({ report, checking: false });
       } catch (e) {
         emit({ checking: false, error: String(e) });

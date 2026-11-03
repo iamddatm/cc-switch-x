@@ -53,9 +53,8 @@ pub fn list_agents(state: State<'_, AppState>) -> Result<Vec<AgentStatus>, AppEr
 #[tauri::command]
 pub async fn check_agent_versions(
     state: State<'_, AppState>,
-    ids: Option<Vec<String>>,
 ) -> Result<AgentVersionReport, AppError> {
-    // 只读探测：spawn 一个 CLI 加一次 npm dist-tags 查询。既不塞进 list_agents
+    // 只读探测：每个 agent 一次 --version 加一次 npm dist-tags 查询。既不塞进 list_agents
     // （那被十来个面板共用，同步命令不能挂上这些慢活），也不写任何真源或落盘。
     let home = state.home.clone();
     let proxy = state.proxy_config()?;
@@ -65,11 +64,8 @@ pub async fn check_agent_versions(
         let _read = maintenance
             .read()
             .map_err(|_| AppError::InvalidInput("maintenance 锁失败".into()))?;
-        Ok(agent_versions::check(
-            &home,
-            &agent_versions::SystemVersionSource::new(proxy),
-            ids.as_deref(),
-        ))
+        let source = agent_versions::SystemVersionSource::new(proxy)?;
+        Ok(agent_versions::check(&home, &source))
     })
     .await
     .map_err(|error| AppError::InvalidInput(format!("版本检查任务失败：{error}")))??;

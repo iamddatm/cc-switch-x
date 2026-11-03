@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Button } from "../ui/Button";
 import { api } from "../../lib/api";
+import { copyToClipboard } from "../../lib/clipboard";
 import type {
   ResumeInfo,
   SessionMatch,
@@ -158,10 +159,7 @@ export function SessionReader({
     }
     setActionError(null);
     try {
-      if (!navigator.clipboard?.writeText) {
-        throw new Error("当前环境不支持剪贴板");
-      }
-      await navigator.clipboard.writeText(resume.command);
+      await copyToClipboard(resume.command);
       setCopied(true);
     } catch (cause) {
       setActionError(String(cause));

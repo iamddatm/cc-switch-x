@@ -1,5 +1,6 @@
 import { Copy } from "lucide-react";
 import { Menu } from "../ui/Menu";
+import { copyToClipboard } from "../../lib/clipboard";
 import { installCommandsFor } from "./installCommands";
 
 /**
@@ -22,10 +23,7 @@ export function CopyCommandMenu({
 
   const copy = async (label: string, command: string) => {
     try {
-      if (!navigator.clipboard?.writeText) {
-        throw new Error("当前环境不支持剪贴板");
-      }
-      await navigator.clipboard.writeText(command);
+      await copyToClipboard(command);
       onResult(`已复制${label}：${command}`, false);
     } catch (cause) {
       onResult(String(cause), true);
