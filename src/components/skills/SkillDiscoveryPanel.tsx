@@ -419,7 +419,10 @@ export function SkillDiscoveryPanel({
         {visibleSkills.map((skill) => {
           const rowError = rowErrors[skill.key];
           return (
-            <li key={skill.key} className="flex items-start gap-3 px-4 py-3">
+            <li
+              key={skill.key}
+              className="flex items-start gap-3 px-4 py-3 transition-colors duration-150 hover:bg-subtle"
+            >
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 items-center gap-2">
                   <span className="truncate text-body font-medium text-fg-1">
@@ -562,7 +565,10 @@ export function SkillDiscoveryPanel({
             const installed = shIsInstalled(skill);
             const rowError = rowErrors[skill.key];
             return (
-              <li key={skill.key} className="flex items-start gap-3 px-4 py-3">
+              <li
+                key={skill.key}
+                className="flex items-start gap-3 px-4 py-3 transition-colors duration-150 hover:bg-subtle"
+              >
                 <div className="min-w-0 flex-1">
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="truncate text-body font-medium text-fg-1">

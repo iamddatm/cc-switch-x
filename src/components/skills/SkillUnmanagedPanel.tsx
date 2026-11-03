@@ -446,7 +446,7 @@ function SkillRow({
     .filter(Boolean)
     .join(" · ");
   return (
-    <li className="flex items-center gap-3 border-b border-border px-4 py-3 last:border-b-0">
+    <li className="flex items-center gap-3 border-b border-border px-4 py-3 transition-colors duration-150 hover:bg-subtle last:border-b-0">
       <span className="flex w-6 shrink-0 items-center">
         {selectable ? (
           <Checkbox

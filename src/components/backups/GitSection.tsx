@@ -267,7 +267,7 @@ export function GitSection({
                 {commits.map((commit) => (
                   <div
                     key={commit.hash}
-                    className="flex items-center gap-2 border-t border-border py-2 first:border-t-0"
+                    className="flex items-center gap-2 border-t border-border py-2 transition-colors duration-150 first:border-t-0 hover:bg-subtle"
                   >
                     <Badge mono>{commit.shortHash}</Badge>
                     <span

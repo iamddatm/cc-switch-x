@@ -49,7 +49,7 @@ export function AssetRow({
     <li className="border-t border-border first:border-t-0">
       <div
         className={cn(
-          "relative flex h-14 items-center hover:bg-subtle",
+          "relative flex h-14 items-center transition-colors duration-150 hover:bg-subtle",
           active && "bg-subtle",
           selected && "bg-action-soft",
         )}

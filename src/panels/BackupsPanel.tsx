@@ -577,7 +577,7 @@ export function BackupsPanel() {
                 {snapshots.map((snapshot) => (
                   <div
                     key={snapshot.name}
-                    className="flex items-center gap-3 border-t border-border px-4 py-2.5 first:border-t-0"
+                    className="flex items-center gap-3 border-t border-border px-4 py-2.5 transition-colors duration-150 first:border-t-0 hover:bg-subtle"
                   >
                     <Badge tone="neutral">{KIND_LABEL[snapshot.kind]}</Badge>
                     <div className="min-w-0">
