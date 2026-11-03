@@ -90,7 +90,7 @@ fn check_one(store: &Store, agent_id: &str, skill_id: &str, dir: &Path) -> Optio
             skill_id,
             DeploymentStatus::SourceGone,
             target,
-            format!("真源里的 {} 已经不在了，只剩勾选", source.display()),
+            format!("真源里的 {} 已经不在了，只剩勾选", display_path(&source)),
         ));
     }
     match skills::ownership(store, &target) {
