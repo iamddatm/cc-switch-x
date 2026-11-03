@@ -11,6 +11,7 @@ use crate::import::update_matrix;
 use crate::services::agents::{
     apply_order, detect_all, ensure_agent_detected, load_state, AgentStatus,
 };
+use crate::services::agent_versions::{self, AgentVersionReport};
 use crate::services::apply::ApplyReport;
 use crate::services::drift;
 use crate::state::AppState;
@@ -47,6 +48,32 @@ pub fn list_agents(state: State<'_, AppState>) -> Result<Vec<AgentStatus>, AppEr
         agent.enabled = crate::settings::is_agent_enabled(&settings, &agent.id);
     }
     Ok(apply_order(agents, settings.agent_order.as_deref()))
+}
+
+#[tauri::command]
+pub async fn check_agent_versions(
+    state: State<'_, AppState>,
+    ids: Option<Vec<String>>,
+) -> Result<AgentVersionReport, AppError> {
+    // 只读探测：spawn 一个 CLI 加一次 npm dist-tags 查询。既不塞进 list_agents
+    // （那被十来个面板共用，同步命令不能挂上这些慢活），也不写任何真源或落盘。
+    let home = state.home.clone();
+    let proxy = state.proxy_config()?;
+    let maintenance = state.maintenance.clone();
+    let report = tauri::async_runtime::spawn_blocking(move || -> Result<AgentVersionReport, AppError> {
+        // 持读锁跟普通写命令同一口径：快照/恢复正在换 store 视图时，这一轮不该插进来。
+        let _read = maintenance
+            .read()
+            .map_err(|_| AppError::InvalidInput("maintenance 锁失败".into()))?;
+        Ok(agent_versions::check(
+            &home,
+            &agent_versions::SystemVersionSource::new(proxy),
+            ids.as_deref(),
+        ))
+    })
+    .await
+    .map_err(|error| AppError::InvalidInput(format!("版本检查任务失败：{error}")))??;
+    Ok(report)
 }
 
 #[tauri::command]

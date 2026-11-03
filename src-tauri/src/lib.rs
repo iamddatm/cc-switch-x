@@ -84,6 +84,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ping,
             commands::agents::activate_prompt,
+            commands::agents::check_agent_versions,
             commands::agents::deactivate_prompt,
             commands::agents::list_agents,
             commands::agents::set_mcp_enabled,

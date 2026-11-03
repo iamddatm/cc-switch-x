@@ -1,13 +1,15 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import { AgentsPanel } from "../panels/AgentsPanel";
+import { resetAgentVersionCheck } from "../hooks/useAgentVersionCheck";
 import { api } from "../lib/api";
 import { agentStatus, capabilities } from "../test/agents";
-import type { AppSettings } from "../types";
+import type { AgentVersionStatus, AppSettings } from "../types";
 
 vi.mock("../lib/api", () => ({
   api: {
     listAgents: vi.fn(),
+    checkAgentVersions: vi.fn(),
     setEnabledAgents: vi.fn(),
     setAgentOrder: vi.fn(),
   },
@@ -27,6 +29,7 @@ const savedSettings: AppSettings = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetAgentVersionCheck();
   vi.mocked(api.listAgents).mockResolvedValue([
     agentStatus(),
     agentStatus({
@@ -101,4 +104,110 @@ test("dragging a row onto another persists the new order", async () => {
     expect(api.setAgentOrder).toHaveBeenCalledWith(["pi", "claude"]),
   );
   expect(await screen.findByText(/已调整 Agent 顺序/)).toBeInTheDocument();
+});
+
+// ── 版本检查与命令复制 ───────────────────────────────────────────
+
+function versionStatus(overrides: Partial<AgentVersionStatus> = {}): AgentVersionStatus {
+  return {
+    id: "claude",
+    displayName: "Claude Code",
+    cliFound: true,
+    installedVersion: "2.0.0",
+    latestVersion: "2.0.0",
+    updateAvailable: false,
+    error: null,
+    ...overrides,
+  };
+}
+
+test("checking versions marks only the agent that is actually behind", async () => {
+  vi.mocked(api.checkAgentVersions).mockResolvedValue({
+    checkedAt: Date.now(),
+    agents: [
+      versionStatus({ installedVersion: "2.0.0", latestVersion: "2.1.0", updateAvailable: true }),
+      // 没装的那条只报上游版本，本机没有可比较的基准，不能写成「有新版本」
+      versionStatus({
+        id: "pi",
+        displayName: "Pi Coding Agent",
+        cliFound: false,
+        installedVersion: null,
+        latestVersion: "0.9.0",
+      }),
+    ],
+  });
+  render(<AgentsPanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
+
+  expect(await screen.findByText("2.0.0 → 2.1.0")).toBeInTheDocument();
+  expect(screen.getByText("未找到命令")).toBeInTheDocument();
+  expect(screen.queryByText(/→ 0.9.0/)).not.toBeInTheDocument();
+  expect(screen.getByText(/Claude Code 2\.0\.0 → 2\.1\.0/)).toBeInTheDocument();
+  expect(screen.getByText(/检查于/)).toBeInTheDocument();
+});
+
+test("an up-to-date agent shows a plain version with no warning", async () => {
+  vi.mocked(api.checkAgentVersions).mockResolvedValue({
+    checkedAt: Date.now(),
+    agents: [versionStatus()],
+  });
+  render(<AgentsPanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
+
+  await screen.findByText("2.0.0");
+  expect(screen.queryByText(/→/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/不代跑安装命令/)).not.toBeInTheDocument();
+});
+
+test("a CLI found but yielding no version is reported as unreadable", async () => {
+  vi.mocked(api.checkAgentVersions).mockResolvedValue({
+    checkedAt: Date.now(),
+    agents: [versionStatus({ installedVersion: null, latestVersion: null })],
+  });
+  render(<AgentsPanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
+
+  // 「找到命令但读不出版本」是探测失败，不能和「没装」混成一句
+  expect(await screen.findByText("版本读不出")).toBeInTheDocument();
+});
+
+test("a failed version check says why instead of showing nothing", async () => {
+  vi.mocked(api.checkAgentVersions).mockRejectedValue("网络请求失败：超时");
+  render(<AgentsPanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
+
+  expect(await screen.findByText(/网络请求失败：超时/)).toBeInTheDocument();
+});
+
+test("copying an install command writes the clipboard and runs nothing", async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", {
+    value: { writeText },
+    configurable: true,
+  });
+  render(<AgentsPanel />);
+
+  const triggers = await screen.findAllByRole("button", { name: "复制安装 / 升级命令" });
+  fireEvent.click(triggers[0]);
+  fireEvent.click(await screen.findByRole("menuitem", { name: "npm 全局安装 / 升级" }));
+
+  await waitFor(() =>
+    expect(writeText).toHaveBeenCalledWith(
+      "npm i -g @anthropic-ai/claude-code@latest --ignore-scripts=false --include=optional --allow-scripts=@anthropic-ai/claude-code",
+    ),
+  );
+  expect(await screen.findByText(/已复制/)).toBeInTheDocument();
+  // 复制的串不回头变成任何一次后端调用
+  expect(api.setEnabledAgents).not.toHaveBeenCalled();
+  expect(api.setAgentOrder).not.toHaveBeenCalled();
+});
+
+test("an agent without a verified install entry exposes no copy button", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agentStatus({ id: "qoder-cn", displayName: "Qoder CN", cliProgram: "qoderclicn" }),
+  ]);
+  render(<AgentsPanel />);
+
+  await screen.findByText("Qoder CN");
+  expect(screen.queryByRole("button", { name: "复制安装 / 升级命令" })).not.toBeInTheDocument();
 });

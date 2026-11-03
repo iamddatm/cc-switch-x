@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   ActivateOutcome,
   AgentStatus,
+  AgentVersionReport,
   AppSettings,
   AssetSummary,
   AssetType,
@@ -193,6 +194,8 @@ export const api = {
   installAppUpdate: () => invoke<boolean>("install_app_update"),
 
   listAgents: () => invoke<AgentStatus[]>("list_agents"),
+  checkAgentVersions: (ids?: string[]) =>
+    invoke<AgentVersionReport>("check_agent_versions", { ids }),
   importPreview: () => invoke<ImportPreview>("import_preview"),
   importApply: (policy: ConflictPolicy) => invoke<ImportSummary>("import_apply", { policy }),
   revertLast: () => invoke<ApplyReport>("revert_last"),

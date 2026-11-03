@@ -324,6 +324,27 @@ export interface AgentStatus {
   activePrompt: string | null;
 }
 
+/**
+ * 一次版本检查里某个 agent 的账（只读探测，本应用不代跑安装/升级）。
+ * `error` 有值表示「这一路没问出来」，不等于「没有更新」。
+ */
+export interface AgentVersionStatus {
+  id: string;
+  displayName: string;
+  /** 在 PATH 与常见安装目录里找得到 CLI。 */
+  cliFound: boolean;
+  installedVersion: string | null;
+  latestVersion: string | null;
+  /** 只有两边都比得出高低、且本机这份不是开发构建才为真。 */
+  updateAvailable: boolean;
+  error: string | null;
+}
+
+export interface AgentVersionReport {
+  agents: AgentVersionStatus[];
+  checkedAt: number;
+}
+
 export function supported(agent: AgentStatus, kind: AssetKind): boolean {
   return agent.capabilities.some((c) => c.kind === kind && c.supported);
 }

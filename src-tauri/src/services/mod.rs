@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod agent_versions;
 pub mod apply;
 pub mod assets;
 pub mod backup;
@@ -22,3 +23,4 @@ pub mod skill_source;
 pub mod skill_takeover;
 pub mod skill_update;
 pub mod skill_verify;
+pub mod version;
