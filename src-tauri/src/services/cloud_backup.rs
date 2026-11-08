@@ -689,7 +689,7 @@ fn upload_archive_locked(
         let summary = backup::validate_archive_for_restore(archive)?;
         let size_bytes = fs::metadata(archive)?.len();
         let sha256 = sha256_file(archive)?;
-        let content_fingerprint = backup::content_fingerprint(&state.store)?;
+        let content_fingerprint = backup::fingerprint_of_archive(archive)?;
         let client = client_for(connection, proxy)?;
         let remote = client.put(archive)?;
 
@@ -1422,6 +1422,48 @@ mod tests {
         assert_eq!(
             manifest["contentFingerprint"].as_str(),
             Some(fingerprint.as_str())
+        );
+    }
+
+    #[test]
+    fn upload_uses_archive_fingerprint_not_current_store() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = test_state_with_asset(config_for(&server), Some("pw"));
+        let snapshot = build_named_snapshot(&state, "cloud-source");
+        let archive_fingerprint = backup::fingerprint_of_archive(&snapshot).unwrap();
+
+        // 建包之后真源又被改动：上传的仍是快照 A，指纹必须描述 A 而不是当前 store（B）。
+        state
+            .store
+            .write(
+                crate::domain::AssetType::Mcp,
+                "other",
+                br#"{"id":"other","name":"Other","transport":"stdio","command":"x"}"#,
+            )
+            .unwrap();
+        let store_fingerprint = backup::content_fingerprint(&state.store).unwrap();
+        assert_ne!(
+            archive_fingerprint, store_fingerprint,
+            "前置：真源已与归档不同"
+        );
+
+        upload_archive(&state, &snapshot).unwrap();
+
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&server.object("/dav/ccswitchx/manifest.json").unwrap()).unwrap();
+        assert_eq!(
+            manifest["contentFingerprint"].as_str(),
+            Some(archive_fingerprint.as_str())
+        );
+        assert_ne!(
+            manifest["contentFingerprint"].as_str(),
+            Some(store_fingerprint.as_str())
+        );
+        assert_eq!(
+            load_runtime_status(&state.store)
+                .synced_fingerprint
+                .as_deref(),
+            Some(archive_fingerprint.as_str())
         );
     }
 
