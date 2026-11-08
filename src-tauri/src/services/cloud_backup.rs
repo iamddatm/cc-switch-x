@@ -23,7 +23,7 @@ use std::time::Instant;
 /// 云端 manifest 的格式标识与协议版本；与快照包内部的 `manifest.json` 不是一回事：
 /// 包内那份列文件，这份只描述包本身，供换机时不上传/不下载就先看清来源。
 const CLOUD_MANIFEST_FORMAT: &str = "ccswitchx-cloud";
-const CLOUD_MANIFEST_SCHEMA: u32 = 1;
+const CLOUD_MANIFEST_SCHEMA: u32 = 2;
 
 /// 一次远端元数据观测：只记录对象本身，不涉及包内容。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,12 +145,14 @@ struct CloudManifest {
     created_at: i64,
     #[serde(default)]
     files: u64,
+    /// 上传时源设备真源的内容指纹，供接收端判断内容是否已一致。
+    content_fingerprint: String,
     archive: CloudArchive,
 }
 
 impl CloudManifest {
     fn compatible(&self) -> bool {
-        self.format == CLOUD_MANIFEST_FORMAT && self.schema <= CLOUD_MANIFEST_SCHEMA
+        self.format == CLOUD_MANIFEST_FORMAT && self.schema == CLOUD_MANIFEST_SCHEMA
     }
 
     /// 恢复前的兼容闸：格式、协议版本、目标文件名任一对不上都不动本地数据。
@@ -161,9 +163,9 @@ impl CloudManifest {
                 self.format
             )));
         }
-        if self.schema > CLOUD_MANIFEST_SCHEMA {
+        if self.schema != CLOUD_MANIFEST_SCHEMA {
             return Err(AppError::Cloud(format!(
-                "云端备份由更新版本的 CC Switch X 上传（manifest schema {}，本机最高 {CLOUD_MANIFEST_SCHEMA}），请先升级应用",
+                "云端备份由不兼容的版本上传（manifest schema {}，本机要求 {CLOUD_MANIFEST_SCHEMA}），请从源设备重新上传",
                 self.schema
             )));
         }
@@ -191,6 +193,11 @@ impl CloudManifest {
 fn parse_manifest(bytes: &[u8]) -> Result<CloudManifest, AppError> {
     serde_json::from_slice(bytes)
         .map_err(|error| AppError::Cloud(format!("云端 manifest 无法解析：{error}")))
+}
+
+/// 没有 manifest 的裸包一律视为不兼容：新版上传必须先写 manifest 才算完成。
+fn missing_manifest_error() -> String {
+    "云端备份缺少 manifest，请从源设备重新上传".to_string()
 }
 
 /// 上传设备名：只用于让人分清是哪台机器传的包，取不到就写 Unknown Device。
@@ -229,9 +236,9 @@ pub struct CloudStatus {
     pub upload_delay_hours: u32,
     pub remote: Option<RemoteStatus>,
     pub remote_error: Option<String>,
-    /// 远端 manifest 视图；旧版上传的裸包没有 manifest，这里为 None。
+    /// 远端 manifest 视图；远端没有 manifest 或解析失败时这里为 None。
     pub manifest: Option<CloudManifestInfo>,
-    /// manifest 读到了但解析失败的原因；不影响远端包本身的可用性判断。
+    /// manifest 缺失或解析失败的原因；不影响远端包本身的可用性判断。
     pub manifest_error: Option<String>,
     pub last_upload_at: Option<i64>,
     pub last_download_at: Option<i64>,
@@ -427,9 +434,12 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
         }
     };
 
-    // manifest 只影响展示与兼容提示：读不到就当旧版包，不能连累远端状态。
+    // manifest 只影响展示与兼容提示：读不到就报 manifest_error，不能连累远端状态。
     // 元数据与上次观测一致时直接复用缓存，省一次 GET；只有确认远端有包才需要 manifest。
+    // 复用缓存的前提是上次观测已经拿到了 manifest 结论（成功或失败）；
+    // 旧状态文件只缓存了远端元数据时仍要补一次 GET，否则缺 manifest 会被静默当成正常。
     let metadata_unchanged = remote.exists
+        && (runtime.observed_manifest.is_some() || runtime.observed_manifest_error.is_some())
         && runtime
             .observed_remote
             .as_ref()
@@ -447,7 +457,7 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
                 Ok(manifest) => (Some(manifest.info()), None),
                 Err(error) => (None, Some(error.to_string())),
             },
-            Ok(None) => (None, None),
+            Ok(None) => (None, Some(missing_manifest_error())),
             Err(error) => (None, Some(error.to_string())),
         }
     };
@@ -679,7 +689,7 @@ fn upload_archive_locked(
         let summary = backup::validate_archive_for_restore(archive)?;
         let size_bytes = fs::metadata(archive)?.len();
         let sha256 = sha256_file(archive)?;
-        let content_fingerprint = backup::fingerprint_of_archive(archive)?;
+        let content_fingerprint = backup::content_fingerprint(&state.store)?;
         let client = client_for(connection, proxy)?;
         let remote = client.put(archive)?;
 
@@ -691,6 +701,7 @@ fn upload_archive_locked(
             device_name: device_name(),
             created_at: chrono::Utc::now().timestamp_millis(),
             files: summary.files,
+            content_fingerprint: content_fingerprint.clone(),
             archive: CloudArchive {
                 name: BACKUP_OBJECT.into(),
                 size_bytes,
@@ -784,14 +795,14 @@ pub fn restore_latest(
         )));
     }
 
-    // 下载前先校 manifest：格式/版本不兼容就停手，不浪费一次整包下载。
+    // 下载前先校 manifest：缺失或格式/版本不兼容就停手，不浪费一次整包下载。
     let manifest = match client.get_manifest()? {
         Some(bytes) => {
             let manifest = parse_manifest(&bytes)?;
             manifest.ensure_restorable()?;
-            Some(manifest)
+            manifest
         }
-        None => None,
+        None => return Err(AppError::Cloud(missing_manifest_error())),
     };
 
     let staging = state.store.staging_dir();
@@ -814,34 +825,32 @@ pub fn restore_latest(
             return Err(AppError::Cloud(format!("云端备份无效：{error}")));
         }
     };
-    if let Some(manifest) = &manifest {
-        // manifest 最后写：哈希、大小、文件数任一与包对不上，都说明包和描述不是同一次上传的
-        // 产物（中途断网或外部替换）。哈希已随下载算出，这里不用再读一遍文件。
-        let downloaded_bytes = downloaded.remote.size_bytes.unwrap_or(0);
-        let size_mismatch = manifest.archive.size_bytes != downloaded_bytes;
-        let files_mismatch = manifest.files != summary.files;
-        let hash_mismatch = !downloaded
-            .sha256
-            .eq_ignore_ascii_case(&manifest.archive.sha256);
-        if hash_mismatch || size_mismatch || files_mismatch {
-            let reason = if size_mismatch {
-                format!(
-                    "大小对不上（包内 {downloaded_bytes} 字节，manifest 记录 {} 字节）",
-                    manifest.archive.size_bytes
-                )
-            } else if files_mismatch {
-                format!(
-                    "文件数对不上（包内 {} 个，manifest 记录 {} 个）",
-                    summary.files, manifest.files
-                )
-            } else {
-                "内容哈希对不上".to_string()
-            };
-            let _ = fs::remove_file(&temp);
-            return Err(AppError::Cloud(format!(
-                "云端备份与 manifest 不一致：{reason}。上次上传可能中断，请在源设备重新上传"
-            )));
-        }
+    // manifest 最后写：哈希、大小、文件数任一与包对不上，都说明包和描述不是同一次上传的
+    // 产物（中途断网或外部替换）。哈希已随下载算出，这里不用再读一遍文件。
+    let downloaded_bytes = downloaded.remote.size_bytes.unwrap_or(0);
+    let size_mismatch = manifest.archive.size_bytes != downloaded_bytes;
+    let files_mismatch = manifest.files != summary.files;
+    let hash_mismatch = !downloaded
+        .sha256
+        .eq_ignore_ascii_case(&manifest.archive.sha256);
+    if hash_mismatch || size_mismatch || files_mismatch {
+        let reason = if size_mismatch {
+            format!(
+                "大小对不上（包内 {downloaded_bytes} 字节，manifest 记录 {} 字节）",
+                manifest.archive.size_bytes
+            )
+        } else if files_mismatch {
+            format!(
+                "文件数对不上（包内 {} 个，manifest 记录 {} 个）",
+                summary.files, manifest.files
+            )
+        } else {
+            "内容哈希对不上".to_string()
+        };
+        let _ = fs::remove_file(&temp);
+        return Err(AppError::Cloud(format!(
+            "云端备份与 manifest 不一致：{reason}。上次上传可能中断，请在源设备重新上传"
+        )));
     }
     // 包还叫 temp 时先读内容指纹：恢复成功后要用它把云端状态标成「和本地一致」，
     // 免得换机恢复完立刻把同样的内容原样传回去。
@@ -883,7 +892,7 @@ pub fn restore_latest(
             let cached_remote = CachedRemote::from_remote(&remote, now);
             runtime.synced_meta = Some(cached_remote.clone());
             runtime.observed_remote = Some(cached_remote);
-            runtime.observed_manifest = manifest.as_ref().map(CloudManifest::info);
+            runtime.observed_manifest = Some(manifest.info());
             runtime.observed_manifest_error = None;
             if let Err(error) = save_runtime_status(&state.store, &runtime) {
                 eprintln!("保存云备份状态失败：{error}");
@@ -1298,10 +1307,7 @@ mod tests {
         let server = FakeWebDav::start("me", "pw");
         let source = test_state_with_asset(config_for(&server), Some("pw"));
         let snapshot = build_named_snapshot(&source, "cloud-source");
-        server.put_object(
-            "/dav/ccswitchx/ccswitchx-backup.zip",
-            std::fs::read(snapshot).unwrap(),
-        );
+        upload_archive(&source, &snapshot).unwrap();
 
         let target = test_state(config_for(&server), Some("pw"));
         std::fs::write(
@@ -1331,10 +1337,7 @@ mod tests {
         let snapshot = build_named_snapshot(&source, "cloud-source");
         let fingerprint = backup::fingerprint_of_archive(&snapshot).unwrap();
         let sha256 = crate::index::sha256_hex(&std::fs::read(&snapshot).unwrap());
-        server.put_object(
-            "/dav/ccswitchx/ccswitchx-backup.zip",
-            std::fs::read(&snapshot).unwrap(),
-        );
+        upload_archive(&source, &snapshot).unwrap();
 
         let target = test_state(config_for(&server), Some("pw"));
         let report = restore_latest(&target, None).unwrap();
@@ -1407,6 +1410,22 @@ mod tests {
     }
 
     #[test]
+    fn upload_writes_schema_2_with_content_fingerprint() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = test_state_with_asset(config_for(&server), Some("pw"));
+        upload_now(&state).unwrap();
+
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&server.object("/dav/ccswitchx/manifest.json").unwrap()).unwrap();
+        let fingerprint = backup::content_fingerprint(&state.store).unwrap();
+        assert_eq!(manifest["schema"], 2);
+        assert_eq!(
+            manifest["contentFingerprint"].as_str(),
+            Some(fingerprint.as_str())
+        );
+    }
+
+    #[test]
     fn status_reports_manifest_of_uploaded_backup() {
         let server = FakeWebDav::start("me", "pw");
         let state = test_state_with_asset(config_for(&server), Some("pw"));
@@ -1419,14 +1438,34 @@ mod tests {
     }
 
     #[test]
-    fn status_treats_missing_manifest_as_legacy_not_error() {
+    fn status_reports_missing_manifest_as_error() {
         let server = FakeWebDav::start("me", "pw");
         server.put_object("/dav/ccswitchx/ccswitchx-backup.zip", b"12345".to_vec());
         let state = test_state(config_for(&server), Some("pw"));
         let status = status(&state).unwrap();
         assert!(status.manifest.is_none());
-        assert!(status.manifest_error.is_none());
+        let error = status.manifest_error.expect("缺 manifest 应报错");
+        assert!(error.contains("manifest"), "{error}");
         assert!(status.remote_error.is_none());
+    }
+
+    #[test]
+    fn status_rechecks_manifest_when_cache_has_no_conclusion() {
+        let server = FakeWebDav::start("me", "pw");
+        server.put_object("/dav/ccswitchx/ccswitchx-backup.zip", b"12345".to_vec());
+        let state = test_state(config_for(&server), Some("pw"));
+        status(&state).unwrap();
+
+        // 模拟旧状态文件：只剩远端元数据，没有 manifest 成功或失败的结论。
+        let mut runtime = load_runtime_status(&state.store);
+        runtime.observed_manifest = None;
+        runtime.observed_manifest_error = None;
+        save_runtime_status(&state.store, &runtime).unwrap();
+        let gets = server.request_count("GET");
+
+        let status = status(&state).unwrap();
+        assert!(server.request_count("GET") > gets, "缺结论时应重新 GET manifest");
+        assert!(status.manifest_error.is_some());
     }
 
     #[test]
@@ -1532,10 +1571,7 @@ mod tests {
         let source = test_state_with_asset(config_for(&server), Some("pw"));
         let snapshot = build_named_snapshot(&source, "cloud-source");
         let size = std::fs::metadata(&snapshot).unwrap().len();
-        server.put_object(
-            "/dav/ccswitchx/ccswitchx-backup.zip",
-            std::fs::read(&snapshot).unwrap(),
-        );
+        upload_archive(&source, &snapshot).unwrap();
 
         let target = test_state(config_for(&server), Some("pw"));
         let seen = std::sync::Mutex::new(Vec::new());
@@ -1555,12 +1591,16 @@ mod tests {
     fn restore_rejects_foreign_and_newer_manifests() {
         for (manifest, expected) in [
             (
-                r#"{"format":"other-app","schema":1,"appVersion":"1.0.0","deviceName":"x","createdAt":1,"files":1,"archive":{"name":"ccswitchx-backup.zip","sizeBytes":1,"sha256":"00"}}"#,
+                r#"{"format":"other-app","schema":1,"appVersion":"1.0.0","deviceName":"x","createdAt":1,"files":1,"contentFingerprint":"00","archive":{"name":"ccswitchx-backup.zip","sizeBytes":1,"sha256":"00"}}"#,
                 "不是本应用写的",
             ),
             (
-                r#"{"format":"ccswitchx-cloud","schema":99,"appVersion":"9.9.9","deviceName":"x","createdAt":1,"files":1,"archive":{"name":"ccswitchx-backup.zip","sizeBytes":1,"sha256":"00"}}"#,
-                "更新版本",
+                r#"{"format":"ccswitchx-cloud","schema":99,"appVersion":"9.9.9","deviceName":"x","createdAt":1,"files":1,"contentFingerprint":"00","archive":{"name":"ccswitchx-backup.zip","sizeBytes":1,"sha256":"00"}}"#,
+                "重新上传",
+            ),
+            (
+                r#"{"format":"ccswitchx-cloud","schema":1,"appVersion":"1.0.0","deviceName":"x","createdAt":1,"files":1,"contentFingerprint":"00","archive":{"name":"ccswitchx-backup.zip","sizeBytes":1,"sha256":"00"}}"#,
+                "重新上传",
             ),
         ] {
             let server = FakeWebDav::start("me", "pw");
@@ -1575,6 +1615,33 @@ mod tests {
             let target = test_state(config_for(&server), Some("pw"));
             let error = restore_latest(&target, None).unwrap_err().to_string();
             assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn restore_rejects_schema_1_and_missing_manifest() {
+        let schema_1 = r#"{"format":"ccswitchx-cloud","schema":1,"appVersion":"1.0.0","deviceName":"x","createdAt":1,"files":1,"contentFingerprint":"00","archive":{"name":"ccswitchx-backup.zip","sizeBytes":1,"sha256":"00"}}"#;
+        // schema 1 与裸包（连 manifest 都没有）都必须拒绝恢复，且不动本地真源。
+        for manifest in [Some(schema_1), None] {
+            let server = FakeWebDav::start("me", "pw");
+            let source = test_state_with_asset(config_for(&server), Some("pw"));
+            let snapshot = build_named_snapshot(&source, "cloud-source");
+            server.put_object(
+                "/dav/ccswitchx/ccswitchx-backup.zip",
+                std::fs::read(snapshot).unwrap(),
+            );
+            if let Some(manifest) = manifest {
+                server.put_object("/dav/ccswitchx/manifest.json", manifest.as_bytes().to_vec());
+            }
+
+            let target = test_state(config_for(&server), Some("pw"));
+            let error = restore_latest(&target, None).unwrap_err().to_string();
+            assert!(error.contains("重新上传"), "{error}");
+            assert!(!target
+                .store
+                .asset_dir(crate::domain::AssetType::Mcp)
+                .join("pw.json")
+                .exists());
         }
     }
 }
