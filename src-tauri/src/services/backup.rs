@@ -1219,6 +1219,13 @@ pub(crate) fn auto_snapshot_if_changed(
 /// 云端只有一份包，它代表当前真源：内容有变、或云端还不是这份内容时才上传覆盖。
 /// 基线独立于「是否新建了快照」，所以手动上传过的内容、以及上次失败的内容都能被补传。
 pub(crate) fn auto_upload_if_needed(state: &crate::state::AppState) -> Result<(), AppError> {
+    // 认证被拒后继续按周期重试会触发坚果云的临时封禁；暂停期内不做任何上传探测。
+    if crate::services::cloud_backup::load_runtime_status(&state.store)
+        .auth_paused_until
+        .is_some_and(|until| until > chrono::Utc::now().timestamp_millis())
+    {
+        return Ok(());
+    }
     let (enabled, auto_upload, git) = match state.settings.lock() {
         Ok(settings) => (
             settings.cloud.enabled,
@@ -1255,7 +1262,9 @@ mod tests {
     use crate::domain::AssetType;
     use crate::index::Index;
     use crate::net::webdav::test_support::FakeWebDav;
-    use crate::services::cloud_backup::load_runtime_status;
+    use crate::services::cloud_backup::{
+        load_runtime_status, save_runtime_status, CloudRuntimeStatus,
+    };
     use crate::services::settings::cloud_secret_ref;
     use crate::settings::{AppSettings, CloudBackupSettings};
     use crate::state::AppState;
@@ -1666,6 +1675,27 @@ mod tests {
             server.request_count("PUT"),
             puts,
             "云端已经是同一份内容，不该再覆盖一次"
+        );
+    }
+
+    #[test]
+    fn paused_runtime_skips_auto_upload_without_network() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
+        save_runtime_status(
+            &state.store,
+            &CloudRuntimeStatus {
+                auth_paused_until: Some(chrono::Utc::now().timestamp_millis() + 600_000),
+                ..CloudRuntimeStatus::default()
+            },
+        )
+        .unwrap();
+
+        auto_upload_if_needed(&state).unwrap();
+        assert_eq!(
+            server.request_count("PUT"),
+            0,
+            "认证暂停期内不应发起上传请求"
         );
     }
 

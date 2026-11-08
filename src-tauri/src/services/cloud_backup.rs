@@ -541,6 +541,7 @@ pub fn test_connection(
     )?;
     let started = Instant::now();
     client.test()?;
+    clear_auth_pause(state);
     Ok(started.elapsed().as_millis() as u64)
 }
 
@@ -596,8 +597,39 @@ fn client_for(
 fn record_failure(state: &AppState, error: &AppError) {
     let mut runtime = load_runtime_status(&state.store);
     runtime.last_error = Some(error.to_string());
+    apply_auth_pause(&mut runtime, error);
     if let Err(save_error) = save_runtime_status(&state.store, &runtime) {
         eprintln!("保存云备份状态失败：{save_error}");
+    }
+}
+
+/// 记录自动下载失败；401/403 同样暂停自动任务（Task 5 的自动下载会调用）。
+#[allow(dead_code)]
+fn record_download_failure(state: &AppState, error: &AppError) {
+    let mut runtime = load_runtime_status(&state.store);
+    runtime.last_download_error = Some(error.to_string());
+    apply_auth_pause(&mut runtime, error);
+    if let Err(save_error) = save_runtime_status(&state.store, &runtime) {
+        eprintln!("保存云备份状态失败：{save_error}");
+    }
+}
+
+/// 认证被拒时暂停自动任务一小时。坚果云免费版每 30 分钟限 600 次请求，
+/// 凭据坏了还按原节奏重试会让账号被临时封禁；暂停不拦手动操作，成功探测会提前解除。
+fn apply_auth_pause(runtime: &mut CloudRuntimeStatus, error: &AppError) {
+    if matches!(error, AppError::CloudAuth(_)) {
+        runtime.auth_paused_until = Some(chrono::Utc::now().timestamp_millis() + 3_600_000);
+    }
+}
+
+/// 一次成功的探测/测试连接/手动同步说明凭据已恢复，提前解除自动任务暂停。
+fn clear_auth_pause(state: &AppState) {
+    let mut runtime = load_runtime_status(&state.store);
+    if runtime.auth_paused_until.take().is_none() {
+        return;
+    }
+    if let Err(error) = save_runtime_status(&state.store, &runtime) {
+        eprintln!("保存云备份状态失败：{error}");
     }
 }
 
@@ -718,6 +750,7 @@ fn upload_archive_locked(
             let mut runtime = load_runtime_status(&state.store);
             runtime.last_upload_at = Some(now);
             runtime.last_error = None;
+            runtime.auth_paused_until = None;
             // 上传成功是「同步动作」：同步基线与观测缓存此刻一致，一起写。
             runtime.synced_fingerprint = Some(content_fingerprint);
             runtime.synced_sha256 = Some(manifest.archive.sha256.clone());
@@ -889,6 +922,7 @@ pub fn restore_latest(
             // 恢复成功也等于一次同步：本地内容从此与云端一致。
             runtime.synced_fingerprint = Some(content_fingerprint);
             runtime.synced_sha256 = Some(downloaded.sha256.clone());
+            runtime.auth_paused_until = None;
             let cached_remote = CachedRemote::from_remote(&remote, now);
             runtime.synced_meta = Some(cached_remote.clone());
             runtime.observed_remote = Some(cached_remote);
@@ -1286,6 +1320,76 @@ mod tests {
         let runtime = load_runtime_status(&state.store);
         assert!(runtime.last_error.is_some());
         assert!(runtime.last_upload_at.is_none());
+    }
+
+    #[test]
+    fn auth_failure_pauses_automatic_tasks() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = test_state_with_asset(config_for(&server), Some("wrong"));
+        let before = chrono::Utc::now().timestamp_millis();
+
+        let error = upload_now(&state).unwrap_err();
+        assert!(matches!(&error, AppError::CloudAuth(_)), "{error}");
+
+        let runtime = load_runtime_status(&state.store);
+        let paused = runtime
+            .auth_paused_until
+            .expect("认证失败应写入自动任务暂停时间");
+        assert!(
+            paused >= before + 3_600_000,
+            "暂停时长应为一小时：{paused} vs {before}"
+        );
+        assert!(runtime.last_error.is_some());
+    }
+
+    #[test]
+    fn successful_status_probe_clears_auth_pause() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = test_state(config_for(&server), Some("pw"));
+        save_runtime_status(
+            &state.store,
+            &CloudRuntimeStatus {
+                auth_paused_until: Some(chrono::Utc::now().timestamp_millis() + 600_000),
+                ..CloudRuntimeStatus::default()
+            },
+        )
+        .unwrap();
+
+        status(&state).unwrap();
+        assert!(
+            load_runtime_status(&state.store)
+                .auth_paused_until
+                .is_none(),
+            "成功的实时探测应解除认证暂停"
+        );
+    }
+
+    #[test]
+    fn successful_manual_operations_clear_auth_pause() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = test_state_with_asset(config_for(&server), Some("pw"));
+        let paused = CloudRuntimeStatus {
+            auth_paused_until: Some(chrono::Utc::now().timestamp_millis() + 600_000),
+            ..CloudRuntimeStatus::default()
+        };
+
+        save_runtime_status(&state.store, &paused).unwrap();
+        test_connection(&state, &server.base_url(), "me", Some("pw"), "ccswitchx").unwrap();
+        assert!(
+            load_runtime_status(&state.store)
+                .auth_paused_until
+                .is_none(),
+            "测试连接成功应解除认证暂停"
+        );
+
+        save_runtime_status(&state.store, &paused).unwrap();
+        upload_now(&state).unwrap();
+        assert!(
+            load_runtime_status(&state.store)
+                .auth_paused_until
+                .is_none(),
+            "手动上传成功应解除认证暂停"
+        );
     }
 
     #[test]

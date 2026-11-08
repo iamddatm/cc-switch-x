@@ -606,7 +606,7 @@ fn status_error(operation: &str, status: StatusCode) -> AppError {
 }
 
 fn auth_error(status: StatusCode) -> AppError {
-    AppError::Cloud(format!(
+    AppError::CloudAuth(format!(
         "WebDAV 认证失败（HTTP {status}），请检查用户名和应用密码"
     ))
 }

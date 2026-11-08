@@ -36,6 +36,10 @@ pub enum AppError {
     Project(String),
     #[error("云备份失败：{0}")]
     Cloud(String),
+    /// 远端明确拒绝认证（401/403）；自动任务遇此应暂停，不能继续重试触发临时封禁。
+    /// 消息自带「认证失败」字样，沿用原有用户可见文案。
+    #[error("{0}")]
+    CloudAuth(String),
     #[error("开机自启设置失败：{0}")]
     Autostart(String),
     #[error("来源无效：{0}")]
