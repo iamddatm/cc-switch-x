@@ -25,16 +25,82 @@ use std::time::Instant;
 const CLOUD_MANIFEST_FORMAT: &str = "ccswitchx-cloud";
 const CLOUD_MANIFEST_SCHEMA: u32 = 1;
 
+/// 一次远端元数据观测：只记录对象本身，不涉及包内容。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedRemote {
+    pub exists: bool,
+    pub size_bytes: Option<u64>,
+    pub modified_at: Option<i64>,
+    pub etag: Option<String>,
+    /// 观测时间，毫秒时间戳。
+    pub checked_at: i64,
+}
+
+impl CachedRemote {
+    pub fn from_remote(remote: &RemoteObject, checked_at: i64) -> Self {
+        Self {
+            exists: remote.exists,
+            size_bytes: remote.size_bytes,
+            modified_at: remote.modified_at,
+            etag: remote.etag.clone(),
+            checked_at,
+        }
+    }
+
+    /// 与一次新探测结果比对；`checked_at` 不参与，它只说明这份缓存有多旧。
+    fn matches_remote(&self, remote: &RemoteObject) -> bool {
+        self.exists == remote.exists
+            && self.size_bytes == remote.size_bytes
+            && self.modified_at == remote.modified_at
+            && self.etag == remote.etag
+    }
+}
+
+/// 运行状态文件分两组字段，写入边界不同：
+/// - `synced_*`：只在同步动作成功后写，自动任务据此判断「是否已同步」；
+/// - `observed_*`：实时状态探测可写，只用于展示与省一次 manifest 请求。
+///
+/// 硬规则：实时状态探测绝不能写 `synced_*`，否则一次开面板就会让自动下载误以为云端已同步。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudRuntimeStatus {
-    pub last_upload_at: Option<i64>,
-    pub last_error: Option<String>,
+    // ── 同步基线 ──
     /// 云端那份包当前的内容指纹（见 `backup::content_fingerprint`）。
-    /// 自动上传拿它和本地最新快照比，一致就不动云端；旧状态文件没这个字段按未知处理，
-    /// 退化成多传一次覆盖，不会丢数据。
+    /// 旧状态文件没这个字段按未知处理，退化成多传一次覆盖，不会丢数据。
     #[serde(default)]
-    pub remote_fingerprint: Option<String>,
+    pub synced_fingerprint: Option<String>,
+    /// 云端包的 sha256（来自 manifest 或下载结果）。
+    #[serde(default)]
+    pub synced_sha256: Option<String>,
+    /// 同步成功时云端的元数据，供自动下载判断「云端是否变了」。
+    #[serde(default)]
+    pub synced_meta: Option<CachedRemote>,
+    #[serde(default)]
+    pub last_upload_at: Option<i64>,
+    #[serde(default)]
+    pub last_download_at: Option<i64>,
+    /// 自动上传的最近错误。
+    #[serde(default)]
+    pub last_error: Option<String>,
+    /// 自动下载的最近错误。
+    #[serde(default)]
+    pub last_download_error: Option<String>,
+    // ── 观测缓存 ──
+    #[serde(default)]
+    pub observed_remote: Option<CachedRemote>,
+    #[serde(default)]
+    pub observed_manifest: Option<CloudManifestInfo>,
+    #[serde(default)]
+    pub observed_manifest_error: Option<String>,
+    // ── 运行控制与统计 ──
+    #[serde(default)]
+    pub auth_paused_until: Option<i64>,
+    /// 统计月份，如 `2026-11`；月份变化后上传量从 0 重新累加。
+    #[serde(default)]
+    pub upload_month: Option<String>,
+    #[serde(default)]
+    pub uploaded_bytes_month: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -47,7 +113,7 @@ pub struct RemoteStatus {
 }
 
 /// 云端 manifest 的前端视图：只带展示需要的字段，哈希留在后端校验用。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudManifestInfo {
     pub app_version: String,
@@ -159,6 +225,8 @@ pub struct CloudStatus {
     pub configured: bool,
     pub has_password: bool,
     pub auto_upload: bool,
+    pub auto_download: bool,
+    pub upload_delay_hours: u32,
     pub remote: Option<RemoteStatus>,
     pub remote_error: Option<String>,
     /// 远端 manifest 视图；旧版上传的裸包没有 manifest，这里为 None。
@@ -166,7 +234,24 @@ pub struct CloudStatus {
     /// manifest 读到了但解析失败的原因；不影响远端包本身的可用性判断。
     pub manifest_error: Option<String>,
     pub last_upload_at: Option<i64>,
+    pub last_download_at: Option<i64>,
     pub last_error: Option<String>,
+    pub last_download_error: Option<String>,
+    /// 本机本自然月累计上传字节；月份变了从头计。
+    pub uploaded_bytes_month: u64,
+    /// true 表示这份状态来自本地运行状态文件，没有联网探测。
+    pub from_cache: bool,
+}
+
+impl From<&CachedRemote> for RemoteStatus {
+    fn from(cached: &CachedRemote) -> Self {
+        Self {
+            exists: cached.exists,
+            size_bytes: cached.size_bytes,
+            modified_at: cached.modified_at,
+            etag: cached.etag.clone(),
+        }
+    }
 }
 
 pub fn status_path(store: &Store) -> PathBuf {
@@ -207,6 +292,60 @@ pub fn reset_runtime_status(store: &Store) -> Result<(), AppError> {
     }
 }
 
+/// 读设置与密钥但不联网，组装一份可用于「秒开面板」的状态。
+pub fn status_cached(state: &AppState) -> Result<CloudStatus, AppError> {
+    let cloud = {
+        let settings = state
+            .settings
+            .lock()
+            .map_err(|_| AppError::Cloud("读取云备份设置失败".into()))?;
+        settings.cloud.clone()
+    };
+    let password = {
+        let secrets = state
+            .secrets
+            .lock()
+            .map_err(|_| AppError::Cloud("读取云备份密钥失败".into()))?;
+        secrets.get(&cloud_secret_ref()).map(str::to_string)
+    };
+    let has_password = password
+        .as_deref()
+        .is_some_and(|value| !value.is_empty());
+    let configured = !cloud.base_url.trim().is_empty()
+        && !cloud.username.trim().is_empty()
+        && has_password;
+    let runtime = load_runtime_status(&state.store);
+    Ok(CloudStatus {
+        configured,
+        has_password,
+        auto_upload: cloud.auto_upload,
+        auto_download: cloud.auto_download,
+        upload_delay_hours: cloud.upload_delay_hours,
+        remote: if configured {
+            runtime.observed_remote.as_ref().map(RemoteStatus::from)
+        } else {
+            None
+        },
+        remote_error: None,
+        manifest: if configured {
+            runtime.observed_manifest.clone()
+        } else {
+            None
+        },
+        manifest_error: if configured {
+            runtime.observed_manifest_error.clone()
+        } else {
+            None
+        },
+        last_upload_at: runtime.last_upload_at,
+        last_download_at: runtime.last_download_at,
+        last_error: runtime.last_error,
+        last_download_error: runtime.last_download_error,
+        uploaded_bytes_month: runtime.uploaded_bytes_month,
+        from_cache: true,
+    })
+}
+
 pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
     let cloud = {
         let settings = state
@@ -234,12 +373,18 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
             configured: false,
             has_password,
             auto_upload: cloud.auto_upload,
+            auto_download: cloud.auto_download,
+            upload_delay_hours: cloud.upload_delay_hours,
             remote: None,
             remote_error: None,
             manifest: None,
             manifest_error: None,
             last_upload_at: runtime.last_upload_at,
+            last_download_at: runtime.last_download_at,
             last_error: runtime.last_error,
+            last_download_error: runtime.last_download_error,
+            uploaded_bytes_month: runtime.uploaded_bytes_month,
+            from_cache: false,
         });
     }
 
@@ -257,21 +402,46 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
         },
         proxy.as_ref(),
     )?;
-    let (remote, remote_error) = match client.head() {
-        Ok(remote) => (
-            Some(RemoteStatus {
-                exists: remote.exists,
-                size_bytes: remote.size_bytes,
-                modified_at: remote.modified_at,
-                etag: remote.etag,
-            }),
-            None,
-        ),
-        Err(error) => (None, Some(error.to_string())),
+    let mut runtime = runtime;
+    let remote = match client.head() {
+        Ok(remote) => remote,
+        Err(error) => {
+            // 探测失败不是观测结果：保留上一次缓存，只把错误报给界面。
+            return Ok(CloudStatus {
+                configured,
+                has_password,
+                auto_upload: cloud.auto_upload,
+                auto_download: cloud.auto_download,
+                upload_delay_hours: cloud.upload_delay_hours,
+                remote: None,
+                remote_error: Some(error.to_string()),
+                manifest: None,
+                manifest_error: None,
+                last_upload_at: runtime.last_upload_at,
+                last_download_at: runtime.last_download_at,
+                last_error: runtime.last_error,
+                last_download_error: runtime.last_download_error,
+                uploaded_bytes_month: runtime.uploaded_bytes_month,
+                from_cache: false,
+            });
+        }
     };
+
     // manifest 只影响展示与兼容提示：读不到就当旧版包，不能连累远端状态。
-    // 只有确认远端有包才多读一次，网络不通时不把等待时间翻倍。
-    let (manifest, manifest_error) = if remote.as_ref().is_some_and(|item| item.exists) {
+    // 元数据与上次观测一致时直接复用缓存，省一次 GET；只有确认远端有包才需要 manifest。
+    let metadata_unchanged = remote.exists
+        && runtime
+            .observed_remote
+            .as_ref()
+            .is_some_and(|cached| cached.matches_remote(&remote));
+    let (manifest, manifest_error) = if !remote.exists {
+        (None, None)
+    } else if metadata_unchanged {
+        (
+            runtime.observed_manifest.clone(),
+            runtime.observed_manifest_error.clone(),
+        )
+    } else {
         match client.get_manifest() {
             Ok(Some(bytes)) => match parse_manifest(&bytes) {
                 Ok(manifest) => (Some(manifest.info()), None),
@@ -280,19 +450,33 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
             Ok(None) => (None, None),
             Err(error) => (None, Some(error.to_string())),
         }
-    } else {
-        (None, None)
     };
+    // 成功探测只刷新观测缓存，并解除认证暂停；同步基线一概不动。
+    let cached_remote = CachedRemote::from_remote(&remote, chrono::Utc::now().timestamp_millis());
+    let remote_status = RemoteStatus::from(&cached_remote);
+    runtime.observed_remote = Some(cached_remote);
+    runtime.observed_manifest = manifest.clone();
+    runtime.observed_manifest_error = manifest_error.clone();
+    runtime.auth_paused_until = None;
+    if let Err(error) = save_runtime_status(&state.store, &runtime) {
+        eprintln!("保存云备份状态失败：{error}");
+    }
     Ok(CloudStatus {
         configured,
         has_password,
         auto_upload: cloud.auto_upload,
-        remote,
-        remote_error,
+        auto_download: cloud.auto_download,
+        upload_delay_hours: cloud.upload_delay_hours,
+        remote: Some(remote_status),
+        remote_error: None,
         manifest,
         manifest_error,
         last_upload_at: runtime.last_upload_at,
+        last_download_at: runtime.last_download_at,
         last_error: runtime.last_error,
+        last_download_error: runtime.last_download_error,
+        uploaded_bytes_month: runtime.uploaded_bytes_month,
+        from_cache: false,
     })
 }
 
@@ -409,6 +593,7 @@ fn record_failure(state: &AppState, error: &AppError) {
 
 fn status_from_remote(
     connection: &CloudConnection,
+    runtime: &CloudRuntimeStatus,
     remote: RemoteObject,
     manifest: Option<CloudManifestInfo>,
 ) -> CloudStatus {
@@ -416,6 +601,8 @@ fn status_from_remote(
         configured: true,
         has_password: true,
         auto_upload: connection.cloud.auto_upload,
+        auto_download: connection.cloud.auto_download,
+        upload_delay_hours: connection.cloud.upload_delay_hours,
         remote: Some(RemoteStatus {
             exists: remote.exists,
             size_bytes: remote.size_bytes,
@@ -425,8 +612,12 @@ fn status_from_remote(
         remote_error: None,
         manifest,
         manifest_error: None,
-        last_upload_at: None,
-        last_error: None,
+        last_upload_at: runtime.last_upload_at,
+        last_download_at: runtime.last_download_at,
+        last_error: runtime.last_error.clone(),
+        last_download_error: runtime.last_download_error.clone(),
+        uploaded_bytes_month: runtime.uploaded_bytes_month,
+        from_cache: false,
     }
 }
 
@@ -512,17 +703,36 @@ fn upload_archive_locked(
     })();
     match result {
         Ok((remote, manifest, content_fingerprint)) => {
+            let now = chrono::Utc::now().timestamp_millis();
             let mut runtime = load_runtime_status(&state.store);
-            runtime.last_upload_at = Some(chrono::Utc::now().timestamp_millis());
+            runtime.last_upload_at = Some(now);
             runtime.last_error = None;
-            runtime.remote_fingerprint = Some(content_fingerprint);
+            // 上传成功是「同步动作」：同步基线与观测缓存此刻一致，一起写。
+            runtime.synced_fingerprint = Some(content_fingerprint);
+            runtime.synced_sha256 = Some(manifest.archive.sha256.clone());
+            let cached_remote = CachedRemote::from_remote(&remote, now);
+            runtime.synced_meta = Some(cached_remote.clone());
+            runtime.observed_remote = Some(cached_remote);
+            runtime.observed_manifest = Some(manifest.info());
+            runtime.observed_manifest_error = None;
+            // 本月上传量按自然月累计；跨月第一笔从 0 开始。
+            let month = chrono::Local::now().format("%Y-%m").to_string();
+            if runtime.upload_month.as_deref() != Some(month.as_str()) {
+                runtime.upload_month = Some(month);
+                runtime.uploaded_bytes_month = 0;
+            }
+            runtime.uploaded_bytes_month = runtime
+                .uploaded_bytes_month
+                .saturating_add(manifest.archive.size_bytes);
             if let Err(error) = save_runtime_status(&state.store, &runtime) {
                 eprintln!("保存云备份状态失败：{error}");
             }
-            let mut status = status_from_remote(connection, remote, Some(manifest.info()));
-            status.last_upload_at = runtime.last_upload_at;
-            status.last_error = runtime.last_error;
-            Ok(status)
+            Ok(status_from_remote(
+                connection,
+                &runtime,
+                remote,
+                Some(manifest.info()),
+            ))
         }
         Err(error) => {
             record_failure(state, &error);
@@ -635,7 +845,7 @@ pub fn restore_latest(
     }
     // 包还叫 temp 时先读内容指纹：恢复成功后要用它把云端状态标成「和本地一致」，
     // 免得换机恢复完立刻把同样的内容原样传回去。
-    let remote_fingerprint = match backup::fingerprint_of_archive(&temp) {
+    let content_fingerprint = match backup::fingerprint_of_archive(&temp) {
         Ok(fingerprint) => fingerprint,
         Err(error) => {
             let _ = fs::remove_file(&temp);
@@ -665,8 +875,16 @@ pub fn restore_latest(
 
     match restored {
         Ok(report) => {
+            let now = chrono::Utc::now().timestamp_millis();
             let mut runtime = load_runtime_status(&state.store);
-            runtime.remote_fingerprint = Some(remote_fingerprint);
+            // 恢复成功也等于一次同步：本地内容从此与云端一致。
+            runtime.synced_fingerprint = Some(content_fingerprint);
+            runtime.synced_sha256 = Some(downloaded.sha256.clone());
+            let cached_remote = CachedRemote::from_remote(&remote, now);
+            runtime.synced_meta = Some(cached_remote.clone());
+            runtime.observed_remote = Some(cached_remote);
+            runtime.observed_manifest = manifest.as_ref().map(CloudManifest::info);
+            runtime.observed_manifest_error = None;
             if let Err(error) = save_runtime_status(&state.store, &runtime) {
                 eprintln!("保存云备份状态失败：{error}");
             }
@@ -746,6 +964,49 @@ mod tests {
         backup::snapshots_dir(&state.store).join(format!("{name}.zip"))
     }
 
+    fn sample_cached_remote() -> CachedRemote {
+        CachedRemote {
+            exists: true,
+            size_bytes: Some(12),
+            modified_at: Some(34),
+            etag: Some("etag".into()),
+            checked_at: 56,
+        }
+    }
+
+    #[test]
+    fn runtime_status_roundtrip_includes_new_fields() {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let status = CloudRuntimeStatus {
+            synced_fingerprint: Some("f".repeat(64)),
+            synced_sha256: Some("s".repeat(64)),
+            synced_meta: Some(sample_cached_remote()),
+            last_upload_at: Some(123),
+            last_download_at: Some(456),
+            last_error: Some("upload boom".into()),
+            last_download_error: Some("download boom".into()),
+            observed_remote: Some(CachedRemote {
+                checked_at: 789,
+                ..sample_cached_remote()
+            }),
+            observed_manifest: Some(CloudManifestInfo {
+                app_version: "9.9.9".into(),
+                device_name: "Box".into(),
+                created_at: 111,
+                files: 7,
+                schema: 1,
+                compatible: true,
+            }),
+            observed_manifest_error: Some("manifest boom".into()),
+            auth_paused_until: Some(999),
+            upload_month: Some("2026-11".into()),
+            uploaded_bytes_month: 1024,
+        };
+        save_runtime_status(&store, &status).unwrap();
+        assert_eq!(load_runtime_status(&store), status);
+    }
+
     #[test]
     fn runtime_status_roundtrip_and_corrupt_file_is_default() {
         let dir = tempdir().unwrap();
@@ -753,7 +1014,8 @@ mod tests {
         let status = CloudRuntimeStatus {
             last_upload_at: Some(123),
             last_error: Some("boom".into()),
-            remote_fingerprint: Some("f".repeat(64)),
+            synced_fingerprint: Some("f".repeat(64)),
+            ..CloudRuntimeStatus::default()
         };
         save_runtime_status(&store, &status).unwrap();
         assert_eq!(load_runtime_status(&store), status);
@@ -795,30 +1057,30 @@ mod tests {
         let loaded = load_runtime_status(&store);
         assert_eq!(loaded.last_upload_at, Some(5));
         assert!(
-            loaded.remote_fingerprint.is_none(),
+            loaded.synced_fingerprint.is_none(),
             "旧版本状态文件没有该字段时按未知处理，退化成多传一次"
         );
     }
 
     #[test]
-    fn upload_now_records_remote_fingerprint() {
+    fn upload_now_records_synced_fingerprint() {
         let server = FakeWebDav::start("me", "pw");
         let state = test_state_with_asset(config_for(&server), Some("pw"));
         upload_now(&state).unwrap();
         assert_eq!(
             load_runtime_status(&state.store)
-                .remote_fingerprint
+                .synced_fingerprint
                 .as_deref(),
             Some(backup::content_fingerprint(&state.store).unwrap().as_str())
         );
     }
 
     #[test]
-    fn upload_failure_keeps_remote_fingerprint_unknown() {
+    fn upload_failure_keeps_synced_fingerprint_unknown() {
         let server = FakeWebDav::start("me", "pw");
         let state = test_state_with_asset(config_for(&server), Some("wrong"));
         assert!(upload_now(&state).is_err());
-        assert!(load_runtime_status(&state.store).remote_fingerprint.is_none());
+        assert!(load_runtime_status(&state.store).synced_fingerprint.is_none());
     }
 
     #[test]
@@ -848,6 +1110,86 @@ mod tests {
         let status = status(&state).unwrap();
         assert!(status.remote_error.is_some());
         assert!(status.remote.is_none());
+    }
+
+    #[test]
+    fn cached_status_does_not_probe_network() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = test_state(config_for(&server), Some("pw"));
+        save_runtime_status(
+            &state.store,
+            &CloudRuntimeStatus {
+                observed_remote: Some(CachedRemote {
+                    size_bytes: Some(42),
+                    ..sample_cached_remote()
+                }),
+                observed_manifest: Some(CloudManifestInfo {
+                    app_version: "1.0.0".into(),
+                    device_name: "Box".into(),
+                    created_at: 1,
+                    files: 2,
+                    schema: 1,
+                    compatible: true,
+                }),
+                ..CloudRuntimeStatus::default()
+            },
+        )
+        .unwrap();
+
+        let status = status_cached(&state).unwrap();
+        assert!(status.from_cache);
+        assert_eq!(status.remote.as_ref().unwrap().size_bytes, Some(42));
+        assert_eq!(status.manifest.as_ref().unwrap().files, 2);
+        assert_eq!(server.request_count("PROPFIND"), 0);
+        assert_eq!(server.request_count("GET"), 0);
+    }
+
+    #[test]
+    fn live_status_never_overwrites_synced_baseline() {
+        let server = FakeWebDav::start("me", "pw");
+        server.put_object("/dav/ccswitchx/ccswitchx-backup.zip", b"12345".to_vec());
+        let state = test_state(config_for(&server), Some("pw"));
+        save_runtime_status(
+            &state.store,
+            &CloudRuntimeStatus {
+                synced_fingerprint: Some("a".into()),
+                synced_sha256: Some("b".into()),
+                ..CloudRuntimeStatus::default()
+            },
+        )
+        .unwrap();
+
+        let status = status(&state).unwrap();
+        assert!(!status.from_cache);
+
+        let runtime = load_runtime_status(&state.store);
+        assert_eq!(runtime.synced_fingerprint.as_deref(), Some("a"));
+        assert_eq!(runtime.synced_sha256.as_deref(), Some("b"));
+        assert!(
+            runtime.synced_meta.is_none(),
+            "实时探测不能伪造同步基线"
+        );
+        assert_eq!(
+            runtime.observed_remote.as_ref().unwrap().size_bytes,
+            Some(5),
+            "实时探测应写入观测缓存"
+        );
+    }
+
+    #[test]
+    fn live_status_reuses_observed_manifest_when_metadata_matches() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = test_state_with_asset(config_for(&server), Some("pw"));
+        upload_now(&state).unwrap();
+        let gets = server.request_count("GET");
+
+        status(&state).unwrap();
+        assert_eq!(
+            server.request_count("GET"),
+            gets,
+            "云端元数据没变时不该重新 GET manifest"
+        );
+        assert!(load_runtime_status(&state.store).observed_manifest.is_some());
     }
 
     #[test]
@@ -881,6 +1223,37 @@ mod tests {
         assert!(status.remote.as_ref().unwrap().exists);
         assert!(status.last_upload_at.is_some());
         assert_eq!(load_runtime_status(&state.store).last_error, None);
+    }
+
+    #[test]
+    fn upload_increments_monthly_bytes_and_resets_on_new_month() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = test_state_with_asset(config_for(&server), Some("pw"));
+        // 预置上个月的统计：新月份的第一笔上传应从 0 重新累加。
+        let last_month = (chrono::Local::now() - chrono::Duration::days(32))
+            .format("%Y-%m")
+            .to_string();
+        save_runtime_status(
+            &state.store,
+            &CloudRuntimeStatus {
+                upload_month: Some(last_month.clone()),
+                uploaded_bytes_month: 999,
+                ..CloudRuntimeStatus::default()
+            },
+        )
+        .unwrap();
+
+        let status = upload_now(&state).unwrap();
+        let upload_size = server
+            .object("/dav/ccswitchx/ccswitchx-backup.zip")
+            .unwrap()
+            .len() as u64;
+        let runtime = load_runtime_status(&state.store);
+        let this_month = chrono::Local::now().format("%Y-%m").to_string();
+        assert_eq!(runtime.upload_month.as_deref(), Some(this_month.as_str()));
+        assert_ne!(runtime.upload_month.as_deref(), Some(last_month.as_str()));
+        assert_eq!(runtime.uploaded_bytes_month, upload_size);
+        assert_eq!(status.uploaded_bytes_month, upload_size);
     }
 
     #[test]
@@ -952,11 +1325,12 @@ mod tests {
     }
 
     #[test]
-    fn restore_latest_records_remote_fingerprint() {
+    fn restore_latest_records_synced_baseline() {
         let server = FakeWebDav::start("me", "pw");
         let source = test_state_with_asset(config_for(&server), Some("pw"));
         let snapshot = build_named_snapshot(&source, "cloud-source");
         let fingerprint = backup::fingerprint_of_archive(&snapshot).unwrap();
+        let sha256 = crate::index::sha256_hex(&std::fs::read(&snapshot).unwrap());
         server.put_object(
             "/dav/ccswitchx/ccswitchx-backup.zip",
             std::fs::read(&snapshot).unwrap(),
@@ -965,13 +1339,15 @@ mod tests {
         let target = test_state(config_for(&server), Some("pw"));
         let report = restore_latest(&target, None).unwrap();
 
-        // 恢复完本地内容就等于云端，指纹基线要跟上，否则下一轮会把同样的内容再传回去。
-        assert_eq!(
-            load_runtime_status(&target.store)
-                .remote_fingerprint
-                .as_deref(),
-            Some(fingerprint.as_str())
-        );
+        // 恢复完本地内容就等于云端，基线要跟上，否则下一轮会把同样的内容再传回去。
+        let runtime = load_runtime_status(&target.store);
+        assert_eq!(runtime.synced_fingerprint.as_deref(), Some(fingerprint.as_str()));
+        assert_eq!(runtime.synced_sha256.as_deref(), Some(sha256.as_str()));
+        let synced_meta = runtime.synced_meta.expect("恢复成功应记录云端元数据");
+        assert!(synced_meta.exists);
+        assert_eq!(synced_meta.size_bytes, Some(report.remote_size_bytes));
+        let observed = runtime.observed_remote.expect("恢复成功应写观测缓存");
+        assert_eq!(observed, synced_meta);
         assert_eq!(
             backup::content_fingerprint(&target.store).unwrap(),
             fingerprint,

@@ -149,13 +149,21 @@ export interface CloudStatus {
   configured: boolean;
   hasPassword: boolean;
   autoUpload: boolean;
+  autoDownload: boolean;
+  uploadDelayHours: number;
   remote: CloudRemoteStatus | null;
   remoteError: string | null;
   /** 旧版上传的裸包没有 manifest，这里为 null。 */
   manifest: CloudManifestInfo | null;
   manifestError: string | null;
   lastUploadAt: number | null;
+  lastDownloadAt: number | null;
   lastError: string | null;
+  lastDownloadError: string | null;
+  /** 本机本自然月累计上传字节。 */
+  uploadedBytesMonth: number;
+  /** true 表示来自本地缓存，尚未联网探测。 */
+  fromCache: boolean;
 }
 
 export interface CloudRestoreReport {

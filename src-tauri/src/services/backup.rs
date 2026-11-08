@@ -1239,7 +1239,7 @@ pub(crate) fn auto_upload_if_needed(state: &crate::state::AppState) -> Result<()
     }
     let fingerprint = content_fingerprint(&state.store)?;
     let runtime = crate::services::cloud_backup::load_runtime_status(&state.store);
-    if runtime.remote_fingerprint.as_deref() == Some(fingerprint.as_str()) {
+    if runtime.synced_fingerprint.as_deref() == Some(fingerprint.as_str()) {
         return Ok(());
     }
     match crate::services::cloud_backup::upload_current(state, SnapshotKind::Auto) {
@@ -1676,7 +1676,7 @@ mod tests {
         let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
         auto_snapshot_if_changed(&state, 5).unwrap().unwrap();
         assert!(auto_upload_if_needed(&state).is_err());
-        assert!(load_runtime_status(&state.store).remote_fingerprint.is_none());
+        assert!(load_runtime_status(&state.store).synced_fingerprint.is_none());
 
         server.set_fail_put(false);
         auto_upload_if_needed(&state).unwrap();
@@ -1685,7 +1685,7 @@ mod tests {
             .is_some());
         assert_eq!(
             load_runtime_status(&state.store)
-                .remote_fingerprint
+                .synced_fingerprint
                 .as_deref(),
             Some(content_fingerprint(&state.store).unwrap().as_str()),
             "补传成功后基线要落值，否则每轮都会重传"
@@ -1729,7 +1729,7 @@ mod tests {
         );
         assert_eq!(
             load_runtime_status(&state.store)
-                .remote_fingerprint
+                .synced_fingerprint
                 .as_deref(),
             Some(content_fingerprint(&state.store).unwrap().as_str())
         );
@@ -1745,7 +1745,7 @@ mod tests {
         );
         assert_eq!(
             load_runtime_status(&state.store)
-                .remote_fingerprint
+                .synced_fingerprint
                 .as_deref(),
             Some(content_fingerprint(&state.store).unwrap().as_str())
         );

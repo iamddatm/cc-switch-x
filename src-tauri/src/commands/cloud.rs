@@ -100,6 +100,12 @@ pub async fn test_cloud_connection(
     .await
 }
 
+/// 只读本地设置、密钥与运行状态文件，立即返回上次观测到的云端状态。
+#[tauri::command]
+pub fn get_cloud_status_cached(state: State<'_, AppState>) -> Result<CloudStatus, AppError> {
+    cloud_backup::status_cached(&state)
+}
+
 #[tauri::command]
 pub async fn get_cloud_status(app: AppHandle) -> Result<CloudStatus, AppError> {
     run_blocking(move || {

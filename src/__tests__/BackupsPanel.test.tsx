@@ -110,6 +110,8 @@ const cloudStatus: CloudStatus = {
   configured: true,
   hasPassword: true,
   autoUpload: false,
+  autoDownload: false,
+  uploadDelayHours: 1,
   remote: {
     exists: true,
     sizeBytes: 2048,
@@ -127,7 +129,11 @@ const cloudStatus: CloudStatus = {
   },
   manifestError: null,
   lastUploadAt: Date.now() - 300_000,
+  lastDownloadAt: null,
   lastError: null,
+  lastDownloadError: null,
+  uploadedBytesMonth: 0,
+  fromCache: false,
 };
 
 function mockBase(git: GitStatus = healthyGit) {
@@ -564,12 +570,18 @@ test("disables cloud actions without config", async () => {
     configured: false,
     hasPassword: false,
     autoUpload: false,
+    autoDownload: false,
+    uploadDelayHours: 1,
     remote: null,
     remoteError: null,
     manifest: null,
     manifestError: null,
     lastUploadAt: null,
+    lastDownloadAt: null,
     lastError: null,
+    lastDownloadError: null,
+    uploadedBytesMonth: 0,
+    fromCache: false,
   });
   render(<BackupsPanel />);
   expect(await screen.findByText("未配置")).toBeInTheDocument();

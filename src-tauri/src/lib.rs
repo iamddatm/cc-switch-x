@@ -108,6 +108,7 @@ pub fn run() {
             commands::cloud::cloud_upload_now,
             commands::cloud::get_cloud_settings,
             commands::cloud::get_cloud_status,
+            commands::cloud::get_cloud_status_cached,
             commands::cloud::set_cloud_settings,
             commands::cloud::test_cloud_connection,
             commands::drift::list_drifts,
