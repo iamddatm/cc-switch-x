@@ -34,6 +34,7 @@ vi.mock("../lib/api", () => ({
     revealBackupLocation: vi.fn(),
     getCloudSettings: vi.fn(),
     getCloudStatus: vi.fn(),
+    getCloudStatusCached: vi.fn(),
     setCloudSettings: vi.fn(),
     testCloudConnection: vi.fn(),
     cloudUploadNow: vi.fn(),
@@ -150,6 +151,10 @@ function mockBase(git: GitStatus = healthyGit) {
   vi.mocked(api.getBackupSettings).mockResolvedValue(settings);
   vi.mocked(api.getCloudSettings).mockResolvedValue(cloudView);
   vi.mocked(api.getCloudStatus).mockResolvedValue(cloudStatus);
+  vi.mocked(api.getCloudStatusCached).mockResolvedValue({
+    ...cloudStatus,
+    fromCache: true,
+  });
   vi.mocked(api.setCloudSettings).mockResolvedValue(cloudView);
   vi.mocked(api.testCloudConnection).mockResolvedValue(42);
   vi.mocked(api.cloudUploadNow).mockResolvedValue(cloudStatus);
@@ -412,6 +417,14 @@ test("renders cloud backup section and remote status", async () => {
     cloudHeading.compareDocumentPosition(snapshotHeading) &
       Node.DOCUMENT_POSITION_FOLLOWING,
   ).toBeTruthy();
+});
+
+test("renders cached cloud status before the live probe resolves", async () => {
+  vi.mocked(api.getCloudStatusCached).mockResolvedValue({ ...cloudStatus, fromCache: true });
+  vi.mocked(api.getCloudStatus).mockReturnValue(new Promise(() => {}));
+  render(<BackupsPanel />);
+  expect(await screen.findByText("云端有备份")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "从云端恢复" })).toBeEnabled();
 });
 
 test("warns when the remote manifest is incompatible", async () => {

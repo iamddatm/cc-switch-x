@@ -19,6 +19,7 @@ export function useBackups() {
   const [commits, setCommits] = useState<GitCommit[]>([]);
   const [cloud, setCloud] = useState<CloudSettingsView | null>(null);
   const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null);
+  const [cloudChecking, setCloudChecking] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -33,16 +34,28 @@ export function useBackups() {
   }, []);
 
   const refreshCloudStatus = useCallback(async () => {
+    if (alive.current) setCloudChecking(true);
     try {
       const status = await api.getCloudStatus();
       if (alive.current) setCloudStatus(status);
     } catch (reason) {
-      if (alive.current) {
-        setCloudStatus(null);
-        setError(String(reason));
-      }
+      // 实时探测失败时保留缓存/旧状态，等下次刷新重试，只记录错误。
+      if (alive.current) setError(String(reason));
+    } finally {
+      if (alive.current) setCloudChecking(false);
     }
   }, []);
+
+  /** 先用本地缓存立即渲染云状态，再后台联网刷新；缓存读取失败不影响实时探测。 */
+  const primeCloudStatus = useCallback(async () => {
+    try {
+      const cached = await api.getCloudStatusCached();
+      if (alive.current) setCloudStatus(cached);
+    } catch {
+      // 缓存不可用时直接走实时刷新。
+    }
+    await refreshCloudStatus();
+  }, [refreshCloudStatus]);
 
   /** 提交历史只在 HEAD 提交时间变化时重拉，避免轮询反复跑 git log。 */
   const syncCommits = useCallback(async (status: GitStatus) => {
@@ -77,13 +90,13 @@ export function useBackups() {
       setCloud(cloudSettings);
       await syncCommits(status);
       setError(null);
-      void refreshCloudStatus();
+      void primeCloudStatus();
     } catch (reason) {
       if (alive.current) setError(String(reason));
     } finally {
       if (alive.current) setLoading(false);
     }
-  }, [refreshCloudStatus, syncCommits]);
+  }, [primeCloudStatus, syncCommits]);
 
   const refreshGit = useCallback(async () => {
     try {
@@ -133,6 +146,7 @@ export function useBackups() {
     commits,
     cloud,
     cloudStatus,
+    cloudChecking,
     loading,
     busy,
     error,
