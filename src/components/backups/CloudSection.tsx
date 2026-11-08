@@ -7,6 +7,7 @@ import { Field } from "../ui/Field";
 import { IconButton } from "../ui/IconButton";
 import { Input } from "../ui/Input";
 import { Notice } from "../ui/Notice";
+import { Select } from "../ui/Select";
 import { formatBytes, formatRelativeTime } from "../../lib/format";
 import type { CloudSettingsView, CloudStatus } from "../../types";
 
@@ -38,6 +39,7 @@ function cloudState(status: CloudStatus | null): {
 export function CloudSection({
   cloud,
   cloudStatus,
+  cloudChecking,
   loading,
   busy,
   onRefreshStatus,
@@ -49,12 +51,17 @@ export function CloudSection({
 }: {
   cloud: CloudSettingsView | null;
   cloudStatus: CloudStatus | null;
+  cloudChecking: boolean;
   loading: boolean;
   busy: string | null;
   onRefreshStatus: () => void;
   onTest: (draft: CloudDraft) => void;
   onSave: (draft: CloudDraft) => Promise<CloudSettingsView | null>;
-  onToggleAuto: (enabled: boolean) => void;
+  onToggleAuto: (
+    patch: Partial<
+      Pick<CloudSettingsView, "autoUpload" | "autoDownload" | "uploadDelayHours">
+    >,
+  ) => void;
   onUpload: () => void;
   onOpenRestore: () => void;
 }) {
@@ -105,9 +112,21 @@ export function CloudSection({
     baseUrl !== (cloud?.baseUrl ?? "") ||
     username !== (cloud?.username ?? "") ||
     remoteDir !== (cloud?.remoteDir ?? "");
-  const restoreBlocked =
+  // 恢复只认「已知」事实：状态未知（尚无缓存）时可点，由恢复命令自行校验并报错。
+  const configured =
+    cloudStatus?.configured ??
+    (!!cloud?.baseUrl && !!cloud?.username && !!cloud?.hasPassword);
+  const knownMissing = cloudStatus?.remote?.exists === false;
+  const knownIncompatible =
     cloudStatus?.manifest?.compatible === false ||
-    cloudStatus?.remote?.exists === false;
+    (cloudStatus?.remote?.exists === true && !cloudStatus?.manifest);
+  const restoreBlocked =
+    !!busy || draftDirty || !configured || knownMissing || knownIncompatible;
+  const delayHours = cloud?.uploadDelayHours ?? 1;
+  const autoUploadHint = `改动停下 ${delayHours} 小时后上传；持续编辑最多每 ${Math.min(
+    delayHours * 4,
+    24,
+  )} 小时补传一次，内容没变不重复上传。`;
 
   return (
     <section className="rounded-panel border border-border bg-surface">
@@ -115,7 +134,8 @@ export function CloudSection({
         <Cloud size={15} className="text-fg-3" aria-hidden />
         <h3 className="text-strong text-fg-1">云备份（WebDAV）</h3>
         <Badge tone={badge.tone}>{badge.label}</Badge>
-        <span className="ml-auto flex gap-1.5">
+        <span className="ml-auto flex items-center gap-2">
+          {cloudChecking && <span className="text-caption text-fg-3">检查中…</span>}
           <IconButton label="刷新云状态" disabled={loading} onClick={onRefreshStatus}>
             <RefreshCw size={13} aria-hidden />
           </IconButton>
@@ -186,18 +206,50 @@ export function CloudSection({
                 />
               </Field>
             </div>
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-              <Checkbox
-                id="cloud-auto-upload"
-                label="自动备份"
-                checked={cloud.autoUpload}
-                disabled={!cloud.enabled || !!busy}
-                onChange={(event) => onToggleAuto(event.target.checked)}
-              />
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
+                <div className="pb-1.5">
+                  <Checkbox
+                    id="cloud-auto-upload"
+                    label="自动上传"
+                    checked={cloud.autoUpload}
+                    disabled={!cloud.enabled || !!busy}
+                    onChange={(event) =>
+                      onToggleAuto({ autoUpload: event.target.checked })
+                    }
+                  />
+                </div>
+                <Field label="上传延迟" htmlFor="cloud-upload-delay" className="w-32">
+                  <Select
+                    id="cloud-upload-delay"
+                    value={String(cloud.uploadDelayHours)}
+                    disabled={!cloud.enabled || !!busy}
+                    onChange={(event) =>
+                      onToggleAuto({ uploadDelayHours: Number(event.target.value) })
+                    }
+                  >
+                    {[1, 6, 12, 24].map((hours) => (
+                      <option key={hours} value={hours}>
+                        {hours} 小时
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
+              <p className="text-caption text-fg-3">{autoUploadHint}</p>
+              <div>
+                <Checkbox
+                  id="cloud-auto-download"
+                  label="自动下载"
+                  checked={cloud.autoDownload}
+                  disabled={!cloud.enabled || !!busy}
+                  onChange={(event) =>
+                    onToggleAuto({ autoDownload: event.target.checked })
+                  }
+                />
+              </div>
               <p className="text-caption text-fg-3">
-                {cloud.enabled
-                  ? "真源变化后约 1 秒自动打包上传；内容没变不会重复覆盖。"
-                  : "选中上方「WebDAV 云备份」启用通道，才能开启自动备份。"}
+                启动时及每 15 分钟检查云端；有更新就覆盖本机（云端为准，覆盖前自动建安全快照）。
               </p>
             </div>
             {draftDirty && (
@@ -233,7 +285,7 @@ export function CloudSection({
               </Button>
               <Button
                 variant="danger"
-                disabled={!cloudStatus?.configured || !!busy || draftDirty || restoreBlocked}
+                disabled={restoreBlocked}
                 title={
                   restoreBlocked
                     ? "云端没有可恢复的备份，或该备份与当前版本不兼容"
@@ -265,7 +317,7 @@ export function CloudSection({
                     ? `${cloudStatus.manifest.deviceName} · v${cloudStatus.manifest.appVersion} · ${
                         cloudStatus.manifest.files
                       } 个文件 · ${formatRelativeTime(cloudStatus.manifest.createdAt)}上传`
-                    : "旧版上传的备份没有 manifest 描述文件"
+                    : "尚未探测到云端 manifest"
                 }
               >
                 {cloudStatus?.manifest
@@ -295,6 +347,22 @@ export function CloudSection({
                 {cloudStatus?.lastUploadAt ? formatRelativeTime(cloudStatus.lastUploadAt) : "—"}
               </p>
             </div>
+            <div>
+              <p className="text-caption text-fg-3">上次下载</p>
+              <p className="text-body text-fg-1">
+                {cloudStatus?.lastDownloadAt
+                  ? formatRelativeTime(cloudStatus.lastDownloadAt)
+                  : "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-caption text-fg-3">本机本月上传</p>
+              <p className="text-body text-fg-1">
+                {cloudStatus
+                  ? formatBytes(cloudStatus.uploadedBytesMonth)
+                  : "—"}
+              </p>
+            </div>
           </div>
 
           {cloudStatus?.remoteError && (
@@ -305,8 +373,7 @@ export function CloudSection({
           {cloudStatus?.manifest && !cloudStatus.manifest.compatible && (
             <div className="px-4 pb-3">
               <Notice tone="danger">
-                云端备份由不兼容的版本上传（manifest schema {cloudStatus.manifest.schema}），
-                请升级 CC Switch X 后再恢复。
+                {`云端备份由不兼容的版本上传（manifest schema ${cloudStatus.manifest.schema}），请从源设备重新上传一次。`}
               </Notice>
             </div>
           )}
@@ -317,20 +384,17 @@ export function CloudSection({
               </Notice>
             </div>
           )}
-          {cloudStatus?.remote?.exists &&
-            !cloudStatus.manifest &&
-            !cloudStatus.manifestError && (
-              <div className="px-4 pb-3">
-                <Notice tone="info">
-                  云端备份是旧版上传的裸包，没有 manifest：来源与完整性无法核对。
-                  重新上传一次即可补齐。
-                </Notice>
-              </div>
-            )}
           {cloudStatus?.lastError && (
             <div className="px-4 pb-3">
               <Notice tone="warning">
                 上次上传失败：{cloudStatus.lastError}
+              </Notice>
+            </div>
+          )}
+          {cloudStatus?.lastDownloadError && (
+            <div className="px-4 pb-3">
+              <Notice tone="warning">
+                上次自动下载失败：{cloudStatus.lastDownloadError}
               </Notice>
             </div>
           )}

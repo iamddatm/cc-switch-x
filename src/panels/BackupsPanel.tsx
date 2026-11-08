@@ -22,13 +22,32 @@ import { GitSection, type GitDraft } from "../components/backups/GitSection";
 import { useBackups } from "../hooks/useBackups";
 import { api } from "../lib/api";
 import { formatBytes, formatRelativeTime } from "../lib/format";
-import type { BackupSettings, GitCommit, SnapshotKind } from "../types";
+import type {
+  BackupSettings,
+  CloudSettingsView,
+  GitCommit,
+  SnapshotKind,
+} from "../types";
 
 const INTERVALS = [0, 6, 12, 24, 48, 168];
 const RETAINS = [3, 5, 10, 15, 20, 30, 50];
 
 /** 远端备份只能启用一种；两种都未开启时只做本机快照。 */
 type BackupMethod = "none" | "git" | "webdav";
+
+/** 后端自动同步成功后推送的载荷；上传带大小，下载带恢复/删除数与安全快照。 */
+type CloudAutoSyncedPayload =
+  | { kind: "upload"; bytes: number }
+  | {
+      kind: "download";
+      restoredFiles: number;
+      removedFiles: number;
+      safetyBackup: string;
+    };
+
+type CloudAutoPatch = Partial<
+  Pick<CloudSettingsView, "autoUpload" | "autoDownload" | "uploadDelayHours">
+>;
 
 const KIND_LABEL: Record<SnapshotKind, string> = {
   manual: "手动",
@@ -63,6 +82,7 @@ export function BackupsPanel() {
     commits,
     cloud,
     cloudStatus,
+    cloudChecking,
     loading,
     busy,
     error,
@@ -107,6 +127,28 @@ export function BackupsPanel() {
       unlisten?.();
     };
   }, [cloudRestoreOpen]);
+
+  // 后台 worker 完成自动上传/下载后推送事件：刷新云状态，并在固定提示条里说明结果。
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: UnlistenFn | undefined;
+    void listen<CloudAutoSyncedPayload>("cloud-auto-synced", (event) => {
+      const payload = event.payload;
+      setNotice(
+        payload.kind === "download"
+          ? `已自动从云端恢复 ${payload.restoredFiles} 个文件，删除 ${payload.removedFiles} 个；安全快照：${payload.safetyBackup}`
+          : `已自动上传云端备份（${formatBytes(payload.bytes)}）`,
+      );
+      void refreshCloudStatus();
+    }).then((stop) => {
+      if (cancelled) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [refreshCloudStatus]);
 
   /** 打开确认框后先拉一次远端状态：缓存可能已经过期，不能拿旧包信息确认覆盖。 */
   const openCloudRestore = async () => {
@@ -313,8 +355,8 @@ export function BackupsPanel() {
     }
   };
 
-  /** 自动备份是策略而非草稿：切换即保存，避免和连接字段的「保存」混在一起。 */
-  const toggleCloudAuto = (autoUpload: boolean) => {
+  /** 自动上传/下载是策略而非草稿：切换即保存，避免和连接字段的「保存」混在一起。 */
+  const toggleCloudAuto = (patch: CloudAutoPatch) => {
     if (!cloud || !cloud.enabled) return;
     void act("cloud-auto", () =>
       api.setCloudSettings({
@@ -323,9 +365,9 @@ export function BackupsPanel() {
         password: null,
         remoteDir: cloud.remoteDir,
         enabled: true,
-        autoUpload,
-        autoDownload: cloud.autoDownload,
-        uploadDelayHours: cloud.uploadDelayHours,
+        autoUpload: patch.autoUpload ?? cloud.autoUpload,
+        autoDownload: patch.autoDownload ?? cloud.autoDownload,
+        uploadDelayHours: patch.uploadDelayHours ?? cloud.uploadDelayHours,
       }),
     );
   };
@@ -496,7 +538,7 @@ export function BackupsPanel() {
               <div className="min-w-0 flex-1">
                 <h3 className="text-strong text-fg-1">远端备份方式</h3>
                 <p className="text-caption text-fg-3">
-                  Git 与 WebDAV 只能启用一种；本机快照不受影响。Git 需先初始化并验证远端，WebDAV 需先保存完整连接配置，启用后可在下方单独打开「自动备份」。
+                  Git 与 WebDAV 只能启用一种；本机快照不受影响。Git 需先初始化并验证远端，WebDAV 需先保存完整连接配置，启用后可在下方分别打开「自动上传」与「自动下载」。
                 </p>
               </div>
               <SegmentedControl
@@ -512,6 +554,7 @@ export function BackupsPanel() {
           <CloudSection
             cloud={cloud}
             cloudStatus={cloudStatus}
+            cloudChecking={cloudChecking}
             loading={loading}
             busy={busy}
             onRefreshStatus={() => void refreshCloudStatus()}

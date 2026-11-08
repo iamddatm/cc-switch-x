@@ -9,15 +9,17 @@ import type {
   GitStatus,
 } from "../types";
 
-// jsdom 里没有 Tauri 事件桥：只记录恢复进度监听的回调，供进度用例手动触发。
+// jsdom 里没有 Tauri 事件桥：按事件名记录回调，供进度与自动同步用例手动触发。
 const eventBridge = vi.hoisted(() => ({
-  handler: null as null | ((event: { payload: { received: number; total: number } }) => void),
+  handlers: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async (_name: string, handler: typeof eventBridge.handler) => {
-    eventBridge.handler = handler;
-    return () => {};
-  }),
+  listen: vi.fn(
+    async (name: string, handler: (event: { payload: unknown }) => void) => {
+      eventBridge.handlers.set(name, handler);
+      return () => {};
+    },
+  ),
 }));
 
 vi.mock("../lib/api", () => ({
@@ -217,7 +219,7 @@ function mockBase(git: GitStatus = healthyGit) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  eventBridge.handler = null;
+  eventBridge.handlers.clear();
   mockBase();
 });
 
@@ -317,11 +319,12 @@ test("enables webdav through the method selector", async () => {
   );
 });
 
-test("toggles webdav auto backup after the channel is enabled", async () => {
+test("toggles auto upload and auto download independently", async () => {
   vi.mocked(api.getCloudSettings).mockResolvedValue({ ...cloudView, enabled: true });
   render(<BackupsPanel />);
   await screen.findByText("云备份（WebDAV）");
-  fireEvent.click(screen.getByLabelText("自动备份"));
+
+  fireEvent.click(screen.getByLabelText("自动上传"));
   await waitFor(() =>
     expect(api.setCloudSettings).toHaveBeenCalledWith({
       baseUrl: cloudView.baseUrl,
@@ -334,12 +337,47 @@ test("toggles webdav auto backup after the channel is enabled", async () => {
       uploadDelayHours: 1,
     }),
   );
+
+  fireEvent.click(screen.getByLabelText("自动下载"));
+  await waitFor(() =>
+    expect(api.setCloudSettings).toHaveBeenCalledWith({
+      baseUrl: cloudView.baseUrl,
+      username: cloudView.username,
+      password: null,
+      remoteDir: cloudView.remoteDir,
+      enabled: true,
+      autoUpload: false,
+      autoDownload: true,
+      uploadDelayHours: 1,
+    }),
+  );
 });
 
-test("auto backup needs an enabled channel first", async () => {
+test("changes the upload delay", async () => {
+  vi.mocked(api.getCloudSettings).mockResolvedValue({ ...cloudView, enabled: true });
   render(<BackupsPanel />);
   await screen.findByText("云备份（WebDAV）");
-  expect(screen.getByLabelText("自动备份")).toBeDisabled();
+
+  fireEvent.change(screen.getByLabelText("上传延迟"), { target: { value: "6" } });
+  await waitFor(() =>
+    expect(api.setCloudSettings).toHaveBeenCalledWith({
+      baseUrl: cloudView.baseUrl,
+      username: cloudView.username,
+      password: null,
+      remoteDir: cloudView.remoteDir,
+      enabled: true,
+      autoUpload: false,
+      autoDownload: false,
+      uploadDelayHours: 6,
+    }),
+  );
+});
+
+test("auto upload needs an enabled channel first", async () => {
+  render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  expect(screen.getByLabelText("自动上传")).toBeDisabled();
+  expect(screen.getByLabelText("自动下载")).toBeDisabled();
 });
 
 test("disables git backup until the remote is verified", async () => {
@@ -410,6 +448,9 @@ test("renders cloud backup section and remote status", async () => {
   expect(screen.getByText("云端有备份")).toBeInTheDocument();
   // manifest 描述上传来源：换机时先看清是哪台机器、哪个版本传的包。
   expect(screen.getByText("DESKTOP-TEST · v0.10.0")).toBeInTheDocument();
+  // 自动下载与本月上传统计也要在状态区可见。
+  expect(screen.getByText("上次下载")).toBeInTheDocument();
+  expect(screen.getByText("本机本月上传")).toBeInTheDocument();
   // WebDAV 是主用的远端通道，区块排在快照之前。
   const cloudHeading = screen.getByText("云备份（WebDAV）");
   const snapshotHeading = screen.getByText("快照", { selector: "h3" });
@@ -427,6 +468,45 @@ test("renders cached cloud status before the live probe resolves", async () => {
   expect(screen.getByRole("button", { name: "从云端恢复" })).toBeEnabled();
 });
 
+test("keeps restore enabled while the live status is still loading", async () => {
+  vi.mocked(api.getCloudStatusCached).mockResolvedValue({ ...cloudStatus, fromCache: true });
+  vi.mocked(api.getCloudStatus).mockReturnValue(new Promise(() => {}));
+  render(<BackupsPanel />);
+  await screen.findByText("云端有备份");
+  // 实时探测没回来不算「已知不可恢复」，恢复按钮不该被检查中卡住。
+  expect(screen.getByText("检查中…")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "从云端恢复" })).toBeEnabled();
+});
+
+test("refreshes cloud status after auto sync event", async () => {
+  render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  await waitFor(() =>
+    expect(eventBridge.handlers.get("cloud-auto-synced")).toBeTruthy(),
+  );
+
+  const calls = vi.mocked(api.getCloudStatus).mock.calls.length;
+  act(() =>
+    eventBridge.handlers.get("cloud-auto-synced")?.({
+      payload: {
+        kind: "download",
+        restoredFiles: 3,
+        removedFiles: 1,
+        safetyBackup: "backup_auto",
+      },
+    }),
+  );
+
+  await waitFor(() =>
+    expect(vi.mocked(api.getCloudStatus).mock.calls.length).toBeGreaterThan(calls),
+  );
+  expect(
+    await screen.findByText(
+      "已自动从云端恢复 3 个文件，删除 1 个；安全快照：backup_auto",
+    ),
+  ).toBeInTheDocument();
+});
+
 test("starts the cached cloud probe in parallel with local data", async () => {
   // 本地批次永不返回：缓存请求仍应在挂载后立刻发出，而不是等本地数据齐了才发。
   vi.mocked(api.getCloudSettings).mockReturnValue(new Promise(() => {}));
@@ -440,15 +520,35 @@ test("warns when the remote manifest is incompatible", async () => {
     manifest: { ...cloudStatus.manifest!, schema: 99, compatible: false },
   });
   render(<BackupsPanel />);
-  expect(
-    await screen.findByText(/不兼容的版本上传（manifest schema 99）/),
-  ).toBeInTheDocument();
+  expect(await screen.findByText(/请从源设备重新上传/)).toBeInTheDocument();
 });
 
-test("explains a legacy remote package without manifest", async () => {
+test("blocks restore when the remote manifest is missing", async () => {
   vi.mocked(api.getCloudStatus).mockResolvedValue({ ...cloudStatus, manifest: null });
+  vi.mocked(api.getCloudStatusCached).mockResolvedValue({
+    ...cloudStatus,
+    manifest: null,
+    fromCache: true,
+  });
   render(<BackupsPanel />);
-  expect(await screen.findByText(/旧版上传的裸包，没有 manifest/)).toBeInTheDocument();
+  await screen.findByText("云备份（WebDAV）");
+  expect(screen.getByRole("button", { name: "从云端恢复" })).toBeDisabled();
+});
+
+test("shows the last auto download error", async () => {
+  vi.mocked(api.getCloudStatus).mockResolvedValue({
+    ...cloudStatus,
+    lastDownloadError: "下载校验失败",
+  });
+  vi.mocked(api.getCloudStatusCached).mockResolvedValue({
+    ...cloudStatus,
+    lastDownloadError: "下载校验失败",
+    fromCache: true,
+  });
+  render(<BackupsPanel />);
+  expect(
+    await screen.findByText("上次自动下载失败：下载校验失败"),
+  ).toBeInTheDocument();
 });
 
 test("saves cloud settings without overwriting the saved password", async () => {
@@ -578,8 +678,14 @@ test("shows download progress while restoring", async () => {
   await waitFor(() => expect(confirm).toBeEnabled());
   fireEvent.click(confirm);
 
-  await waitFor(() => expect(eventBridge.handler).not.toBeNull());
-  act(() => eventBridge.handler?.({ payload: { received: 512, total: 2048 } }));
+  await waitFor(() =>
+    expect(eventBridge.handlers.get("cloud-restore-progress")).toBeTruthy(),
+  );
+  act(() =>
+    eventBridge.handlers.get("cloud-restore-progress")?.({
+      payload: { received: 512, total: 2048 },
+    }),
+  );
 
   expect(await within(dialog).findByText(/512 B/)).toBeInTheDocument();
   expect(within(dialog).getByText(/25%/)).toBeInTheDocument();
