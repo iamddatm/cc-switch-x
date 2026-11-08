@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
@@ -1139,38 +1139,190 @@ pub fn spawn_periodic(app: tauri::AppHandle) {
         });
 }
 
-/// 自动上传的防抖窗口：写入停下 1 秒后上传；持续写入最多合并 10 秒。
-const AUTO_UPLOAD_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(1000);
-const AUTO_UPLOAD_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// 自动同步成功后发给前端的消息事件；载荷见 `emit_auto_synced`。
+const AUTO_SYNCED_EVENT: &str = "cloud-auto-synced";
+/// 上传普通失败后的重试间隔；避免网络抖动时每个 tick 都重新打包上传。
+const UPLOAD_RETRY: Duration = Duration::from_secs(5 * 60);
+/// 自动下载探测间隔。
+const DOWNLOAD_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// 本地指纹对账间隔；补捞启动前遗留的未同步改动。
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
-/// 监听真源写入，安静下来后自动上传：对齐 cc-switch 的「变更即备份」，
-/// 但保留内容指纹比对，没变化不重复上传。
-pub fn spawn_change_worker(app: tauri::AppHandle) {
+/// 待上传的改动。只在 worker 内存里存在，重启后由启动对账重新计时。
+struct PendingUpload {
+    /// 本轮第一处改动的时间；用于持续编辑的兜底上限。
+    first_at: Instant,
+    /// 最近一处改动的时间；延迟从最后一次改动重新起算。
+    last_at: Instant,
+    /// 上传失败后的重试时间；为 `None` 时按正常延迟判定。
+    retry_at: Option<Instant>,
+}
+
+/// 上传时间点：最后一次改动等满延迟，但首处改动后最多等 `min(delay × 4, 24h)`，
+/// 持续编辑时兜底先到，不会因为一直在写而永远不上传。
+fn upload_deadline(first: Instant, last: Instant, delay_hours: u32) -> Instant {
+    let delay = Duration::from_secs(u64::from(delay_hours).saturating_mul(3600));
+    let max_wait = delay
+        .saturating_mul(4)
+        .min(Duration::from_secs(24 * 60 * 60));
+    let after_last = last.checked_add(delay).unwrap_or(last);
+    let capped = first.checked_add(max_wait).unwrap_or(first);
+    after_last.min(capped)
+}
+
+/// 读 worker 需要的设置；状态或锁不可用时按「全部关闭」处理。
+fn worker_settings(app: &tauri::AppHandle) -> (bool, bool, u32) {
     use tauri::Manager;
+    match app.try_state::<crate::state::AppState>() {
+        Some(state) => match state.settings.lock() {
+            Ok(settings) => (
+                settings.cloud.enabled,
+                settings.cloud.auto_upload,
+                settings.cloud.upload_delay_hours,
+            ),
+            Err(_) => (false, false, 0),
+        },
+        None => (false, false, 0),
+    }
+}
+
+fn emit_auto_synced(app: &tauri::AppHandle, payload: serde_json::Value) {
+    use tauri::Emitter;
+    if let Err(error) = app.emit(AUTO_SYNCED_EVENT, payload) {
+        eprintln!("发送云备份同步事件失败：{error}");
+    }
+}
+
+/// 对账：本地真源与同步基线不一致说明有改动没传上去，补一个 pending。
+/// 调用方负责只在 `auto_upload` 开启时调用，避免白白计算指纹。
+fn reconcile_pending(state: &crate::state::AppState, pending: &mut Option<PendingUpload>) {
+    if pending.is_some() {
+        return;
+    }
+    let Ok(local) = content_fingerprint(&state.store) else {
+        return;
+    };
+    let synced = crate::services::cloud_backup::load_runtime_status(&state.store).synced_fingerprint;
+    if synced.as_deref() == Some(local.as_str()) {
+        return;
+    }
+    let now = Instant::now();
+    *pending = Some(PendingUpload {
+        first_at: now,
+        last_at: now,
+        retry_at: None,
+    });
+}
+
+/// 单线程调度「延迟上传 + 定期下载 + 定期对账」，三个定时器共用一个
+/// `recv_timeout` 循环：没有改动时阻塞到最近的定时点，不额外开线程。
+pub fn spawn_change_worker(app: tauri::AppHandle) {
+    use std::sync::mpsc::RecvTimeoutError;
+    use tauri::Manager;
+
     let Some(rx) = crate::change_signal::install() else {
         return;
     };
     let _ = std::thread::Builder::new()
-        .name("cc-switch-x-auto-upload".into())
+        .name("cc-switch-x-auto-sync".into())
         .spawn(move || {
-            while rx.recv().is_ok() {
-                let started = std::time::Instant::now();
-                loop {
-                    let elapsed = started.elapsed();
-                    if elapsed >= AUTO_UPLOAD_MAX_WAIT {
-                        break;
+            let mut pending: Option<PendingUpload> = None;
+            // 启动立即检查一次，之后按间隔轮询。
+            let mut next_download = Instant::now();
+            let mut next_reconcile = Instant::now();
+            loop {
+                let (_, auto_upload, delay_hours) = worker_settings(&app);
+                let now = Instant::now();
+                let mut next_wake = next_download.min(next_reconcile);
+                if let Some(current) = &pending {
+                    let deadline = current.retry_at.unwrap_or_else(|| {
+                        upload_deadline(current.first_at, current.last_at, delay_hours)
+                    });
+                    next_wake = next_wake.min(deadline);
+                }
+
+                match rx.recv_timeout(next_wake.saturating_duration_since(now)) {
+                    Ok(()) => {
+                        // 信号到达时重新读设置：设置保存也会发信号，不能用旧值判开关。
+                        let (enabled, auto_upload, _) = worker_settings(&app);
+                        if enabled && auto_upload {
+                            let changed_at = Instant::now();
+                            if let Some(current) = pending.as_mut() {
+                                current.last_at = changed_at;
+                            } else {
+                                pending = Some(PendingUpload {
+                                    first_at: changed_at,
+                                    last_at: changed_at,
+                                    retry_at: None,
+                                });
+                            }
+                        }
                     }
-                    let wait = AUTO_UPLOAD_DEBOUNCE.min(AUTO_UPLOAD_MAX_WAIT - elapsed);
-                    match rx.recv_timeout(wait) {
-                        Ok(()) => continue,
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => return,
+                }
+
+                let Some(state) = app.try_state::<crate::state::AppState>() else {
+                    // 状态还没就绪时把定时器往后推，避免 past-due 定时器造成忙等。
+                    next_download = Instant::now() + Duration::from_secs(1);
+                    next_reconcile = next_download;
+                    continue;
+                };
+                let now = Instant::now();
+
+                // 1. 到点先上传：成功（含「无需上传」）清 pending，失败 5 分钟后再试。
+                let upload_due = pending.as_ref().is_some_and(|current| {
+                    let deadline = current.retry_at.unwrap_or_else(|| {
+                        upload_deadline(current.first_at, current.last_at, delay_hours)
+                    });
+                    now >= deadline
+                });
+                if upload_due {
+                    match auto_upload_if_needed(&state) {
+                        Ok(Some(bytes)) => {
+                            pending = None;
+                            emit_auto_synced(
+                                &app,
+                                serde_json::json!({ "kind": "upload", "bytes": bytes }),
+                            );
+                        }
+                        Ok(None) => pending = None,
+                        Err(error) => {
+                            eprintln!("自动上传云备份失败：{error}");
+                            let failed_at = Instant::now();
+                            pending = Some(PendingUpload {
+                                first_at: failed_at,
+                                last_at: failed_at,
+                                retry_at: Some(failed_at + UPLOAD_RETRY),
+                            });
+                        }
                     }
                 }
-                if let Some(state) = app.try_state::<crate::state::AppState>() {
-                    if let Err(error) = auto_upload_if_needed(&state) {
-                        eprintln!("自动上传云备份失败：{error}");
+
+                // 2. 再探测云端：变了才下载并恢复，成功恢复才发事件。
+                if now >= next_download {
+                    match crate::services::cloud_backup::auto_download_if_needed(&state) {
+                        Ok(Some(report)) => emit_auto_synced(
+                            &app,
+                            serde_json::json!({
+                                "kind": "download",
+                                "restoredFiles": report.restored_files,
+                                "removedFiles": report.removed_files,
+                                "safetyBackup": report.safety_backup,
+                            }),
+                        ),
+                        Ok(None) => {}
+                        Err(error) => eprintln!("自动下载云备份失败：{error}"),
                     }
+                    next_download = Instant::now() + DOWNLOAD_INTERVAL;
+                }
+
+                // 3. 最后对账：补捞信号丢失或上次失败留下的未同步改动。
+                if now >= next_reconcile {
+                    if auto_upload {
+                        reconcile_pending(&state, &mut pending);
+                    }
+                    next_reconcile = Instant::now() + RECONCILE_INTERVAL;
                 }
             }
         });
@@ -1195,10 +1347,6 @@ pub(crate) fn periodic_once(state: &crate::state::AppState) {
                 eprintln!("自动备份失败：{error}");
             }
         }
-    }
-    // 自动上传不跟快照间隔绑定：关闭应用期间的改动也要在下次检查时补传。
-    if let Err(error) = auto_upload_if_needed(state) {
-        eprintln!("自动上传云备份失败：{error}");
     }
 }
 
@@ -1228,13 +1376,18 @@ pub(crate) fn auto_snapshot_if_changed(
 
 /// 云端只有一份包，它代表当前真源：内容有变、或云端还不是这份内容时才上传覆盖。
 /// 基线独立于「是否新建了快照」，所以手动上传过的内容、以及上次失败的内容都能被补传。
-pub(crate) fn auto_upload_if_needed(state: &crate::state::AppState) -> Result<(), AppError> {
+///
+/// 真正上传时返回 `Some(包字节数)`，供 worker 发事件；暂停、未启用、内容一致或
+/// 连接不完整等「本轮无需动作」的情况返回 `Ok(None)`。
+pub(crate) fn auto_upload_if_needed(
+    state: &crate::state::AppState,
+) -> Result<Option<u64>, AppError> {
     // 认证被拒后继续按周期重试会触发坚果云的临时封禁；暂停期内不做任何上传探测。
     if crate::services::cloud_backup::load_runtime_status(&state.store)
         .auth_paused_until
         .is_some_and(|until| until > chrono::Utc::now().timestamp_millis())
     {
-        return Ok(());
+        return Ok(None);
     }
     let (enabled, auto_upload, git) = match state.settings.lock() {
         Ok(settings) => (
@@ -1242,27 +1395,33 @@ pub(crate) fn auto_upload_if_needed(state: &crate::state::AppState) -> Result<()
             settings.cloud.auto_upload,
             settings.backup.git.clone(),
         ),
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(None),
     };
     if !enabled || !auto_upload {
-        return Ok(());
+        return Ok(None);
     }
     // 远端备份只能选一种：Git 自动同步生效时不再上传 WebDAV。
     // 历史设置可能同时开启两者；以「Git 已验证且已开启」为生效条件，避免两边都跑。
     let git_active = git.enabled
         && git_sync::is_remote_verified(&state.store, git.remote.as_deref());
     if git_active {
-        return Ok(());
+        return Ok(None);
     }
     let fingerprint = content_fingerprint(&state.store)?;
     let runtime = crate::services::cloud_backup::load_runtime_status(&state.store);
     if runtime.synced_fingerprint.as_deref() == Some(fingerprint.as_str()) {
-        return Ok(());
+        return Ok(None);
     }
     match crate::services::cloud_backup::upload_current(state, SnapshotKind::Auto) {
         // 连接配置不完整（例如密码被清掉）不是故障，等用户补齐后再传。
-        Err(AppError::InvalidInput(_)) => Ok(()),
-        other => other.map(|_| ()),
+        Err(AppError::InvalidInput(_)) => Ok(None),
+        Ok(status) => Ok(Some(
+            status
+                .remote
+                .and_then(|remote| remote.size_bytes)
+                .unwrap_or(0),
+        )),
+        Err(error) => Err(error),
     }
 }
 
@@ -1672,6 +1831,59 @@ mod tests {
     }
 
     #[test]
+    fn upload_deadline_waits_for_delay_after_last_change() {
+        let now = std::time::Instant::now();
+        assert_eq!(
+            upload_deadline(now - std::time::Duration::from_secs(10), now, 1),
+            now + std::time::Duration::from_secs(3600)
+        );
+    }
+
+    #[test]
+    fn upload_deadline_caps_continuous_edits() {
+        let now = std::time::Instant::now();
+        // first 已过去 10 小时：兜底上限 4 小时，deadline 已经过期，应立即上传。
+        assert_eq!(
+            upload_deadline(now - std::time::Duration::from_secs(36_000), now, 1),
+            now - std::time::Duration::from_secs(21_600)
+        );
+    }
+
+    #[test]
+    fn auto_upload_returns_uploaded_bytes_only_when_it_uploads() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
+
+        let bytes = auto_upload_if_needed(&state).unwrap().expect("首次应真正上传");
+        assert!(bytes > 0, "上传成功要返回包大小：{bytes}");
+        assert_eq!(
+            auto_upload_if_needed(&state).unwrap(),
+            None,
+            "内容未变时不该再上传"
+        );
+    }
+
+    #[test]
+    fn reconcile_creates_pending_only_when_local_differs_from_synced() {
+        let state = plain_state();
+        let mut pending = None;
+        reconcile_pending(&state, &mut pending);
+        assert!(pending.is_some(), "基线未知说明本地内容没传过，应当补 pending");
+
+        save_runtime_status(
+            &state.store,
+            &CloudRuntimeStatus {
+                synced_fingerprint: Some(content_fingerprint(&state.store).unwrap()),
+                ..CloudRuntimeStatus::default()
+            },
+        )
+        .unwrap();
+        let mut pending = None;
+        reconcile_pending(&state, &mut pending);
+        assert!(pending.is_none(), "本地指纹已等于基线时不该再记 pending");
+    }
+
+    #[test]
     fn auto_upload_skips_when_remote_already_matches() {
         let server = FakeWebDav::start("me", "pw");
         let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
@@ -1701,7 +1913,7 @@ mod tests {
         )
         .unwrap();
 
-        auto_upload_if_needed(&state).unwrap();
+        assert_eq!(auto_upload_if_needed(&state).unwrap(), None);
         assert_eq!(
             server.request_count("PUT"),
             0,
@@ -1797,7 +2009,7 @@ mod tests {
         let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
         state.settings.lock().unwrap().cloud.enabled = false;
 
-        auto_upload_if_needed(&state).unwrap();
+        assert_eq!(auto_upload_if_needed(&state).unwrap(), None);
 
         assert_eq!(
             server.request_count("PUT"),
@@ -1807,24 +2019,22 @@ mod tests {
     }
 
     #[test]
-    fn periodic_once_uploads_even_when_snapshots_are_off() {
+    fn periodic_once_does_not_upload() {
         let server = FakeWebDav::start("me", "pw");
         let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
         state.settings.lock().unwrap().backup.interval_hours = 0;
 
         periodic_once(&state);
 
-        assert!(server
-            .object("/dav/ccswitchx/ccswitchx-backup.zip")
-            .is_some());
-        assert!(
-            list(&state.store).unwrap().is_empty(),
-            "快照间隔关闭只停本地快照，不应连带关掉自动上传"
+        assert_eq!(
+            server.request_count("PUT"),
+            0,
+            "periodic_once 只做本地快照，上传改由 worker 触发"
         );
     }
 
     #[test]
-    fn periodic_once_auto_uploads_when_enabled() {
+    fn periodic_once_creates_snapshot_without_upload() {
         let server = FakeWebDav::start("me", "pw");
         let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
         state.settings.lock().unwrap().backup.interval_hours = 1;
@@ -1832,32 +2042,28 @@ mod tests {
         periodic_once(&state);
 
         assert_eq!(list(&state.store).unwrap().len(), 1);
-        assert!(server
-            .object("/dav/ccswitchx/ccswitchx-backup.zip")
-            .is_some());
+        assert_eq!(server.request_count("PUT"), 0);
     }
 
     #[test]
-    fn periodic_once_skips_upload_when_disabled() {
+    fn periodic_once_with_disabled_cloud_still_snapshots() {
         let server = FakeWebDav::start("me", "pw");
         let state = state_with_asset_and_cloud(false, server.base_url(), "pw");
         state.settings.lock().unwrap().backup.interval_hours = 1;
 
         periodic_once(&state);
 
-        assert!(server
-            .object("/dav/ccswitchx/ccswitchx-backup.zip")
-            .is_none());
+        assert_eq!(list(&state.store).unwrap().len(), 1);
+        assert_eq!(server.request_count("PUT"), 0);
     }
 
     #[test]
-    fn periodic_once_skips_upload_when_git_backup_is_active() {
+    fn auto_upload_skips_when_git_backup_is_active() {
         if !crate::services::git_sync::is_available() {
             return;
         }
         let server = FakeWebDav::start("me", "pw");
         let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
-        state.settings.lock().unwrap().backup.interval_hours = 1;
 
         let bare = state.store.root().parent().unwrap().join("remote.git");
         let output = std::process::Command::new("git")
@@ -1875,12 +2081,11 @@ mod tests {
             settings.backup.git.remote = Some(url);
         }
 
-        periodic_once(&state);
+        assert_eq!(auto_upload_if_needed(&state).unwrap(), None);
 
-        assert!(
-            server
-                .object("/dav/ccswitchx/ccswitchx-backup.zip")
-                .is_none(),
+        assert_eq!(
+            server.request_count("PUT"),
+            0,
             "Git 自动同步生效时不应再上传 WebDAV"
         );
     }
@@ -1890,9 +2095,8 @@ mod tests {
         let server = FakeWebDav::start("me", "pw");
         server.set_fail_put(true);
         let state = state_with_asset_and_cloud(true, server.base_url(), "pw");
-        state.settings.lock().unwrap().backup.interval_hours = 1;
 
-        periodic_once(&state);
+        assert!(auto_upload_if_needed(&state).is_err());
 
         assert!(load_runtime_status(&state.store).last_error.is_some());
     }
