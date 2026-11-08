@@ -73,6 +73,9 @@ export function useBackups() {
   }, []);
 
   const refresh = useCallback(async () => {
+    setError(null);
+    // 云状态与本地数据并行发起，别让本地批次（尤其 git log）拖慢首屏缓存渲染。
+    void primeCloudStatus();
     try {
       const [snapshotList, usageView, backupSettings, status, cloudSettings] =
         await Promise.all([
@@ -89,8 +92,6 @@ export function useBackups() {
       setGit(status);
       setCloud(cloudSettings);
       await syncCommits(status);
-      setError(null);
-      void primeCloudStatus();
     } catch (reason) {
       if (alive.current) setError(String(reason));
     } finally {

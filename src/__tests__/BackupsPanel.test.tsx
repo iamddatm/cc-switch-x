@@ -427,6 +427,13 @@ test("renders cached cloud status before the live probe resolves", async () => {
   expect(screen.getByRole("button", { name: "从云端恢复" })).toBeEnabled();
 });
 
+test("starts the cached cloud probe in parallel with local data", async () => {
+  // 本地批次永不返回：缓存请求仍应在挂载后立刻发出，而不是等本地数据齐了才发。
+  vi.mocked(api.getCloudSettings).mockReturnValue(new Promise(() => {}));
+  render(<BackupsPanel />);
+  await waitFor(() => expect(api.getCloudStatusCached).toHaveBeenCalled());
+});
+
 test("warns when the remote manifest is incompatible", async () => {
   vi.mocked(api.getCloudStatus).mockResolvedValue({
     ...cloudStatus,
@@ -534,6 +541,11 @@ test("disables restore when the remote backup is incompatible", async () => {
     ...cloudStatus,
     manifest: { ...cloudStatus.manifest!, schema: 99, compatible: false },
   });
+  vi.mocked(api.getCloudStatusCached).mockResolvedValue({
+    ...cloudStatus,
+    manifest: { ...cloudStatus.manifest!, schema: 99, compatible: false },
+    fromCache: true,
+  });
   render(<BackupsPanel />);
   await screen.findByText("云备份（WebDAV）");
   expect(screen.getByRole("button", { name: "从云端恢复" })).toBeDisabled();
@@ -543,6 +555,11 @@ test("disables restore when the remote has no backup", async () => {
   vi.mocked(api.getCloudStatus).mockResolvedValue({
     ...cloudStatus,
     remote: { ...cloudStatus.remote!, exists: false },
+  });
+  vi.mocked(api.getCloudStatusCached).mockResolvedValue({
+    ...cloudStatus,
+    remote: { ...cloudStatus.remote!, exists: false },
+    fromCache: true,
   });
   render(<BackupsPanel />);
   await screen.findByText("云备份（WebDAV）");
@@ -579,7 +596,7 @@ test("disables cloud actions without config", async () => {
     remoteDir: "ccswitchx",
     hasPassword: false,
   });
-  vi.mocked(api.getCloudStatus).mockResolvedValue({
+  const unconfigured: CloudStatus = {
     configured: false,
     hasPassword: false,
     autoUpload: false,
@@ -595,6 +612,11 @@ test("disables cloud actions without config", async () => {
     lastDownloadError: null,
     uploadedBytesMonth: 0,
     fromCache: false,
+  };
+  vi.mocked(api.getCloudStatus).mockResolvedValue(unconfigured);
+  vi.mocked(api.getCloudStatusCached).mockResolvedValue({
+    ...unconfigured,
+    fromCache: true,
   });
   render(<BackupsPanel />);
   expect(await screen.findByText("未配置")).toBeInTheDocument();
