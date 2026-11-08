@@ -23,7 +23,7 @@ function Fact({
 
 /**
  * 云端包的身份信息：恢复前先看清包是哪台机器、什么时候传的、有多大，
- * 避免拿旧包覆盖当前真源。旧版裸包没有 manifest，只展示能确认的大小。
+ * 避免拿旧包覆盖当前真源。没有 manifest 时来源未知，只展示能确认的大小。
  */
 export function CloudBackupMeta({ status }: { status: CloudStatus | null }) {
   if (!status) return null;
@@ -41,13 +41,15 @@ export function CloudBackupMeta({ status }: { status: CloudStatus | null }) {
             manifest
               ? `${manifest.deviceName} · v${manifest.appVersion}`
               : remote?.exists
-                ? "旧版裸包（无 manifest）"
+                ? "未读取到 manifest"
                 : "—"
           }
           title={
             manifest
               ? `由 ${manifest.deviceName} 于 ${uploadedAt} 上传`
-              : "旧版上传的包没有 manifest，无法确认来源"
+              : remote?.exists
+                ? "未读取到 manifest，无法确认来源"
+                : undefined
           }
         />
         <Fact
@@ -72,7 +74,7 @@ export function CloudBackupMeta({ status }: { status: CloudStatus | null }) {
       )}
       {manifest && !manifest.compatible && (
         <Notice tone="danger">
-          该备份由不兼容的版本上传（manifest schema {manifest.schema}），恢复会被拒绝，请先升级应用。
+          该备份由不兼容的版本上传（manifest schema {manifest.schema}），恢复会被拒绝，请从源设备重新上传一次。
         </Notice>
       )}
       {status.manifestError && (

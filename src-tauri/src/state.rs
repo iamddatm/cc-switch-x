@@ -7,7 +7,7 @@ use crate::settings::AppSettings;
 use crate::store::secrets::{secrets_path, Secrets};
 use crate::store::Store;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -28,6 +28,8 @@ pub struct AppState {
     pub project_ops: Arc<Mutex<()>>,
     /// 云备份上传 / 下载 / 状态探测串行，避免两个任务同时替换远端对象。
     pub cloud_ops: Arc<Mutex<()>>,
+    /// 云备份连接代次：连接参数变化时自增，旧任务据此放弃回写运行状态。
+    cloud_connection_epoch: AtomicU64,
     git_tx: Sender<GitEvent>,
     git_rx: Mutex<Option<Receiver<GitEvent>>>,
 }
@@ -116,6 +118,16 @@ impl AppState {
     pub fn take_git_rx(&self) -> Option<Receiver<GitEvent>> {
         self.git_rx.lock().ok().and_then(|mut slot| slot.take())
     }
+
+    /// 当前云备份连接代次；网络任务在读取连接时捕获，写运行状态前比对。
+    pub fn cloud_connection_epoch(&self) -> u64 {
+        self.cloud_connection_epoch.load(Ordering::SeqCst)
+    }
+
+    /// 连接参数变化时递增代次，让进行中的旧任务停止回写运行状态。
+    pub fn bump_cloud_connection_epoch(&self) -> u64 {
+        self.cloud_connection_epoch.fetch_add(1, Ordering::SeqCst) + 1
+    }
 }
 
 impl AppState {
@@ -143,6 +155,7 @@ impl AppState {
             git_ops: Arc::new(Mutex::new(())),
             project_ops: Arc::new(Mutex::new(())),
             cloud_ops: Arc::new(Mutex::new(())),
+            cloud_connection_epoch: AtomicU64::new(0),
             git_tx,
             git_rx: Mutex::new(Some(git_rx)),
         })

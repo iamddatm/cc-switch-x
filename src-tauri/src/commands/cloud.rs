@@ -59,8 +59,10 @@ pub fn set_cloud_settings(
         auto_download,
         upload_delay_hours,
     )?;
-    // 换了远端或凭据，旧基线与观测缓存都不再可信。
+    // 换了远端或凭据，旧基线与观测缓存都不再可信。先递增连接代次，
+    // 让仍在进行的旧任务在回写运行状态前看到代次已变，避免把旧基线写回来。
     if connection_changed {
+        state.bump_cloud_connection_epoch();
         cloud_backup::reset_runtime_status(&state.store)?;
     }
     let mut current = state

@@ -147,6 +147,8 @@ struct CloudManifest {
     #[serde(default)]
     files: u64,
     /// 上传时源设备真源的内容指纹，供接收端判断内容是否已一致。
+    /// 旧 schema 没有该字段；按空值解析，由兼容闸统一拒绝，避免报「无法解析」误导用户。
+    #[serde(default)]
     content_fingerprint: String,
     archive: CloudArchive,
 }
@@ -169,6 +171,10 @@ impl CloudManifest {
                 "云端备份由不兼容的版本上传（manifest schema {}，本机要求 {CLOUD_MANIFEST_SCHEMA}），请从源设备重新上传",
                 self.schema
             )));
+        }
+        // schema 2 必带内容指纹；空值说明 manifest 是旧版或残缺，无法确认内容是否一致。
+        if self.content_fingerprint.trim().is_empty() {
+            return Err(AppError::Cloud(missing_fingerprint_error()));
         }
         if self.archive.name != BACKUP_OBJECT {
             return Err(AppError::Cloud(format!(
@@ -199,6 +205,11 @@ fn parse_manifest(bytes: &[u8]) -> Result<CloudManifest, AppError> {
 /// 没有 manifest 的裸包一律视为不兼容：新版上传必须先写 manifest 才算完成。
 fn missing_manifest_error() -> String {
     "云端备份缺少 manifest，请从源设备重新上传".to_string()
+}
+
+/// 内容指纹是 schema 2 的必填项；空值说明旧版 manifest 或上传不完整，只能重传。
+fn missing_fingerprint_error() -> String {
+    "云端 manifest 缺少内容指纹（旧版或残缺），请从源设备重新上传".to_string()
 }
 
 /// 上传设备名：只用于让人分清是哪台机器传的包，取不到就写 Unknown Device。
@@ -375,6 +386,8 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
     let configured = !cloud.base_url.trim().is_empty()
         && !cloud.username.trim().is_empty()
         && has_password;
+    // 与连接快照同时捕获代次：等待 cloud_ops 期间连接若被换掉，探测结果不再回写。
+    let epoch = state.cloud_connection_epoch();
     let runtime = load_runtime_status(&state.store);
     if !configured {
         return Ok(CloudStatus {
@@ -401,6 +414,9 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
         .cloud_ops
         .lock()
         .map_err(|_| AppError::Cloud("云备份任务锁失败".into()))?;
+    // 锁要等网络任务结束才能拿到；等待期间上传/恢复可能刚写完新的同步基线，
+    // 必须重新读一次，绝不能用锁前的旧快照把 synced_* 覆盖回去。
+    let mut runtime = load_runtime_status(&state.store);
     let client = WebDavClient::new(
         WebDavConfig {
             base_url: cloud.base_url,
@@ -410,7 +426,6 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
         },
         proxy.as_ref(),
     )?;
-    let mut runtime = runtime;
     let remote = match client.head() {
         Ok(remote) => remote,
         Err(error) => {
@@ -455,7 +470,15 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
     } else {
         match client.get_manifest() {
             Ok(Some(bytes)) => match parse_manifest(&bytes) {
-                Ok(manifest) => (Some(manifest.info()), None),
+                // 能解析但缺内容指纹的 manifest 仍不可恢复，要在面板上说清原因。
+                Ok(manifest) => {
+                    let error = manifest
+                        .content_fingerprint
+                        .trim()
+                        .is_empty()
+                        .then(missing_fingerprint_error);
+                    (Some(manifest.info()), error)
+                }
                 Err(error) => (None, Some(error.to_string())),
             },
             Ok(None) => (None, Some(missing_manifest_error())),
@@ -469,8 +492,11 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
     runtime.observed_manifest = manifest.clone();
     runtime.observed_manifest_error = manifest_error.clone();
     runtime.auth_paused_until = None;
-    if let Err(error) = save_runtime_status(&state.store, &runtime) {
-        eprintln!("保存云备份状态失败：{error}");
+    // 连接代次变了说明探测用的是旧连接，结果只返回给调用方，不落盘。
+    if runtime_write_allowed(state, epoch) {
+        if let Err(error) = save_runtime_status(&state.store, &runtime) {
+            eprintln!("保存云备份状态失败：{error}");
+        }
     }
     Ok(CloudStatus {
         configured,
@@ -595,6 +621,21 @@ fn client_for(
     )
 }
 
+/// 连接代次未变才允许回写运行状态：连接参数一旦变化，旧任务的同步与观测结果都不再可信。
+fn runtime_write_allowed(state: &AppState, epoch: u64) -> bool {
+    state.cloud_connection_epoch() == epoch
+}
+
+/// 成功路径统一走这里保存：代次已变就静默放弃，任务本身仍按成功返回。
+fn save_runtime_if_allowed(state: &AppState, epoch: u64, runtime: &CloudRuntimeStatus) {
+    if !runtime_write_allowed(state, epoch) {
+        return;
+    }
+    if let Err(error) = save_runtime_status(&state.store, runtime) {
+        eprintln!("保存云备份状态失败：{error}");
+    }
+}
+
 fn record_failure(state: &AppState, error: &AppError) {
     let mut runtime = load_runtime_status(&state.store);
     runtime.last_error = Some(error.to_string());
@@ -672,6 +713,8 @@ pub fn upload_now(state: &AppState) -> Result<CloudStatus, AppError> {
 /// 云端只有一份包，它代表上传那一刻的真源，和快照列表彼此独立。
 pub fn upload_current(state: &AppState, kind: SnapshotKind) -> Result<CloudStatus, AppError> {
     let connection = read_connection(state)?;
+    // 连接快照与代次一起取：等待锁期间设置若改了连接，旧任务不得回写基线。
+    let epoch = state.cloud_connection_epoch();
     let proxy = state.webdav_proxy_config()?;
     let _guard = state
         .cloud_ops
@@ -689,7 +732,7 @@ pub fn upload_current(state: &AppState, kind: SnapshotKind) -> Result<CloudStatu
         backup::write_archive_to(&state.store, &archive, kind)
     };
     let result = match build {
-        Ok(_) => upload_archive_locked(state, &connection, proxy.as_ref(), &archive),
+        Ok(_) => upload_archive_locked(state, &connection, proxy.as_ref(), &archive, epoch),
         Err(error) => {
             record_failure(state, &error);
             let _ = fs::remove_file(&archive);
@@ -703,12 +746,13 @@ pub fn upload_current(state: &AppState, kind: SnapshotKind) -> Result<CloudStatu
 /// 自动上传入口：直接上传已有快照，调用方无需持有 `cloud_ops`。
 pub fn upload_archive(state: &AppState, archive: &Path) -> Result<CloudStatus, AppError> {
     let connection = read_connection(state)?;
+    let epoch = state.cloud_connection_epoch();
     let proxy = state.webdav_proxy_config()?;
     let _guard = state
         .cloud_ops
         .lock()
         .map_err(|_| AppError::Cloud("云备份任务锁失败".into()))?;
-    upload_archive_locked(state, &connection, proxy.as_ref(), archive)
+    upload_archive_locked(state, &connection, proxy.as_ref(), archive, epoch)
 }
 
 fn upload_archive_locked(
@@ -716,6 +760,7 @@ fn upload_archive_locked(
     connection: &CloudConnection,
     proxy: Option<&ProxyConfig>,
     archive: &Path,
+    epoch: u64,
 ) -> Result<CloudStatus, AppError> {
     let result = (|| -> Result<(RemoteObject, CloudManifest, String), AppError> {
         let summary = backup::validate_archive_for_restore(archive)?;
@@ -768,9 +813,7 @@ fn upload_archive_locked(
             runtime.uploaded_bytes_month = runtime
                 .uploaded_bytes_month
                 .saturating_add(manifest.archive.size_bytes);
-            if let Err(error) = save_runtime_status(&state.store, &runtime) {
-                eprintln!("保存云备份状态失败：{error}");
-            }
+            save_runtime_if_allowed(state, epoch, &runtime);
             Ok(status_from_remote(
                 connection,
                 &runtime,
@@ -808,6 +851,8 @@ pub fn restore_latest(
     on_progress: Option<&dyn Fn(u64, u64)>,
 ) -> Result<CloudRestoreReport, AppError> {
     let connection = read_connection(state)?;
+    // 与连接快照同时捕获代次：恢复可能持续几分钟，期间用户可能换了远端。
+    let epoch = state.cloud_connection_epoch();
     let proxy = state.webdav_proxy_config()?;
     let _guard = state
         .cloud_ops
@@ -907,9 +952,8 @@ pub fn restore_latest(
             runtime.observed_remote = Some(cached_remote);
             runtime.observed_manifest = Some(manifest.info());
             runtime.observed_manifest_error = None;
-            if let Err(error) = save_runtime_status(&state.store, &runtime) {
-                eprintln!("保存云备份状态失败：{error}");
-            }
+            // 恢复本身已完成；连接代次若变了，只返回报告，不把旧连接的基线写回新状态。
+            save_runtime_if_allowed(state, epoch, &runtime);
             Ok(CloudRestoreReport {
                 safety_backup: report.safety_backup,
                 restored_files: report.restored_files,
@@ -987,6 +1031,7 @@ fn verify_downloaded(
 /// 只在成功恢复或确认内容一致后调用，失败路径绝不能写 `synced_*`。
 fn record_synced(
     state: &AppState,
+    epoch: u64,
     runtime: &mut CloudRuntimeStatus,
     fingerprint: String,
     sha256: String,
@@ -994,6 +1039,10 @@ fn record_synced(
     manifest: &CloudManifest,
     downloaded_at: bool,
 ) {
+    // 连接已换：这份基线与观测描述的是旧远端，写回去会污染新连接的判断。
+    if !runtime_write_allowed(state, epoch) {
+        return;
+    }
     let now = chrono::Utc::now().timestamp_millis();
     runtime.synced_fingerprint = Some(fingerprint);
     runtime.synced_sha256 = Some(sha256);
@@ -1007,9 +1056,7 @@ fn record_synced(
     if downloaded_at {
         runtime.last_download_at = Some(now);
     }
-    if let Err(error) = save_runtime_status(&state.store, runtime) {
-        eprintln!("保存云备份状态失败：{error}");
-    }
+    save_runtime_if_allowed(state, epoch, runtime);
 }
 
 /// 自动下载：云端包有更新就覆盖本机，恢复走与本地快照相同的安全流水线。
@@ -1037,21 +1084,14 @@ pub fn auto_download_if_needed(state: &AppState) -> Result<Option<CloudRestoreRe
     if git_active {
         return Ok(None);
     }
-    // 认证被拒后暂停期内不发请求，避免触发坚果云更久的封禁。
-    let mut runtime = load_runtime_status(&state.store);
-    if runtime
-        .auth_paused_until
-        .is_some_and(|until| until > chrono::Utc::now().timestamp_millis())
-    {
-        return Ok(None);
-    }
-
     // 连接参数不完整（例如密码被清掉）不是故障，等用户补齐后再下载。
     let connection = match read_connection(state) {
         Ok(connection) => connection,
         Err(AppError::InvalidInput(_)) => return Ok(None),
         Err(error) => return Err(error),
     };
+    // 与连接快照同时捕获代次：本轮若用旧连接跑完，结果不回写新连接的运行状态。
+    let epoch = state.cloud_connection_epoch();
     let proxy = state.webdav_proxy_config()?;
     // 上传进行中则本轮顺延到下一次，不排队抢锁（§7.4）。
     let _guard = match state.cloud_ops.try_lock() {
@@ -1061,6 +1101,15 @@ pub fn auto_download_if_needed(state: &AppState) -> Result<Option<CloudRestoreRe
             return Err(AppError::Cloud("云备份任务锁失败".into()))
         }
     };
+    // 等锁期间可能刚完成一次上传/恢复：重读运行状态，不能拿锁前的旧快照判断。
+    let mut runtime = load_runtime_status(&state.store);
+    // 认证被拒后暂停期内不发任何请求，避免触发坚果云更久的封禁。
+    if runtime
+        .auth_paused_until
+        .is_some_and(|until| until > chrono::Utc::now().timestamp_millis())
+    {
+        return Ok(None);
+    }
     let client = client_for(&connection, proxy.as_ref())?;
 
     let remote = match client.head() {
@@ -1074,9 +1123,7 @@ pub fn auto_download_if_needed(state: &AppState) -> Result<Option<CloudRestoreRe
     if !remote.exists {
         // 云端还没有包：只刷新观测缓存，同步基线不动。
         runtime.observed_remote = Some(CachedRemote::from_remote(&remote, now));
-        if let Err(error) = save_runtime_status(&state.store, &runtime) {
-            eprintln!("保存云备份状态失败：{error}");
-        }
+        save_runtime_if_allowed(state, epoch, &runtime);
         return Ok(None);
     }
     if remote.size_bytes.is_some_and(|size| size > MAX_CLOUD_BYTES) {
@@ -1086,9 +1133,7 @@ pub fn auto_download_if_needed(state: &AppState) -> Result<Option<CloudRestoreRe
     }
     if !remote_changed(runtime.synced_meta.as_ref(), &remote) {
         runtime.observed_remote = Some(CachedRemote::from_remote(&remote, now));
-        if let Err(error) = save_runtime_status(&state.store, &runtime) {
-            eprintln!("保存云备份状态失败：{error}");
-        }
+        save_runtime_if_allowed(state, epoch, &runtime);
         return Ok(None);
     }
 
@@ -1120,9 +1165,7 @@ pub fn auto_download_if_needed(state: &AppState) -> Result<Option<CloudRestoreRe
         let cached = CachedRemote::from_remote(&remote, now);
         runtime.synced_meta = Some(cached.clone());
         runtime.observed_remote = Some(cached);
-        if let Err(error) = save_runtime_status(&state.store, &runtime) {
-            eprintln!("保存云备份状态失败：{error}");
-        }
+        save_runtime_if_allowed(state, epoch, &runtime);
         return Ok(None);
     }
 
@@ -1138,6 +1181,7 @@ pub fn auto_download_if_needed(state: &AppState) -> Result<Option<CloudRestoreRe
     if manifest.content_fingerprint == local_fingerprint {
         record_synced(
             state,
+            epoch,
             &mut runtime,
             local_fingerprint,
             manifest.archive.sha256.clone(),
@@ -1153,9 +1197,7 @@ pub fn auto_download_if_needed(state: &AppState) -> Result<Option<CloudRestoreRe
         && runtime.synced_fingerprint.as_deref() != Some(local_fingerprint.as_str())
     {
         runtime.observed_remote = Some(CachedRemote::from_remote(&remote, now));
-        if let Err(error) = save_runtime_status(&state.store, &runtime) {
-            eprintln!("保存云备份状态失败：{error}");
-        }
+        save_runtime_if_allowed(state, epoch, &runtime);
         return Ok(None);
     }
 
@@ -1200,6 +1242,7 @@ pub fn auto_download_if_needed(state: &AppState) -> Result<Option<CloudRestoreRe
         let _ = fs::remove_file(&temp);
         record_synced(
             state,
+            epoch,
             &mut runtime,
             content_fingerprint,
             downloaded.sha256.clone(),
@@ -1243,6 +1286,7 @@ pub fn auto_download_if_needed(state: &AppState) -> Result<Option<CloudRestoreRe
 
     record_synced(
         state,
+        epoch,
         &mut runtime,
         content_fingerprint,
         downloaded.sha256.clone(),
@@ -1270,10 +1314,15 @@ mod tests {
     use super::*;
     use crate::net::webdav::test_support::FakeWebDav;
     use crate::settings::{AppSettings, CloudBackupSettings};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use tempfile::{tempdir, TempDir};
 
     static TEMP_DIRS: Mutex<Vec<TempDir>> = Mutex::new(Vec::new());
+
+    /// 真实旧版 manifest：schema 1，且没有 `contentFingerprint` 字段。
+    const LEGACY_MANIFEST: &str = r#"{"format":"ccswitchx-cloud","schema":1,"appVersion":"0.9.0","deviceName":"OldBox","createdAt":1,"files":1,"archive":{"name":"ccswitchx-backup.zip","sizeBytes":1,"sha256":"00"}}"#;
+    /// schema 2 但缺内容指纹：属于残缺 manifest，同样不能恢复。
+    const SCHEMA_2_WITHOUT_FINGERPRINT: &str = r#"{"format":"ccswitchx-cloud","schema":2,"appVersion":"1.0.0","deviceName":"x","createdAt":1,"files":1,"archive":{"name":"ccswitchx-backup.zip","sizeBytes":1,"sha256":"00"}}"#;
 
     fn config_for(server: &FakeWebDav) -> CloudBackupSettings {
         CloudBackupSettings {
@@ -1534,6 +1583,83 @@ mod tests {
             Some(5),
             "实时探测应写入观测缓存"
         );
+    }
+
+    #[test]
+    fn status_reloads_runtime_after_waiting_for_cloud_ops() {
+        let server = FakeWebDav::start("me", "pw");
+        server.put_object("/dav/ccswitchx/ccswitchx-backup.zip", b"12345".to_vec());
+        let state = Arc::new(test_state(config_for(&server), Some("pw")));
+        save_runtime_status(
+            &state.store,
+            &CloudRuntimeStatus {
+                synced_fingerprint: Some("old-fingerprint".into()),
+                synced_sha256: Some("old-sha".into()),
+                synced_meta: Some(sample_cached_remote()),
+                last_upload_at: Some(111),
+                ..CloudRuntimeStatus::default()
+            },
+        )
+        .unwrap();
+
+        // 先占住 cloud_ops，让 status() 载入锁前的旧快照并阻塞在锁上。
+        let guard = state.cloud_ops.lock().unwrap();
+        let worker = {
+            let state = Arc::clone(&state);
+            std::thread::spawn(move || status(&state))
+        };
+        // 给 worker 足够时间读完旧快照并停在锁上。
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // 等待期间一次上传/恢复完成，写入了新的同步基线。
+        save_runtime_status(
+            &state.store,
+            &CloudRuntimeStatus {
+                synced_fingerprint: Some("new-fingerprint".into()),
+                synced_sha256: Some("new-sha".into()),
+                synced_meta: Some(CachedRemote {
+                    size_bytes: Some(9),
+                    ..sample_cached_remote()
+                }),
+                last_upload_at: Some(222),
+                ..CloudRuntimeStatus::default()
+            },
+        )
+        .unwrap();
+
+        drop(guard);
+        worker.join().unwrap().unwrap();
+
+        // 探测必须基于锁后的新快照构建：不能把等待期间写好的同步基线覆盖回旧值。
+        let runtime = load_runtime_status(&state.store);
+        assert_eq!(
+            runtime.synced_fingerprint.as_deref(),
+            Some("new-fingerprint")
+        );
+        assert_eq!(runtime.synced_sha256.as_deref(), Some("new-sha"));
+        assert_eq!(runtime.last_upload_at, Some(222));
+        assert_eq!(runtime.synced_meta.unwrap().size_bytes, Some(9));
+        // 观测缓存仍要被这次探测刷新。
+        assert_eq!(
+            runtime.observed_remote.unwrap().size_bytes,
+            Some(5),
+            "实时探测应写入观测缓存"
+        );
+    }
+
+    #[test]
+    fn runtime_write_allowed_follows_connection_epoch() {
+        let server = FakeWebDav::start("me", "pw");
+        let state = test_state(config_for(&server), Some("pw"));
+        let epoch = state.cloud_connection_epoch();
+
+        assert!(runtime_write_allowed(&state, epoch));
+        assert_eq!(state.bump_cloud_connection_epoch(), epoch + 1);
+        assert!(
+            !runtime_write_allowed(&state, epoch),
+            "代次变化后旧任务不得回写运行状态"
+        );
+        assert!(runtime_write_allowed(&state, state.cloud_connection_epoch()));
     }
 
     #[test]
@@ -2106,6 +2232,135 @@ mod tests {
                 .join("pw.json")
                 .exists());
         }
+    }
+
+    #[test]
+    fn legacy_manifest_without_fingerprint_parses_and_gate_asks_reupload() {
+        // 旧 schema 缺字段时必须能反序列化，再由兼容闸给出「重新上传」，而不是解析失败。
+        let legacy = parse_manifest(LEGACY_MANIFEST.as_bytes()).unwrap();
+        assert_eq!(legacy.schema, 1);
+        assert!(legacy.content_fingerprint.is_empty());
+        let error = legacy.ensure_restorable().unwrap_err().to_string();
+        assert!(error.contains("请从源设备重新上传"), "{error}");
+
+        let schema_2 = parse_manifest(SCHEMA_2_WITHOUT_FINGERPRINT.as_bytes()).unwrap();
+        let error = schema_2.ensure_restorable().unwrap_err().to_string();
+        assert!(error.contains("请从源设备重新上传"), "{error}");
+        assert!(error.contains("内容指纹"), "{error}");
+    }
+
+    #[test]
+    fn restore_rejects_legacy_manifest_without_content_fingerprint() {
+        let server = FakeWebDav::start("me", "pw");
+        let source = test_state_with_asset(config_for(&server), Some("pw"));
+        let snapshot = build_named_snapshot(&source, "cloud-source");
+        server.put_object(
+            "/dav/ccswitchx/ccswitchx-backup.zip",
+            std::fs::read(snapshot).unwrap(),
+        );
+        server.put_object("/dav/ccswitchx/manifest.json", LEGACY_MANIFEST.as_bytes().to_vec());
+
+        let target = test_state(config_for(&server), Some("pw"));
+        target
+            .store
+            .write(
+                crate::domain::AssetType::Mcp,
+                "keep",
+                br#"{"id":"keep","name":"Keep","transport":"stdio","command":"x"}"#,
+            )
+            .unwrap();
+
+        let error = restore_latest(&target, None).unwrap_err().to_string();
+        assert!(error.contains("请从源设备重新上传"), "{error}");
+        assert!(
+            !error.contains("无法解析"),
+            "旧 manifest 不应因缺字段被当成解析失败：{error}"
+        );
+        // 拒绝恢复时不能动本地真源。
+        assert!(target
+            .store
+            .asset_dir(crate::domain::AssetType::Mcp)
+            .join("keep.json")
+            .is_file());
+        assert!(!target
+            .store
+            .asset_dir(crate::domain::AssetType::Mcp)
+            .join("pw.json")
+            .exists());
+    }
+
+    #[test]
+    fn auto_download_records_error_for_legacy_manifest_without_fingerprint() {
+        let server = FakeWebDav::start("me", "pw");
+        let source = test_state_with_asset(config_for(&server), Some("pw"));
+        let snapshot = build_named_snapshot(&source, "cloud-source");
+        server.put_object(
+            "/dav/ccswitchx/ccswitchx-backup.zip",
+            std::fs::read(snapshot).unwrap(),
+        );
+        server.put_object("/dav/ccswitchx/manifest.json", LEGACY_MANIFEST.as_bytes().to_vec());
+
+        let mut settings = config_for(&server);
+        settings.auto_download = true;
+        let target = test_state(settings, Some("pw"));
+        let local_bytes =
+            br#"{"id":"keep","name":"Keep","transport":"stdio","command":"x"}"#.to_vec();
+        target
+            .store
+            .write(crate::domain::AssetType::Mcp, "keep", &local_bytes)
+            .unwrap();
+
+        let error = auto_download_if_needed(&target).unwrap_err().to_string();
+        assert!(error.contains("请从源设备重新上传"), "{error}");
+        let runtime = load_runtime_status(&target.store);
+        let recorded = runtime
+            .last_download_error
+            .expect("旧 manifest 应记录自动下载错误");
+        assert!(recorded.contains("请从源设备重新上传"), "{recorded}");
+        assert!(
+            runtime.synced_fingerprint.is_none(),
+            "拒绝下载时不得写同步基线"
+        );
+        // 本地字节原样保留，云端包也不能被恢复。
+        assert_eq!(
+            std::fs::read(
+                target
+                    .store
+                    .asset_dir(crate::domain::AssetType::Mcp)
+                    .join("keep.json")
+            )
+            .unwrap(),
+            local_bytes
+        );
+        assert!(!target
+            .store
+            .asset_dir(crate::domain::AssetType::Mcp)
+            .join("pw.json")
+            .exists());
+    }
+
+    #[test]
+    fn status_surfaces_legacy_manifest_without_fingerprint() {
+        let server = FakeWebDav::start("me", "pw");
+        server.put_object("/dav/ccswitchx/ccswitchx-backup.zip", b"12345".to_vec());
+        server.put_object("/dav/ccswitchx/manifest.json", LEGACY_MANIFEST.as_bytes().to_vec());
+        let state = test_state(config_for(&server), Some("pw"));
+
+        let status = status(&state).unwrap();
+        let error = status
+            .manifest_error
+            .expect("旧 manifest 缺内容指纹应报错");
+        assert!(error.contains("请从源设备重新上传"), "{error}");
+        let manifest = status.manifest.expect("manifest 本身仍可展示");
+        assert_eq!(manifest.schema, 1);
+        assert!(!manifest.compatible);
+
+        // 观测结果也要落盘，方便缓存面板直接提示。
+        let runtime = load_runtime_status(&state.store);
+        assert!(runtime
+            .observed_manifest_error
+            .as_deref()
+            .is_some_and(|error| error.contains("请从源设备重新上传")));
     }
 
     #[test]

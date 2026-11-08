@@ -486,6 +486,7 @@ test("refreshes cloud status after auto sync event", async () => {
   );
 
   const calls = vi.mocked(api.getCloudStatus).mock.calls.length;
+  const snapshotCalls = vi.mocked(api.listBackupSnapshots).mock.calls.length;
   act(() =>
     eventBridge.handlers.get("cloud-auto-synced")?.({
       payload: {
@@ -499,6 +500,12 @@ test("refreshes cloud status after auto sync event", async () => {
 
   await waitFor(() =>
     expect(vi.mocked(api.getCloudStatus).mock.calls.length).toBeGreaterThan(calls),
+  );
+  // 自动下载会新建 PreRestore 快照并按保留数清理，必须整面板刷新才能看到。
+  await waitFor(() =>
+    expect(vi.mocked(api.listBackupSnapshots).mock.calls.length).toBeGreaterThan(
+      snapshotCalls,
+    ),
   );
   expect(
     await screen.findByText(
@@ -533,6 +540,50 @@ test("blocks restore when the remote manifest is missing", async () => {
   render(<BackupsPanel />);
   await screen.findByText("云备份（WebDAV）");
   expect(screen.getByRole("button", { name: "从云端恢复" })).toBeDisabled();
+});
+
+test("dialog says the manifest is unreadable when the remote has no manifest", async () => {
+  vi.mocked(api.getCloudStatusCached).mockResolvedValue({
+    ...cloudStatus,
+    fromCache: true,
+  });
+  // 挂载时的实时探测正常；打开弹框后的刷新才发现 manifest 读不到。
+  vi.mocked(api.getCloudStatus)
+    .mockResolvedValueOnce(cloudStatus)
+    .mockResolvedValue({ ...cloudStatus, manifest: null });
+
+  render(<BackupsPanel />);
+  await screen.findByText("云端有备份");
+  fireEvent.click(screen.getByRole("button", { name: "从云端恢复" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "从云端恢复？" });
+
+  // 旧版裸包兼容分支已删除：只说「未读取到 manifest」，不暗示是旧版本。
+  expect(await within(dialog).findByText("未读取到 manifest")).toBeInTheDocument();
+  expect(within(dialog).queryByText(/旧版/)).not.toBeInTheDocument();
+});
+
+test("dialog asks to re-upload when the manifest is incompatible", async () => {
+  vi.mocked(api.getCloudStatusCached).mockResolvedValue({
+    ...cloudStatus,
+    fromCache: true,
+  });
+  const incompatible = {
+    ...cloudStatus,
+    manifest: { ...cloudStatus.manifest!, schema: 99, compatible: false },
+  };
+  // 打开弹框时的刷新发现远端 manifest 不兼容。
+  vi.mocked(api.getCloudStatus)
+    .mockResolvedValueOnce(cloudStatus)
+    .mockResolvedValue(incompatible);
+
+  render(<BackupsPanel />);
+  await screen.findByText("云端有备份");
+  fireEvent.click(screen.getByRole("button", { name: "从云端恢复" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "从云端恢复？" });
+
+  expect(
+    await within(dialog).findByText(/请从源设备重新上传一次/),
+  ).toBeInTheDocument();
 });
 
 test("shows the last auto download error", async () => {

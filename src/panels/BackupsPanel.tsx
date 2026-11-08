@@ -128,7 +128,8 @@ export function BackupsPanel() {
     };
   }, [cloudRestoreOpen]);
 
-  // 后台 worker 完成自动上传/下载后推送事件：刷新云状态，并在固定提示条里说明结果。
+  // 后台 worker 完成自动上传/下载后推送事件：整面板刷新（含新安全快照与清理结果），
+  // 并在固定提示条里说明本次同步结果。
   useEffect(() => {
     let cancelled = false;
     let unlisten: UnlistenFn | undefined;
@@ -139,7 +140,7 @@ export function BackupsPanel() {
           ? `已自动从云端恢复 ${payload.restoredFiles} 个文件，删除 ${payload.removedFiles} 个；安全快照：${payload.safetyBackup}`
           : `已自动上传云端备份（${formatBytes(payload.bytes)}）`,
       );
-      void refreshCloudStatus();
+      void refresh();
     }).then((stop) => {
       if (cancelled) stop();
       else unlisten = stop;
@@ -148,7 +149,7 @@ export function BackupsPanel() {
       cancelled = true;
       unlisten?.();
     };
-  }, [refreshCloudStatus]);
+  }, [refresh]);
 
   /** 打开确认框后先拉一次远端状态：缓存可能已经过期，不能拿旧包信息确认覆盖。 */
   const openCloudRestore = async () => {
