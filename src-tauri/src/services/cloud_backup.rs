@@ -4,10 +4,11 @@
 
 use crate::error::AppError;
 use crate::net::webdav::{
-    RemoteObject, WebDavClient, WebDavConfig, BACKUP_OBJECT, MAX_CLOUD_BYTES,
+    DownloadOutcome, RemoteObject, WebDavClient, WebDavConfig, BACKUP_OBJECT, MAX_CLOUD_BYTES,
 };
 use crate::net::ProxyConfig;
 use crate::services::backup::{self, SnapshotKind};
+use crate::services::git_sync;
 use crate::services::settings::cloud_secret_ref;
 use crate::settings::CloudBackupSettings;
 use crate::state::AppState;
@@ -603,8 +604,7 @@ fn record_failure(state: &AppState, error: &AppError) {
     }
 }
 
-/// 记录自动下载失败；401/403 同样暂停自动任务（Task 5 的自动下载会调用）。
-#[allow(dead_code)]
+/// 记录自动下载失败；401/403 同样暂停自动任务。
 fn record_download_failure(state: &AppState, error: &AppError) {
     let mut runtime = load_runtime_status(&state.store);
     runtime.last_download_error = Some(error.to_string());
@@ -859,31 +859,10 @@ pub fn restore_latest(
         }
     };
     // manifest 最后写：哈希、大小、文件数任一与包对不上，都说明包和描述不是同一次上传的
-    // 产物（中途断网或外部替换）。哈希已随下载算出，这里不用再读一遍文件。
-    let downloaded_bytes = downloaded.remote.size_bytes.unwrap_or(0);
-    let size_mismatch = manifest.archive.size_bytes != downloaded_bytes;
-    let files_mismatch = manifest.files != summary.files;
-    let hash_mismatch = !downloaded
-        .sha256
-        .eq_ignore_ascii_case(&manifest.archive.sha256);
-    if hash_mismatch || size_mismatch || files_mismatch {
-        let reason = if size_mismatch {
-            format!(
-                "大小对不上（包内 {downloaded_bytes} 字节，manifest 记录 {} 字节）",
-                manifest.archive.size_bytes
-            )
-        } else if files_mismatch {
-            format!(
-                "文件数对不上（包内 {} 个，manifest 记录 {} 个）",
-                summary.files, manifest.files
-            )
-        } else {
-            "内容哈希对不上".to_string()
-        };
+    // 产物（中途断网或外部替换）。
+    if let Err(error) = verify_downloaded(&downloaded, &summary, &manifest) {
         let _ = fs::remove_file(&temp);
-        return Err(AppError::Cloud(format!(
-            "云端备份与 manifest 不一致：{reason}。上次上传可能中断，请在源设备重新上传"
-        )));
+        return Err(error);
     }
     // 包还叫 temp 时先读内容指纹：恢复成功后要用它把云端状态标成「和本地一致」，
     // 免得换机恢复完立刻把同样的内容原样传回去。
@@ -946,6 +925,344 @@ pub fn restore_latest(
         }
         Err(error) => Err(error),
     }
+}
+
+/// 判定「云端变了」：只在确信内容不同时才返回 true，省掉一次 manifest GET。
+/// 谓词按 §7.2：两边都有 ETag → 比 ETag；否则两边都有修改时间 → 比修改时间与大小
+/// （大小未知时不比）；都没有 → 视为已变。
+fn remote_changed(prev: Option<&CachedRemote>, now: &RemoteObject) -> bool {
+    let Some(prev) = prev else {
+        return true;
+    };
+    if let (Some(prev_etag), Some(now_etag)) = (prev.etag.as_deref(), now.etag.as_deref()) {
+        return prev_etag != now_etag;
+    }
+    if let (Some(prev_modified), Some(now_modified)) = (prev.modified_at, now.modified_at) {
+        if prev_modified != now_modified {
+            return true;
+        }
+        if let (Some(prev_size), Some(now_size)) = (prev.size_bytes, now.size_bytes) {
+            return prev_size != now_size;
+        }
+        return false;
+    }
+    true
+}
+
+/// 校验下载结果与 manifest 描述一致：大小、文件数、sha256 任一不符都拒绝。
+/// 哈希已随下载算出，不必再读一遍文件。
+fn verify_downloaded(
+    downloaded: &DownloadOutcome,
+    summary: &backup::ArchiveSummary,
+    manifest: &CloudManifest,
+) -> Result<(), AppError> {
+    let downloaded_bytes = downloaded.remote.size_bytes.unwrap_or(0);
+    let size_mismatch = manifest.archive.size_bytes != downloaded_bytes;
+    let files_mismatch = manifest.files != summary.files;
+    let hash_mismatch = !downloaded
+        .sha256
+        .eq_ignore_ascii_case(&manifest.archive.sha256);
+    if hash_mismatch || size_mismatch || files_mismatch {
+        let reason = if size_mismatch {
+            format!(
+                "大小对不上（包内 {downloaded_bytes} 字节，manifest 记录 {} 字节）",
+                manifest.archive.size_bytes
+            )
+        } else if files_mismatch {
+            format!(
+                "文件数对不上（包内 {} 个，manifest 记录 {} 个）",
+                summary.files, manifest.files
+            )
+        } else {
+            "内容哈希对不上".to_string()
+        };
+        return Err(AppError::Cloud(format!(
+            "云端备份与 manifest 不一致：{reason}。上次上传可能中断，请在源设备重新上传"
+        )));
+    }
+    Ok(())
+}
+
+/// 写「本地内容已与云端一致」的同步基线与观测缓存；`downloaded_at` 为真时记录下载时间。
+/// 只在成功恢复或确认内容一致后调用，失败路径绝不能写 `synced_*`。
+fn record_synced(
+    state: &AppState,
+    runtime: &mut CloudRuntimeStatus,
+    fingerprint: String,
+    sha256: String,
+    remote: &RemoteObject,
+    manifest: &CloudManifest,
+    downloaded_at: bool,
+) {
+    let now = chrono::Utc::now().timestamp_millis();
+    runtime.synced_fingerprint = Some(fingerprint);
+    runtime.synced_sha256 = Some(sha256);
+    let cached = CachedRemote::from_remote(remote, now);
+    runtime.synced_meta = Some(cached.clone());
+    runtime.observed_remote = Some(cached);
+    runtime.observed_manifest = Some(manifest.info());
+    runtime.observed_manifest_error = None;
+    runtime.last_download_error = None;
+    runtime.auth_paused_until = None;
+    if downloaded_at {
+        runtime.last_download_at = Some(now);
+    }
+    if let Err(error) = save_runtime_status(&state.store, runtime) {
+        eprintln!("保存云备份状态失败：{error}");
+    }
+}
+
+/// 自动下载：云端包有更新就覆盖本机，恢复走与本地快照相同的安全流水线。
+/// 纯下载机以云端为准；编辑机（`auto_upload` 开启）有未上传改动时本轮跳过，让上传先落定。
+/// 返回 `Ok(None)` 表示本轮无需下载（未配置 / 云端未变 / 暂停中 / 编辑机待上传）。
+pub fn auto_download_if_needed(state: &AppState) -> Result<Option<CloudRestoreReport>, AppError> {
+    // 通道未启用或没开自动下载时不发任何请求。
+    let (enabled, auto_download, git) = {
+        let settings = state
+            .settings
+            .lock()
+            .map_err(|_| AppError::Cloud("读取云备份设置失败".into()))?;
+        (
+            settings.cloud.enabled,
+            settings.cloud.auto_download,
+            settings.backup.git.clone(),
+        )
+    };
+    if !enabled || !auto_download {
+        return Ok(None);
+    }
+    // 远端备份只能选一种：Git 自动同步生效时不再从 WebDAV 下载。
+    let git_active =
+        git.enabled && git_sync::is_remote_verified(&state.store, git.remote.as_deref());
+    if git_active {
+        return Ok(None);
+    }
+    // 认证被拒后暂停期内不发请求，避免触发坚果云更久的封禁。
+    let mut runtime = load_runtime_status(&state.store);
+    if runtime
+        .auth_paused_until
+        .is_some_and(|until| until > chrono::Utc::now().timestamp_millis())
+    {
+        return Ok(None);
+    }
+
+    // 连接参数不完整（例如密码被清掉）不是故障，等用户补齐后再下载。
+    let connection = match read_connection(state) {
+        Ok(connection) => connection,
+        Err(AppError::InvalidInput(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let proxy = state.webdav_proxy_config()?;
+    // 上传进行中则本轮顺延到下一次，不排队抢锁（§7.4）。
+    let _guard = match state.cloud_ops.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            return Err(AppError::Cloud("云备份任务锁失败".into()))
+        }
+    };
+    let client = client_for(&connection, proxy.as_ref())?;
+
+    let remote = match client.head() {
+        Ok(remote) => remote,
+        Err(error) => {
+            record_download_failure(state, &error);
+            return Err(error);
+        }
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    if !remote.exists {
+        // 云端还没有包：只刷新观测缓存，同步基线不动。
+        runtime.observed_remote = Some(CachedRemote::from_remote(&remote, now));
+        if let Err(error) = save_runtime_status(&state.store, &runtime) {
+            eprintln!("保存云备份状态失败：{error}");
+        }
+        return Ok(None);
+    }
+    if remote.size_bytes.is_some_and(|size| size > MAX_CLOUD_BYTES) {
+        let error = AppError::Cloud(format!("云端备份超过下载上限（{MAX_CLOUD_BYTES} 字节）"));
+        record_download_failure(state, &error);
+        return Err(error);
+    }
+    if !remote_changed(runtime.synced_meta.as_ref(), &remote) {
+        runtime.observed_remote = Some(CachedRemote::from_remote(&remote, now));
+        if let Err(error) = save_runtime_status(&state.store, &runtime) {
+            eprintln!("保存云备份状态失败：{error}");
+        }
+        return Ok(None);
+    }
+
+    // 确认有包再读 manifest：缺失或格式/版本不兼容按错误处理，不改本地。
+    let manifest = match client.get_manifest() {
+        Ok(Some(bytes)) => match parse_manifest(&bytes).and_then(|manifest| {
+            manifest.ensure_restorable()?;
+            Ok(manifest)
+        }) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                record_download_failure(state, &error);
+                return Err(error);
+            }
+        },
+        Ok(None) => {
+            let error = AppError::Cloud(missing_manifest_error());
+            record_download_failure(state, &error);
+            return Err(error);
+        }
+        Err(error) => {
+            record_download_failure(state, &error);
+            return Err(error);
+        }
+    };
+
+    // 包内容和上次同步一致：只刷新云端元数据，不再下载。
+    if runtime.synced_sha256.as_deref() == Some(manifest.archive.sha256.as_str()) {
+        let cached = CachedRemote::from_remote(&remote, now);
+        runtime.synced_meta = Some(cached.clone());
+        runtime.observed_remote = Some(cached);
+        if let Err(error) = save_runtime_status(&state.store, &runtime) {
+            eprintln!("保存云备份状态失败：{error}");
+        }
+        return Ok(None);
+    }
+
+    let local_fingerprint = match backup::content_fingerprint(&state.store) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            record_download_failure(state, &error);
+            return Err(error);
+        }
+    };
+
+    // 云端内容与本地一致：更新同步基线即可，不用下载。
+    if manifest.content_fingerprint == local_fingerprint {
+        record_synced(
+            state,
+            &mut runtime,
+            local_fingerprint,
+            manifest.archive.sha256.clone(),
+            &remote,
+            &manifest,
+            false,
+        );
+        return Ok(None);
+    }
+
+    // 编辑机还有未上传改动：跳过本轮，让上传先把本机内容落定；纯下载机不受影响。
+    if connection.cloud.auto_upload
+        && runtime.synced_fingerprint.as_deref() != Some(local_fingerprint.as_str())
+    {
+        runtime.observed_remote = Some(CachedRemote::from_remote(&remote, now));
+        if let Err(error) = save_runtime_status(&state.store, &runtime) {
+            eprintln!("保存云备份状态失败：{error}");
+        }
+        return Ok(None);
+    }
+
+    // 下载整包到 staging，按 manifest 校验，并读内容指纹。
+    let staging = state.store.staging_dir();
+    fs::create_dir_all(&staging)?;
+    let temp = staging.join(format!("cloud-{}.zip", chrono::Utc::now().timestamp_millis()));
+    let downloaded = match client.get_to_file(&temp, MAX_CLOUD_BYTES, None) {
+        Ok(downloaded) => downloaded,
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            record_download_failure(state, &error);
+            return Err(error);
+        }
+    };
+    let summary = match backup::validate_archive_for_restore(&temp) {
+        Ok(summary) => summary,
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            let error = AppError::Cloud(format!("云端备份无效：{error}"));
+            record_download_failure(state, &error);
+            return Err(error);
+        }
+    };
+    if let Err(error) = verify_downloaded(&downloaded, &summary, &manifest) {
+        let _ = fs::remove_file(&temp);
+        record_download_failure(state, &error);
+        return Err(error);
+    }
+    let content_fingerprint = match backup::fingerprint_of_archive(&temp) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            let error = AppError::Cloud(format!("云端备份无效：{error}"));
+            record_download_failure(state, &error);
+            return Err(error);
+        }
+    };
+
+    // 下载下来的包内容与本地一致：更新基线，不恢复。
+    if content_fingerprint == local_fingerprint {
+        let _ = fs::remove_file(&temp);
+        record_synced(
+            state,
+            &mut runtime,
+            content_fingerprint,
+            downloaded.sha256.clone(),
+            &remote,
+            &manifest,
+            false,
+        );
+        return Ok(None);
+    }
+
+    // 恢复：maintenance 写锁 + index 锁，走与本地快照相同的安全流水线；临时包成功/回滚后都删除。
+    let restore_result = (|| -> Result<backup::RestoreBackupReport, AppError> {
+        let _maintenance = state.enter_maintenance()?;
+        let mut index = state
+            .index
+            .lock()
+            .map_err(|_| AppError::Cloud("索引锁失败".into()))?;
+        let result = backup::restore_zip(&state.store, &mut index, &temp);
+        state.notify_git("restore: cloud");
+        result
+    })();
+    let _ = fs::remove_file(&temp);
+
+    let report = match restore_result {
+        Ok(report) => report,
+        Err(error) => {
+            record_download_failure(state, &error);
+            return Err(error);
+        }
+    };
+
+    // 自动下载的 PreRestore 快照会随云端更新增长，按备份设置收口（与自动快照同一策略）。
+    let retain = state
+        .settings
+        .lock()
+        .map_err(|_| AppError::Cloud("读取云备份设置失败".into()))?
+        .backup
+        .retain_count
+        .max(1) as usize;
+    let _ = backup::prune(&state.store, retain);
+
+    record_synced(
+        state,
+        &mut runtime,
+        content_fingerprint,
+        downloaded.sha256.clone(),
+        &remote,
+        &manifest,
+        true,
+    );
+    Ok(Some(CloudRestoreReport {
+        safety_backup: report.safety_backup,
+        restored_files: report.restored_files,
+        removed_files: report.removed_files,
+        // 自动下载不保留下载包为可见快照，这里没有快照名。
+        downloaded_snapshot: String::new(),
+        remote_size_bytes: downloaded
+            .remote
+            .size_bytes
+            .or(remote.size_bytes)
+            .unwrap_or(0),
+        remote_modified_at: remote.modified_at,
+    }))
 }
 
 #[cfg(test)]
@@ -1789,5 +2106,226 @@ mod tests {
                 .join("pw.json")
                 .exists());
         }
+    }
+
+    #[test]
+    fn auto_download_applies_when_remote_changed() {
+        let server = FakeWebDav::start("me", "pw");
+        let source = test_state_with_asset(config_for(&server), Some("pw"));
+        let snapshot = build_named_snapshot(&source, "cloud-source");
+        upload_archive(&source, &snapshot).unwrap();
+
+        let mut settings = config_for(&server);
+        settings.auto_download = true;
+        let target = test_state(settings, Some("pw"));
+        let report = auto_download_if_needed(&target).unwrap().expect("应下载并恢复");
+
+        assert!(target
+            .store
+            .root()
+            .join("assets")
+            .join("mcp")
+            .join("pw.json")
+            .is_file());
+        assert!(backup::list(&target.store)
+            .unwrap()
+            .iter()
+            .any(|snapshot| snapshot.kind == SnapshotKind::PreRestore));
+        assert!(!backup::list(&target.store)
+            .unwrap()
+            .iter()
+            .any(|snapshot| snapshot.name.starts_with("cloud_")));
+        let runtime = load_runtime_status(&target.store);
+        assert!(runtime.last_download_at.is_some());
+        assert!(runtime.synced_sha256.is_some());
+        assert_eq!(
+            runtime.synced_fingerprint.as_deref(),
+            Some(backup::content_fingerprint(&target.store).unwrap().as_str())
+        );
+        assert!(report.safety_backup.len() > 0);
+    }
+
+    #[test]
+    fn auto_download_skips_when_remote_metadata_unchanged() {
+        let server = FakeWebDav::start("me", "pw");
+        let source = test_state_with_asset(config_for(&server), Some("pw"));
+        let snapshot = build_named_snapshot(&source, "cloud-source");
+        upload_archive(&source, &snapshot).unwrap();
+
+        let mut settings = config_for(&server);
+        settings.auto_download = true;
+        let target = test_state(settings, Some("pw"));
+        auto_download_if_needed(&target).unwrap().expect("第一次应下载");
+
+        let gets = server.request_count("GET");
+        assert!(auto_download_if_needed(&target).unwrap().is_none());
+        assert_eq!(
+            server.request_count("GET"),
+            gets,
+            "元数据未变不该再读 manifest"
+        );
+    }
+
+    #[test]
+    fn auto_download_overwrites_local_edits_when_upload_disabled() {
+        let server = FakeWebDav::start("me", "pw");
+        let source = test_state_with_asset(config_for(&server), Some("pw"));
+        let snapshot = build_named_snapshot(&source, "cloud-source");
+        upload_archive(&source, &snapshot).unwrap();
+
+        let mut settings = config_for(&server);
+        settings.auto_download = true;
+        let target = test_state(settings, Some("pw"));
+        target
+            .store
+            .write(
+                crate::domain::AssetType::Mcp,
+                "local-edit",
+                br#"{"id":"local-edit","name":"Local","transport":"stdio","command":"x"}"#,
+            )
+            .unwrap();
+
+        auto_download_if_needed(&target).unwrap().expect("纯下载机应以云端为准");
+
+        assert!(!target
+            .store
+            .root()
+            .join("assets")
+            .join("mcp")
+            .join("local-edit.json")
+            .exists());
+        assert!(target
+            .store
+            .root()
+            .join("assets")
+            .join("mcp")
+            .join("pw.json")
+            .is_file());
+    }
+
+    #[test]
+    fn auto_download_skips_when_local_has_pending_upload() {
+        let server = FakeWebDav::start("me", "pw");
+        let source = test_state_with_asset(config_for(&server), Some("pw"));
+        let snapshot = build_named_snapshot(&source, "cloud-source");
+        upload_archive(&source, &snapshot).unwrap();
+
+        let mut settings = config_for(&server);
+        settings.auto_upload = true;
+        settings.auto_download = true;
+        let target = test_state(settings, Some("pw"));
+        let local_bytes =
+            br#"{"id":"mine","name":"Mine","transport":"stdio","command":"x"}"#.to_vec();
+        target
+            .store
+            .write(crate::domain::AssetType::Mcp, "mine", &local_bytes)
+            .unwrap();
+
+        assert!(auto_download_if_needed(&target).unwrap().is_none());
+        assert_eq!(
+            std::fs::read(
+                target
+                    .store
+                    .root()
+                    .join("assets")
+                    .join("mcp")
+                    .join("mine.json")
+            )
+            .unwrap(),
+            local_bytes,
+            "有未上传改动的编辑机应跳过下载，本地字节不变"
+        );
+        assert!(!target
+            .store
+            .root()
+            .join("assets")
+            .join("mcp")
+            .join("pw.json")
+            .exists());
+    }
+
+    #[test]
+    fn auto_download_rejects_missing_or_incompatible_manifest() {
+        let schema_1 = r#"{"format":"ccswitchx-cloud","schema":1,"appVersion":"1.0.0","deviceName":"x","createdAt":1,"files":1,"contentFingerprint":"00","archive":{"name":"ccswitchx-backup.zip","sizeBytes":1,"sha256":"00"}}"#;
+        for manifest in [Some(schema_1), None] {
+            let server = FakeWebDav::start("me", "pw");
+            let source = test_state_with_asset(config_for(&server), Some("pw"));
+            let snapshot = build_named_snapshot(&source, "cloud-source");
+            server.put_object(
+                "/dav/ccswitchx/ccswitchx-backup.zip",
+                std::fs::read(snapshot).unwrap(),
+            );
+            if let Some(manifest) = manifest {
+                server.put_object("/dav/ccswitchx/manifest.json", manifest.as_bytes().to_vec());
+            }
+
+            let mut settings = config_for(&server);
+            settings.auto_download = true;
+            let target = test_state(settings, Some("pw"));
+            target
+                .store
+                .write(
+                    crate::domain::AssetType::Mcp,
+                    "keep",
+                    br#"{"id":"keep","name":"Keep","transport":"stdio","command":"x"}"#,
+                )
+                .unwrap();
+
+            let error = auto_download_if_needed(&target).unwrap_err().to_string();
+            assert!(
+                error.contains("manifest") || error.contains("重新上传"),
+                "{error}"
+            );
+            assert!(target
+                .store
+                .root()
+                .join("assets")
+                .join("mcp")
+                .join("keep.json")
+                .exists());
+            assert!(!target
+                .store
+                .root()
+                .join("assets")
+                .join("mcp")
+                .join("pw.json")
+                .exists());
+            assert!(load_runtime_status(&target.store).last_download_error.is_some());
+        }
+    }
+
+    #[test]
+    fn auto_download_prunes_snapshots_to_retain_count() {
+        let server = FakeWebDav::start("me", "pw");
+        let source = test_state_with_asset(config_for(&server), Some("pw"));
+        let first = build_named_snapshot(&source, "cloud-v1");
+        upload_archive(&source, &first).unwrap();
+
+        let mut settings = config_for(&server);
+        settings.auto_download = true;
+        let target = test_state(settings, Some("pw"));
+        target.settings.lock().unwrap().backup.retain_count = 1;
+
+        auto_download_if_needed(&target).unwrap().expect("第一版应下载");
+        assert!(backup::list(&target.store).unwrap().len() <= 1);
+
+        // 源改内容再上传第二版。
+        source
+            .store
+            .write(
+                crate::domain::AssetType::Mcp,
+                "other",
+                br#"{"id":"other","name":"Other","transport":"stdio","command":"x"}"#,
+            )
+            .unwrap();
+        let second = build_named_snapshot(&source, "cloud-v2");
+        upload_archive(&source, &second).unwrap();
+
+        auto_download_if_needed(&target).unwrap().expect("第二版应下载");
+        let snapshots = backup::list(&target.store).unwrap();
+        assert!(snapshots.len() <= 1);
+        assert!(snapshots
+            .iter()
+            .any(|snapshot| snapshot.kind == SnapshotKind::PreRestore));
     }
 }

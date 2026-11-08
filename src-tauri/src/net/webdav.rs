@@ -1091,7 +1091,8 @@ pub(crate) mod test_support {
                         respond(&mut stream, "416 Range Not Satisfiable", &[], b"");
                         return;
                     }
-                    let mut response_headers = object_headers();
+                    let etag = crate::index::sha256_hex(&bytes);
+                    let mut response_headers = object_headers(&etag);
                     let status = if range_start.is_some() {
                         response_headers.push((
                             "Content-Range",
@@ -1142,7 +1143,8 @@ pub(crate) mod test_support {
                     } else {
                         state.head_size_override.unwrap_or(bytes.len() as u64)
                     };
-                    respond_head(&mut stream, "200 OK", length, &object_headers());
+                    let etag = crate::index::sha256_hex(bytes);
+                    respond_head(&mut stream, "200 OK", length, &object_headers(&etag));
                 }
                 None => respond_head(&mut stream, "404 Not Found", 0, &[]),
             },
@@ -1153,7 +1155,8 @@ pub(crate) mod test_support {
                     match state.objects.get(&path) {
                         Some(bytes) => {
                             let length = state.head_size_override.unwrap_or(bytes.len() as u64);
-                            let xml = propfind_document(&path, length);
+                            let etag = crate::index::sha256_hex(bytes);
+                            let xml = propfind_document(&path, length, &etag);
                             respond(
                                 &mut stream,
                                 "207 Multi-Status",
@@ -1170,16 +1173,18 @@ pub(crate) mod test_support {
     }
 
     /// 形如真实服务器的单条 multistatus 应答，属性顺序故意与坚果云保持一致。
-    fn propfind_document(path: &str, content_length: u64) -> String {
+    /// ETag 由内容哈希派生：真实 WebDAV 服务器（如坚果云）的 ETag 会随内容变化，
+    /// 自动下载靠它判断「云端变了」；固定值会让同一台假服务器的两次上传判不出差异。
+    fn propfind_document(path: &str, content_length: u64, etag: &str) -> String {
         format!(
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>{path}</d:href><d:propstat><d:prop><d:getetag>fake-etag</d:getetag><d:getcontentlength>{content_length}</d:getcontentlength><d:getlastmodified>Wed, 21 Oct 2015 07:28:00 GMT</d:getlastmodified><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>{path}</d:href><d:propstat><d:prop><d:getetag>{etag}</d:getetag><d:getcontentlength>{content_length}</d:getcontentlength><d:getlastmodified>Wed, 21 Oct 2015 07:28:00 GMT</d:getlastmodified><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#
         )
     }
 
-    fn object_headers() -> Vec<(&'static str, String)> {
+    fn object_headers(etag: &str) -> Vec<(&'static str, String)> {
         vec![
             ("Last-Modified", "Wed, 21 Oct 2015 07:28:00 GMT".to_string()),
-            ("ETag", "\"fake-etag\"".to_string()),
+            ("ETag", format!("\"{etag}\"")),
         ]
     }
 

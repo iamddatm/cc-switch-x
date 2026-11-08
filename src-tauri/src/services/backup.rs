@@ -731,13 +731,23 @@ pub fn restore(
     if !zip.is_file() {
         return Err(AppError::NotFound(format!("快照不存在：{name}")));
     }
+    restore_zip(store, index, &zip)
+}
+
+/// 从指定 zip 包恢复：先按当前真源建 `PreRestore` 安全快照，再 overlay；失败时按安全快照回滚。
+/// 调用方负责持 maintenance 写锁与 index 锁，并负责在事后删除临时 `zip`。
+pub fn restore_zip(
+    store: &Store,
+    index: &mut Index,
+    zip: &Path,
+) -> Result<RestoreBackupReport, AppError> {
     // 恢复期间不触发自动上传：批量覆盖只是中间状态，不属于用户编辑。
     let _quiet = crate::change_signal::SuppressionGuard::new();
     // 清理交给调用方：这里 prune 有可能把正在恢复的源快照删掉。
     let safety = create(store, None, SnapshotKind::PreRestore)?;
     let safety_zip = snapshot_path(store, &safety.name)?;
 
-    match apply_snapshot(store, &zip) {
+    match apply_snapshot(store, zip) {
         Ok((restored_files, removed_files)) => {
             rebuild_after_restore(store, index)?;
             Ok(RestoreBackupReport {
