@@ -142,6 +142,10 @@ pub struct CloudSettingsView {
     pub enabled: bool,
     /// 变化后是否自动上传；`enabled` 为假时恒为假。
     pub auto_upload: bool,
+    /// 启动或变化检测后是否自动下载；`enabled` 为假时恒为假。
+    pub auto_download: bool,
+    /// 上传防抖窗口（小时），1–24。
+    pub upload_delay_hours: u32,
     pub base_url: String,
     pub username: String,
     pub remote_dir: String,
@@ -159,6 +163,8 @@ pub fn cloud_view(settings: &AppSettings, secrets: &Secrets) -> CloudSettingsVie
     CloudSettingsView {
         enabled: settings.cloud.enabled,
         auto_upload: settings.cloud.auto_upload,
+        auto_download: settings.cloud.auto_download,
+        upload_delay_hours: settings.cloud.upload_delay_hours,
         base_url: settings.cloud.base_url.clone(),
         username: settings.cloud.username.clone(),
         remote_dir: settings.cloud.remote_dir.clone(),
@@ -169,7 +175,9 @@ pub fn cloud_view(settings: &AppSettings, secrets: &Secrets) -> CloudSettingsVie
 }
 
 /// 密码语义：None = 保留旧密码，Some("") = 清除，Some(v) = 覆盖。
-/// 「通道启用」与「自动上传」分开存：自动上传必须先启用通道，关闭通道会一并停掉自动上传。
+/// 「通道启用」与「自动上传 / 自动下载」分开存：两者都必须先启用通道，关闭通道会一并停掉。
+/// 返回的第三项表示连接参数（地址 / 用户名 / 目录 / 最终密码）是否变化，
+/// 调用方据此作废旧远端的同步基线。
 pub fn set_cloud_settings_at(
     config_path: &std::path::Path,
     secrets_path: &std::path::Path,
@@ -179,13 +187,22 @@ pub fn set_cloud_settings_at(
     remote_dir: String,
     enabled: bool,
     auto_upload: bool,
-) -> Result<(AppSettings, Secrets), AppError> {
+    auto_download: bool,
+    upload_delay_hours: u32,
+) -> Result<(AppSettings, Secrets, bool), AppError> {
+    if !(1..=24).contains(&upload_delay_hours) {
+        return Err(AppError::InvalidInput("上传延迟需在 1–24 小时之间".into()));
+    }
     let mut current = settings::load_from(config_path)?;
     let mut secrets = Secrets::load(secrets_path)?;
+    // 连接参数以保存前的值为基线：任何一项变化都要让旧远端的同步状态作废。
+    let previous_cloud = current.cloud.clone();
+    let previous_password = secrets.get(&cloud_secret_ref()).map(str::to_string);
     let base_url = webdav::normalize_base_url(&base_url)?;
     let username = username.trim().to_string();
     let remote_dir = webdav::validate_remote_dir(&remote_dir)?;
     let auto_upload = enabled && auto_upload;
+    let auto_download = enabled && auto_download;
 
     if base_url.is_empty() {
         current.cloud.base_url.clear();
@@ -193,6 +210,7 @@ pub fn set_cloud_settings_at(
         current.cloud.remote_dir = remote_dir;
         current.cloud.enabled = false;
         current.cloud.auto_upload = false;
+        current.cloud.auto_download = false;
         secrets.remove(&cloud_secret_ref());
     } else {
         if username.is_empty() {
@@ -214,8 +232,10 @@ pub fn set_cloud_settings_at(
         current.cloud.remote_dir = remote_dir;
         current.cloud.enabled = enabled;
         current.cloud.auto_upload = auto_upload;
+        current.cloud.auto_download = auto_download;
         secrets.insert(&cloud_secret_ref(), &next_password);
     }
+    current.cloud.upload_delay_hours = upload_delay_hours;
     if current.cloud.enabled {
         // 远端备份只能选一种：启用 WebDAV 通道时停用 Git 自动同步。
         current.backup.git.enabled = false;
@@ -223,7 +243,12 @@ pub fn set_cloud_settings_at(
 
     secrets.save(secrets_path)?;
     settings::save_to(config_path, &current)?;
-    Ok((current, secrets))
+    let next_password = secrets.get(&cloud_secret_ref()).map(str::to_string);
+    let connection_changed = previous_cloud.base_url != current.cloud.base_url
+        || previous_cloud.username != current.cloud.username
+        || previous_cloud.remote_dir != current.cloud.remote_dir
+        || previous_password != next_password;
+    Ok((current, secrets, connection_changed))
 }
 
 pub fn set_close_to_tray_at(
@@ -320,6 +345,7 @@ pub fn set_backup_settings_at(
         // 远端备份只能选一种：开启 Git 自动同步时停用整条 WebDAV 通道。
         current.cloud.enabled = false;
         current.cloud.auto_upload = false;
+        current.cloud.auto_download = false;
     }
     settings::save_to(config_path, &current)?;
     Ok(current)
@@ -479,7 +505,7 @@ mod tests {
         let config = dir.path().join("settings.json");
         let secrets_path = dir.path().join("secrets.local.json");
 
-        let (with_cloud, _) = set_cloud_settings_at(
+        let (with_cloud, _, _) = set_cloud_settings_at(
             &config,
             &secrets_path,
             "https://dav.example.com/dav".into(),
@@ -488,10 +514,13 @@ mod tests {
             "ccswitchx".into(),
             true,
             true,
+            true,
+            1,
         )
         .unwrap();
         assert!(with_cloud.cloud.enabled);
         assert!(with_cloud.cloud.auto_upload);
+        assert!(with_cloud.cloud.auto_download);
 
         let with_git = set_backup_settings_at(
             &config,
@@ -507,11 +536,13 @@ mod tests {
         .unwrap();
         assert!(with_git.backup.git.enabled);
         assert!(
-            !with_git.cloud.enabled && !with_git.cloud.auto_upload,
+            !with_git.cloud.enabled
+                && !with_git.cloud.auto_upload
+                && !with_git.cloud.auto_download,
             "启用 Git 自动同步时应停用整条 WebDAV 通道"
         );
 
-        let (with_cloud_again, _) = set_cloud_settings_at(
+        let (with_cloud_again, _, _) = set_cloud_settings_at(
             &config,
             &secrets_path,
             "https://dav.example.com/dav".into(),
@@ -520,6 +551,8 @@ mod tests {
             "ccswitchx".into(),
             true,
             true,
+            true,
+            1,
         )
         .unwrap();
         assert!(with_cloud_again.cloud.auto_upload);
@@ -535,7 +568,7 @@ mod tests {
         let config = dir.path().join("settings.json");
         let secrets_path = dir.path().join("secrets.local.json");
 
-        let (saved, _) = set_cloud_settings_at(
+        let (saved, _, _) = set_cloud_settings_at(
             &config,
             &secrets_path,
             "https://dav.example.com/dav".into(),
@@ -544,13 +577,15 @@ mod tests {
             "ccswitchx".into(),
             false,
             true,
+            false,
+            1,
         )
         .unwrap();
         assert!(!saved.cloud.enabled, "通道未启用时不能打开自动上传");
         assert!(!saved.cloud.auto_upload);
 
         // 只启用通道、不开自动上传 = 手动上传模式。
-        let (manual, _) = set_cloud_settings_at(
+        let (manual, _, _) = set_cloud_settings_at(
             &config,
             &secrets_path,
             "https://dav.example.com/dav".into(),
@@ -559,10 +594,157 @@ mod tests {
             "ccswitchx".into(),
             true,
             false,
+            false,
+            1,
         )
         .unwrap();
         assert!(manual.cloud.enabled);
         assert!(!manual.cloud.auto_upload);
+    }
+
+    #[test]
+    fn cloud_auto_download_requires_enabled_channel() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let secrets_path = dir.path().join("secrets.local.json");
+
+        let (saved, _, _) = set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            "https://dav.example.com/dav".into(),
+            "me".into(),
+            Some("pw".into()),
+            "ccswitchx".into(),
+            false,
+            false,
+            true,
+            1,
+        )
+        .unwrap();
+        assert!(!saved.cloud.enabled, "通道未启用时不能打开自动下载");
+        assert!(!saved.cloud.auto_download);
+
+        let (enabled, _, _) = set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            "https://dav.example.com/dav".into(),
+            "me".into(),
+            None,
+            "ccswitchx".into(),
+            true,
+            false,
+            true,
+            1,
+        )
+        .unwrap();
+        assert!(enabled.cloud.enabled);
+        assert!(enabled.cloud.auto_download);
+    }
+
+    #[test]
+    fn cloud_upload_delay_must_be_1_to_24() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let secrets_path = dir.path().join("secrets.local.json");
+
+        for bad in [0u32, 25] {
+            let error = set_cloud_settings_at(
+                &config,
+                &secrets_path,
+                "https://dav.example.com/dav".into(),
+                "me".into(),
+                Some("pw".into()),
+                "ccswitchx".into(),
+                true,
+                false,
+                false,
+                bad,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&error, AppError::InvalidInput(message) if message == "上传延迟需在 1–24 小时之间"),
+                "{bad} 应被拒绝：{error}"
+            );
+        }
+
+        let (saved, _, _) = set_cloud_settings_at(
+            &config,
+            &secrets_path,
+            "https://dav.example.com/dav".into(),
+            "me".into(),
+            Some("pw".into()),
+            "ccswitchx".into(),
+            true,
+            false,
+            false,
+            24,
+        )
+        .unwrap();
+        assert_eq!(saved.cloud.upload_delay_hours, 24);
+    }
+
+    #[test]
+    fn cloud_connection_changed_flag_tracks_endpoint_and_password() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let secrets_path = dir.path().join("secrets.local.json");
+        let save = |base_url: &str, username: &str, password: Option<&str>, remote_dir: &str| {
+            set_cloud_settings_at(
+                &config,
+                &secrets_path,
+                base_url.into(),
+                username.into(),
+                password.map(str::to_string),
+                remote_dir.into(),
+                true,
+                false,
+                false,
+                1,
+            )
+            .map(|(_, _, changed)| changed)
+            .unwrap()
+        };
+
+        assert!(
+            save("https://dav.example.com/dav", "me", Some("pw"), "ccswitchx"),
+            "首次保存连接参数应视为变化"
+        );
+        assert!(!save(
+            "https://dav.example.com/dav",
+            "me",
+            Some("pw"),
+            "ccswitchx"
+        ));
+        assert!(
+            save("https://dav.example.com/dav", "me", Some("pw"), "backups"),
+            "改 remote_dir 应视为变化"
+        );
+        assert!(
+            save("https://dav.example.com/dav", "you", Some("pw"), "backups"),
+            "改用户名应视为变化"
+        );
+        assert!(
+            save(
+                "https://dav2.example.com/dav",
+                "you",
+                Some("pw"),
+                "backups"
+            ),
+            "改地址应视为变化"
+        );
+        assert!(
+            save(
+                "https://dav2.example.com/dav",
+                "you",
+                Some("new-pw"),
+                "backups"
+            ),
+            "改密码应视为变化"
+        );
+        assert!(
+            !save("https://dav2.example.com/dav", "you", None, "backups"),
+            "密码传 None 表示沿用，不算变化"
+        );
     }
 
     #[test]
@@ -886,7 +1068,7 @@ mod tests {
         let config = dir.path().join("settings.json");
         let secrets_path = dir.path().join("secrets.local.json");
 
-        let (saved, secrets) = set_cloud_settings_at(
+        let (saved, secrets, _) = set_cloud_settings_at(
             &config,
             &secrets_path,
             "https://dav.example.com/dav".into(),
@@ -895,6 +1077,8 @@ mod tests {
             "ccswitchx".into(),
             true,
             true,
+            false,
+            1,
         )
         .unwrap();
         assert!(saved.cloud.enabled);
@@ -905,7 +1089,7 @@ mod tests {
             .contains("app-password"));
         assert!(cloud_view(&saved, &secrets).has_password);
 
-        let (kept, kept_secrets) = set_cloud_settings_at(
+        let (kept, kept_secrets, _) = set_cloud_settings_at(
             &config,
             &secrets_path,
             "https://dav.example.com/dav".into(),
@@ -914,6 +1098,8 @@ mod tests {
             "ccswitchx".into(),
             true,
             false,
+            false,
+            1,
         )
         .unwrap();
         assert_eq!(kept_secrets.get(&cloud_secret_ref()), Some("app-password"));
@@ -929,11 +1115,14 @@ mod tests {
             "ccswitchx".into(),
             true,
             true,
+            true,
+            1,
         )
         .unwrap();
         assert!(cleared.1.get(&cloud_secret_ref()).is_none());
         assert!(!cleared.0.cloud.enabled);
         assert!(!cleared.0.cloud.auto_upload);
+        assert!(!cleared.0.cloud.auto_download);
 
         assert!(set_cloud_settings_at(
             &config,
@@ -944,6 +1133,8 @@ mod tests {
             "ccswitchx".into(),
             false,
             false,
+            false,
+            1,
         )
         .is_err());
     }

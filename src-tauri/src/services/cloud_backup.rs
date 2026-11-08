@@ -198,6 +198,15 @@ pub fn save_runtime_status(store: &Store, status: &CloudRuntimeStatus) -> Result
     Ok(())
 }
 
+/// 连接参数变化后作废旧远端的所有同步基线与观测缓存。
+pub fn reset_runtime_status(store: &Store) -> Result<(), AppError> {
+    match fs::remove_file(status_path(store)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
     let cloud = {
         let settings = state
@@ -692,6 +701,8 @@ mod tests {
         CloudBackupSettings {
             enabled: true,
             auto_upload: false,
+            auto_download: false,
+            upload_delay_hours: 1,
             base_url: server.base_url(),
             username: "me".into(),
             remote_dir: "ccswitchx".into(),
@@ -749,6 +760,27 @@ mod tests {
 
         std::fs::write(status_path(&store), "{bad json").unwrap();
         assert_eq!(load_runtime_status(&store), CloudRuntimeStatus::default());
+    }
+
+    #[test]
+    fn reset_runtime_status_removes_file_and_ignores_missing() {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        save_runtime_status(
+            &store,
+            &CloudRuntimeStatus {
+                last_upload_at: Some(1),
+                ..CloudRuntimeStatus::default()
+            },
+        )
+        .unwrap();
+        assert!(status_path(&store).exists());
+
+        reset_runtime_status(&store).unwrap();
+        assert!(!status_path(&store).exists());
+
+        // 文件本来就不存在时也算成功。
+        reset_runtime_status(&store).unwrap();
     }
 
     #[test]

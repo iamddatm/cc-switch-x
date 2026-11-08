@@ -98,6 +98,8 @@ const commit = {
 const cloudView: CloudSettingsView = {
   enabled: false,
   autoUpload: false,
+  autoDownload: false,
+  uploadDelayHours: 1,
   baseUrl: "https://dav.example.com/dav",
   username: "me",
   remoteDir: "ccswitchx",
@@ -175,6 +177,8 @@ function mockBase(git: GitStatus = healthyGit) {
     cloud: {
       enabled: false,
       autoUpload: false,
+      autoDownload: false,
+      uploadDelayHours: 1,
       baseUrl: "",
       username: "",
       remoteDir: "ccswitchx",
@@ -296,6 +300,8 @@ test("enables webdav through the method selector", async () => {
       remoteDir: cloudView.remoteDir,
       enabled: true,
       autoUpload: false,
+      autoDownload: false,
+      uploadDelayHours: 1,
     }),
   );
 });
@@ -313,6 +319,8 @@ test("toggles webdav auto backup after the channel is enabled", async () => {
       remoteDir: cloudView.remoteDir,
       enabled: true,
       autoUpload: true,
+      autoDownload: false,
+      uploadDelayHours: 1,
     }),
   );
 });
@@ -432,6 +440,8 @@ test("saves cloud settings without overwriting the saved password", async () => 
       remoteDir: "ccswitchx",
       enabled: false,
       autoUpload: false,
+      autoDownload: false,
+      uploadDelayHours: 1,
     }),
   );
 });
@@ -543,6 +553,8 @@ test("disables cloud actions without config", async () => {
   vi.mocked(api.getCloudSettings).mockResolvedValue({
     enabled: false,
     autoUpload: false,
+    autoDownload: false,
+    uploadDelayHours: 1,
     baseUrl: "",
     username: "",
     remoteDir: "ccswitchx",

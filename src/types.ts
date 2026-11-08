@@ -104,6 +104,10 @@ export interface CloudBackupSettings {
   enabled: boolean;
   /** 真源变化后是否自动上传；通道未启用时恒为 false。 */
   autoUpload: boolean;
+  /** 启动或检测到远端变化后是否自动下载；通道未启用时恒为 false。 */
+  autoDownload: boolean;
+  /** 上传防抖窗口（小时），1–24。 */
+  uploadDelayHours: number;
   baseUrl: string;
   username: string;
   remoteDir: string;
@@ -118,7 +122,10 @@ export type CloudSettingsInput = CloudBackupSettings & {
   password: string | null;
 };
 
-export type CloudTestInput = Omit<CloudSettingsInput, "enabled" | "autoUpload">;
+export type CloudTestInput = Omit<
+  CloudSettingsInput,
+  "enabled" | "autoUpload" | "autoDownload" | "uploadDelayHours"
+>;
 
 export interface CloudRemoteStatus {
   exists: boolean;

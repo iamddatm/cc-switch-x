@@ -301,6 +301,8 @@ export function BackupsPanel() {
           remoteDir: draft.remoteDir.trim(),
           enabled: cloud?.enabled ?? false,
           autoUpload: cloud?.autoUpload ?? false,
+          autoDownload: cloud?.autoDownload ?? false,
+          uploadDelayHours: cloud?.uploadDelayHours ?? 1,
         }),
       );
       setNotice("云备份设置已保存");
@@ -322,6 +324,8 @@ export function BackupsPanel() {
         remoteDir: cloud.remoteDir,
         enabled: true,
         autoUpload,
+        autoDownload: cloud.autoDownload,
+        uploadDelayHours: cloud.uploadDelayHours,
       }),
     );
   };
@@ -423,6 +427,8 @@ export function BackupsPanel() {
             enabled: true,
             // 通道与自动上传分开：只启用通道时保留原有的自动备份偏好。
             autoUpload: cloud.autoUpload,
+            autoDownload: cloud.autoDownload,
+            uploadDelayHours: cloud.uploadDelayHours,
           }),
         "已启用 WebDAV 云备份",
       );
@@ -445,6 +451,8 @@ export function BackupsPanel() {
             remoteDir: cloud.remoteDir,
             enabled: false,
             autoUpload: false,
+            autoDownload: false,
+            uploadDelayHours: cloud.uploadDelayHours,
           });
         }
       },

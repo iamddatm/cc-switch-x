@@ -97,6 +97,12 @@ pub struct CloudBackupSettings {
     /// 真源变化后是否自动上传；必须先启用通道。
     #[serde(default)]
     pub auto_upload: bool,
+    /// 启动或变化检测后是否自动下载；必须先启用通道。与自动上传互不绑定。
+    #[serde(default)]
+    pub auto_download: bool,
+    /// 上传防抖窗口（小时），只接受 1–24。
+    #[serde(default = "default_upload_delay_hours")]
+    pub upload_delay_hours: u32,
     #[serde(default)]
     pub base_url: String,
     #[serde(default)]
@@ -110,6 +116,8 @@ impl Default for CloudBackupSettings {
         Self {
             enabled: false,
             auto_upload: false,
+            auto_download: false,
+            upload_delay_hours: default_upload_delay_hours(),
             base_url: String::new(),
             username: String::new(),
             remote_dir: default_cloud_remote_dir(),
@@ -119,6 +127,10 @@ impl Default for CloudBackupSettings {
 
 fn default_cloud_remote_dir() -> String {
     "ccswitchx".to_string()
+}
+
+fn default_upload_delay_hours() -> u32 {
+    1
 }
 
 fn default_backup_interval() -> u32 {
@@ -334,11 +346,7 @@ pub fn load_from(path: &Path) -> Result<AppSettings, SettingsError> {
         return Ok(AppSettings::default());
     }
     let bytes = std::fs::read(path)?;
-    let mut settings: AppSettings = serde_json::from_slice(&bytes)?;
-    // 旧设置文件只有 autoUpload：开过自动上传的视为通道已启用，否则升级后会自动上传失效。
-    if settings.cloud.auto_upload {
-        settings.cloud.enabled = true;
-    }
+    let settings: AppSettings = serde_json::from_slice(&bytes)?;
     Ok(settings)
 }
 
@@ -401,6 +409,8 @@ mod tests {
             cloud: CloudBackupSettings {
                 enabled: true,
                 auto_upload: true,
+                auto_download: false,
+                upload_delay_hours: 6,
                 base_url: "https://dav.example.com/dav".into(),
                 username: "me".into(),
                 remote_dir: "backups/ccswitchx".into(),
@@ -408,6 +418,31 @@ mod tests {
         };
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path).unwrap(), settings);
+    }
+
+    #[test]
+    fn cloud_settings_default_auto_flags() {
+        let cloud = CloudBackupSettings::default();
+        assert!(!cloud.enabled);
+        assert!(!cloud.auto_upload);
+        assert!(!cloud.auto_download);
+        assert_eq!(cloud.upload_delay_hours, 1);
+    }
+
+    #[test]
+    fn cloud_settings_missing_new_fields_read_defaults() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            br#"{"cloud":{"enabled":true,"autoUpload":true,"baseUrl":"https://dav.example.com/dav","username":"me","remoteDir":"ccswitchx"}}"#,
+        )
+        .unwrap();
+        let loaded = load_from(&path).unwrap();
+        assert!(loaded.cloud.enabled);
+        assert!(loaded.cloud.auto_upload);
+        assert!(!loaded.cloud.auto_download);
+        assert_eq!(loaded.cloud.upload_delay_hours, 1);
     }
 
     #[test]
@@ -577,6 +612,8 @@ mod tests {
             cloud: CloudBackupSettings {
                 enabled: true,
                 auto_upload: true,
+                auto_download: false,
+                upload_delay_hours: 1,
                 base_url: "https://dav.example.com/dav".into(),
                 username: "me".into(),
                 remote_dir: "backups/ccswitchx".into(),
@@ -587,23 +624,4 @@ mod tests {
         assert_eq!(load_from(&path).unwrap(), settings);
     }
 
-    #[test]
-    fn legacy_auto_upload_setting_implies_enabled_channel() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        let legacy = serde_json::json!({
-            "storeRoot": dir.path().join("data"),
-            "cloud": {
-                "autoUpload": true,
-                "baseUrl": "https://dav.example.com/dav",
-                "username": "me",
-                "remoteDir": "ccswitchx"
-            }
-        });
-        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
-
-        let loaded = load_from(&path).unwrap();
-        assert!(loaded.cloud.enabled, "旧文件开过自动上传，升级后通道应视为已启用");
-        assert!(loaded.cloud.auto_upload);
-    }
 }

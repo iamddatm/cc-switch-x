@@ -44,8 +44,10 @@ pub fn set_cloud_settings(
     remote_dir: String,
     enabled: bool,
     auto_upload: bool,
+    auto_download: bool,
+    upload_delay_hours: u32,
 ) -> Result<CloudSettingsView, AppError> {
-    let (updated, secrets) = set_cloud_settings_at(
+    let (updated, secrets, connection_changed) = set_cloud_settings_at(
         &settings_file::settings_path()?,
         &secrets_path(state.store.root()),
         base_url,
@@ -54,7 +56,13 @@ pub fn set_cloud_settings(
         remote_dir,
         enabled,
         auto_upload,
+        auto_download,
+        upload_delay_hours,
     )?;
+    // 换了远端或凭据，旧基线与观测缓存都不再可信。
+    if connection_changed {
+        cloud_backup::reset_runtime_status(&state.store)?;
+    }
     let mut current = state
         .settings
         .lock()
@@ -65,7 +73,10 @@ pub fn set_cloud_settings(
         .lock()
         .map_err(|_| AppError::InvalidInput("secrets 锁失败".into()))?;
     *current_secrets = secrets;
-    Ok(cloud_view(&current, &current_secrets))
+    let view = cloud_view(&current, &current_secrets);
+    // 唤醒自动同步工作线程，让它按新的开关与延迟重新计时。
+    crate::change_signal::notify();
+    Ok(view)
 }
 
 #[tauri::command]

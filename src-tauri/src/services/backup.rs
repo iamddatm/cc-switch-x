@@ -1275,6 +1275,8 @@ mod tests {
             cloud: CloudBackupSettings {
                 enabled: auto_upload,
                 auto_upload,
+                auto_download: false,
+                upload_delay_hours: 1,
                 base_url,
                 username: "me".into(),
                 remote_dir: "ccswitchx".into(),
