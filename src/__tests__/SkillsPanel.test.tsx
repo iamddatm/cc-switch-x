@@ -28,6 +28,7 @@ vi.mock("../lib/api", () => ({
     getSkillRepos: vi.fn(),
     setSkillRepos: vi.fn(),
     discoverSkills: vi.fn(),
+    openExternalUrl: vi.fn(),
     installDiscoveredSkill: vi.fn(),
     searchSkillsSh: vi.fn(),
     listSkillsShTrending: vi.fn(),
@@ -103,6 +104,7 @@ beforeEach(() => {
     ],
     failures: [],
     repos: [{ owner: "acme", name: "skills", branch: "main", enabled: true }],
+    installedRepos: [],
   });
   vi.mocked(api.installDiscoveredSkill).mockResolvedValue({
     id: "acme-skills-pdf",
@@ -602,17 +604,7 @@ test("filters installed skills by multiple source repos", async () => {
   expect(screen.queryByRole("checkbox", { name: "acme/demo" })).not.toBeInTheDocument();
 });
 
-test("discovery repo filter includes repos only known from installed skills", async () => {
-  vi.mocked(api.listAssets).mockResolvedValue([
-    {
-      assetType: "skill",
-      id: "ask-ui",
-      name: "ask-ui",
-      updatedAt: 1,
-      hash: "h",
-      origin: { kind: "github", repo: "iamddatm/skills", updateAvailable: false, updatable: true },
-    },
-  ]);
+test("installed-source repos are offered but only fetched when checked", async () => {
   vi.mocked(api.discoverSkills).mockResolvedValue({
     skills: [
       {
@@ -627,19 +619,43 @@ test("discovery repo filter includes repos only known from installed skills", as
       },
     ],
     failures: [],
-    repos: [
-      { owner: "acme", name: "skills", branch: "main", enabled: true },
-      { owner: "iamddatm", name: "skills", branch: "main", enabled: true },
-    ],
+    repos: [{ owner: "acme", name: "skills", branch: "main", enabled: true }],
+    installedRepos: [{ owner: "iamddatm", name: "skills", branch: "main", enabled: true }],
   });
 
   render(<SkillsPanel />);
   fireEvent.click(await screen.findByRole("tab", { name: /发现/ }));
-  expect(await screen.findByRole("button", { name: "仓库 · 2" })).toBeInTheDocument();
-  fireEvent.click(await screen.findByRole("button", { name: "仓库：2/2" }));
-  expect(await screen.findByRole("checkbox", { name: "iamddatm/skills" })).toBeInTheDocument();
-  // 已安装页仍挂载在隐藏容器里，同名 Skill 会出现两次。
-  expect(screen.getAllByText("ask-ui").length).toBeGreaterThan(0);
+
+  // 默认只读配置仓库；已安装来源出现在候选列表里，但未勾选、未下载。
+  expect(await screen.findByRole("button", { name: "仓库 · 1" })).toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: "仓库：1/2" }));
+  const checkbox = await screen.findByRole("checkbox", { name: "iamddatm/skills" });
+  expect(checkbox).not.toBeChecked();
+  expect(api.discoverSkills).toHaveBeenLastCalledWith({ force: false, extraRepos: [] });
+
+  // 勾选后才把它作为额外仓库传回后端抓取。
+  fireEvent.click(checkbox);
+  await waitFor(() =>
+    expect(api.discoverSkills).toHaveBeenLastCalledWith({
+      force: false,
+      extraRepos: [{ owner: "iamddatm", name: "skills", branch: "main", enabled: true }],
+    }),
+  );
+  expect(screen.getByRole("button", { name: "仓库：2/2" })).toBeInTheDocument();
+});
+
+test("discovery rows can open the matching repo directory on github", async () => {
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("tab", { name: /发现/ }));
+
+  const links = await screen.findAllByRole("button", { name: "在 GitHub 打开" });
+  fireEvent.click(links[0]);
+
+  await waitFor(() =>
+    expect(api.openExternalUrl).toHaveBeenCalledWith(
+      "https://github.com/acme/skills/tree/main/pdf",
+    ),
+  );
 });
 
 test("source filter hides skills from other origins", async () => {

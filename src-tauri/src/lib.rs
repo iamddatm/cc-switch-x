@@ -147,6 +147,7 @@ pub fn run() {
             commands::skills::install_skill,
             commands::skills::import_unmanaged_skills,
             commands::skills::list_skills_sh_trending,
+            commands::skills::open_external_url,
             commands::skills::preview_skill_source,
             commands::skills::repair_skill_deployments,
             commands::skills::scan_unmanaged_skills,

@@ -263,8 +263,10 @@ export interface DiscoverableSkill {
 export interface SkillDiscoveryReport {
   skills: DiscoverableSkill[];
   failures: SkillRepoFailure[];
-  /** 本次发现使用的仓库：配置仓库 + 已安装 Skill 的来源仓库（含已停用项）。 */
+  /** 本次实际读取的仓库：配置为启用的仓库 + 用户显式勾选的已安装来源仓库。 */
   repos: SkillRepo[];
+  /** 只在已安装 Skill 元数据里出现的仓库；默认不读取，由用户勾选后再传 `extraRepos`。 */
+  installedRepos: SkillRepo[];
 }
 
 export interface DiscoveredSkillInstallInput {

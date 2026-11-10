@@ -133,7 +133,12 @@ beforeEach(() => {
   });
   vi.mocked(api.setProjectAutoSync).mockResolvedValue(projectView());
   vi.mocked(api.getSkillRepos).mockResolvedValue([]);
-  vi.mocked(api.discoverSkills).mockResolvedValue({ skills: [], failures: [], repos: [] });
+  vi.mocked(api.discoverSkills).mockResolvedValue({
+    skills: [],
+    failures: [],
+    repos: [],
+    installedRepos: [],
+  });
   vi.mocked(api.checkProjectSkillUpdates).mockResolvedValue({
     checkedAt: 0,
     updates: [],

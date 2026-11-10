@@ -10,16 +10,23 @@ use crate::net::archive::scan_skills;
 use crate::net::{parse_github_input, ProxyConfig, RepoFetcher};
 use crate::services::skill_source::github_candidate_id;
 use crate::settings::SkillRepo;
+use crate::store::atomic::write_atomic;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::time::Duration;
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_SKILLS_PER_REPO: usize = 2000;
 const DISCOVERY_CONCURRENCY: usize = 4;
+/// 仓库归档很贵（GitHub 整包 + 解压扫描），一次发现的结果在本地缓存里放一段时间；
+/// 手动刷新（force）始终重新下载。
+const DISCOVERY_CACHE_TTL_SECS: u64 = 600;
+/// 派生缓存版本；扫描结果的字段变化时递增，旧文件自然失效。
+const DISCOVERY_CACHE_VERSION: u32 = 1;
 pub const SKILLS_SH_MAX_LIMIT: usize = 50;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoverableSkill {
     /// 仓库 + 分支 + 路径，列表行的稳定标识。
@@ -46,8 +53,11 @@ pub struct SkillRepoFailure {
 pub struct SkillDiscoveryReport {
     pub skills: Vec<DiscoverableSkill>,
     pub failures: Vec<SkillRepoFailure>,
-    /// 本次发现使用的仓库：配置仓库 + 已安装 Skill 的来源仓库（含已停用项）。
+    /// 本次实际参与发现的仓库：配置为启用的仓库 + 前端显式勾选的已安装来源仓库。
     pub repos: Vec<SkillRepo>,
+    /// 只在已安装 Skill 的元数据里出现、尚未配置的仓库。
+    /// 默认不下载：放进发现流程会让每次刷新多拉十几个归档；由前端按需勾选后再传 `extra_repos`。
+    pub installed_repos: Vec<SkillRepo>,
 }
 
 /// 读取全部已安装 Skill 的来源元数据。
@@ -64,15 +74,15 @@ fn installed_metas(store: &Store) -> Vec<SkillMeta> {
         .collect()
 }
 
-/// 把已安装 Skill 的来源仓库并入发现列表，让从 skills.sh 等渠道装过的仓库
-/// 也能继续浏览；已配置的同名仓库优先，保留用户的启用状态。
+/// 已安装 Skill 里出现、但配置里没有的仓库。
+/// 只作为「可选来源」交给前端展示，默认不下载：每次发现都拉它们会让刷新慢一个数量级。
 pub fn merge_installed_repos(store: &Store, configured: &[SkillRepo]) -> Vec<SkillRepo> {
-    merge_repos(&installed_metas(store), configured)
+    suggested_repos(&installed_metas(store), configured)
 }
 
-fn merge_repos(installed: &[SkillMeta], configured: &[SkillRepo]) -> Vec<SkillRepo> {
-    let mut repos = configured.to_vec();
-    let mut seen: HashSet<String> = repos
+fn suggested_repos(installed: &[SkillMeta], configured: &[SkillRepo]) -> Vec<SkillRepo> {
+    let mut repos = Vec::new();
+    let mut seen: HashSet<String> = configured
         .iter()
         .map(|repo| repo.slug().to_lowercase())
         .collect();
@@ -103,15 +113,37 @@ fn merge_repos(installed: &[SkillMeta], configured: &[SkillRepo]) -> Vec<SkillRe
     repos
 }
 
-/// 发现入口：自动带上已安装 Skill 的来源仓库，并在报告里回传实际仓库列表。
+/// 发现入口：只读配置为启用的仓库 + 前端显式勾选的额外仓库；
+/// 已安装 Skill 的来源仓库只回传为 `installed_repos` 备选，不自动抓取。
 pub fn discover_with_installed<F: RepoFetcher + Sync>(
     store: &Store,
     fetcher: &F,
     configured: &[SkillRepo],
+    extra_repos: &[SkillRepo],
+    force: bool,
 ) -> SkillDiscoveryReport {
     let installed = installed_metas(store);
-    let repos = merge_repos(&installed, configured);
-    discover_repos(store, fetcher, &repos, &installed)
+    let installed_repos = suggested_repos(&installed, configured);
+    let mut fetch_repos: Vec<SkillRepo> = configured
+        .iter()
+        .filter(|repo| repo.enabled)
+        .cloned()
+        .collect();
+    for extra in extra_repos {
+        if fetch_repos
+            .iter()
+            .any(|repo| repo.slug().eq_ignore_ascii_case(&extra.slug()))
+        {
+            continue;
+        }
+        fetch_repos.push(SkillRepo {
+            enabled: true,
+            ..extra.clone()
+        });
+    }
+    let mut report = discover_repos(store, fetcher, &fetch_repos, &installed, force);
+    report.installed_repos = installed_repos;
+    report
 }
 
 /// 停用的仓库不读也不报。
@@ -120,7 +152,7 @@ pub fn discover<F: RepoFetcher + Sync>(
     fetcher: &F,
     repos: &[SkillRepo],
 ) -> SkillDiscoveryReport {
-    discover_repos(store, fetcher, repos, &installed_metas(store))
+    discover_repos(store, fetcher, repos, &installed_metas(store), true)
 }
 
 fn discover_repos<F: RepoFetcher + Sync>(
@@ -128,6 +160,7 @@ fn discover_repos<F: RepoFetcher + Sync>(
     fetcher: &F,
     repos: &[SkillRepo],
     installed: &[SkillMeta],
+    force: bool,
 ) -> SkillDiscoveryReport {
     let enabled: Vec<&SkillRepo> = repos.iter().filter(|repo| repo.enabled).collect();
     let mut report = SkillDiscoveryReport {
@@ -139,7 +172,7 @@ fn discover_repos<F: RepoFetcher + Sync>(
         let results = std::thread::scope(|scope| {
             let handles: Vec<_> = chunk
                 .iter()
-                .map(|repo| scope.spawn(move || discover_repo(store, fetcher, repo, installed)))
+                .map(|repo| scope.spawn(move || discover_repo(store, fetcher, repo, installed, force)))
                 .collect();
             handles
                 .into_iter()
@@ -172,15 +205,93 @@ fn discover_repos<F: RepoFetcher + Sync>(
     report
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoveryCache {
+    version: u32,
+    fetched_at: u64,
+    /// 实际命中的分支：配置写 main 但上游只有 master 时，缓存要记住真正读的那条。
+    branch: String,
+    skills: Vec<DiscoverableSkill>,
+}
+
+fn cache_path(store: &Store, repo: &SkillRepo) -> PathBuf {
+    // owner/name/branch 都经过 GitHub 输入校验，这里只把分隔符换掉，避免生成子目录。
+    let name = format!("{}_{}@{}", repo.owner, repo.name, repo.branch)
+        .chars()
+        .map(|ch| {
+            if matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect::<String>();
+    store
+        .root()
+        .join("local")
+        .join("skill-discovery")
+        .join(format!("{name}.json"))
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn read_cache(store: &Store, repo: &SkillRepo, force: bool) -> Option<DiscoveryCache> {
+    if force {
+        return None;
+    }
+    let bytes = std::fs::read(cache_path(store, repo)).ok()?;
+    let cache: DiscoveryCache = serde_json::from_slice(&bytes).ok()?;
+    if cache.version != DISCOVERY_CACHE_VERSION {
+        return None;
+    }
+    if unix_now().saturating_sub(cache.fetched_at) > DISCOVERY_CACHE_TTL_SECS {
+        return None;
+    }
+    Some(cache)
+}
+
+fn write_cache(store: &Store, repo: &SkillRepo, branch: &str, skills: &[DiscoverableSkill]) {
+    let path = cache_path(store, repo);
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let entry = DiscoveryCache {
+        version: DISCOVERY_CACHE_VERSION,
+        fetched_at: unix_now(),
+        branch: branch.to_string(),
+        skills: skills.to_vec(),
+    };
+    if let Ok(bytes) = serde_json::to_vec(&entry) {
+        // 派生缓存：写失败不影响本次结果，下次重新下载即可。
+        let _ = write_atomic(&path, &bytes);
+    }
+}
+
 fn discover_repo<F: RepoFetcher>(
     store: &Store,
     fetcher: &F,
     repo: &SkillRepo,
     installed: &[SkillMeta],
+    force: bool,
 ) -> Result<Vec<DiscoverableSkill>, AppError> {
+    if let Some(cache) = read_cache(store, repo, force) {
+        // 安装标记易变，缓存只用扫描结果，每次按当前真源重算。
+        return Ok(apply_installed_flags(store, repo, cache.skills, installed));
+    }
     let parsed = parse_github_input(&repo.slug(), Some(repo.branch.clone()))?;
     let fetched = fetcher.fetch(&parsed)?;
-    build_from_dir_with_installed(store, fetched.dir.path(), repo, &fetched.branch, installed)
+    let skills =
+        build_from_dir_with_installed(store, fetched.dir.path(), repo, &fetched.branch, installed)?;
+    write_cache(store, repo, &fetched.branch, &skills);
+    Ok(skills)
 }
 
 /// 已安装 Skill 在这个仓库里的路径集合（小写）：新旧两种命名规则都能命中。
@@ -225,11 +336,8 @@ fn build_from_dir_with_installed(
         .into_iter()
         .map(|skill| {
             let suggested_id = github_candidate_id(&skill.relative_path, &repo.owner, &repo.name);
-            let is_installed = store
-                .entry_path(AssetType::Skill, &suggested_id)
-                .map(|path| path.exists())
-                .unwrap_or(false)
-                || path_is_installed(&skill.relative_path, &known_paths);
+            let is_installed =
+                skill_installed(store, &suggested_id, &skill.relative_path, &known_paths);
             DiscoverableSkill {
                 key: format!(
                     "{}/{}@{branch}:{}",
@@ -245,6 +353,42 @@ fn build_from_dir_with_installed(
             }
         })
         .collect())
+}
+
+/// 缓存里的扫描结果复用同一套「已安装」判定，避免安装/卸载后标记停留在旧状态。
+fn apply_installed_flags(
+    store: &Store,
+    repo: &SkillRepo,
+    skills: Vec<DiscoverableSkill>,
+    installed: &[SkillMeta],
+) -> Vec<DiscoverableSkill> {
+    let known_paths = installed_paths(installed, &repo.slug());
+    skills
+        .into_iter()
+        .map(|mut skill| {
+            skill.installed = skill_installed(
+                store,
+                &skill.suggested_id,
+                &skill.relative_path,
+                &known_paths,
+            );
+            skill
+        })
+        .collect()
+}
+
+/// 候选是否已安装：先看建议 ID 对应目录，再退回元数据里的仓库内路径。
+fn skill_installed(
+    store: &Store,
+    suggested_id: &str,
+    relative_path: &str,
+    known_paths: &HashSet<String>,
+) -> bool {
+    store
+        .entry_path(AssetType::Skill, suggested_id)
+        .map(|path| path.exists())
+        .unwrap_or(false)
+        || path_is_installed(relative_path, known_paths)
 }
 
 /// 旧版 cc-switch 导入的 ID 是 owner-repo-skillId，和新命名对不上；
@@ -540,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn merges_installed_skill_repos_and_keeps_configured_state() {
+    fn suggests_installed_skill_repos_without_duplicating_configured() {
         let dir = tempdir().unwrap();
         let store = Store::init(dir.path().join("store")).unwrap();
         installed_skill(
@@ -566,15 +710,12 @@ mod tests {
             branch: "release".into(),
             enabled: false,
         }];
-        let merged = merge_installed_repos(&store, &configured);
-        assert_eq!(merged.len(), 2, "{merged:?}");
-        // 同名配置优先：用户显式停用的仓库不能被隐式打开或改分支。
-        assert_eq!(merged[0].slug(), "IAMDDATM/Skills");
-        assert_eq!(merged[0].branch, "release");
-        assert!(!merged[0].enabled);
-        assert_eq!(merged[1].slug(), "acme/extra");
-        assert_eq!(merged[1].branch, "dev");
-        assert!(merged[1].enabled);
+        let suggested = merge_installed_repos(&store, &configured);
+        // 建议列表不含已配置仓库（即使分支不同），避免同一个仓库出现两次。
+        assert_eq!(suggested.len(), 1, "{suggested:?}");
+        assert_eq!(suggested[0].slug(), "acme/extra");
+        assert_eq!(suggested[0].branch, "dev");
+        assert!(suggested[0].enabled);
     }
 
     #[test]
@@ -603,5 +744,97 @@ mod tests {
         assert_eq!(report.failures.len(), 1);
         assert_eq!(report.failures[0].repo, "acme/demo");
         assert!(report.failures[0].error.contains("无法读取"));
+    }
+
+    #[test]
+    fn cached_discovery_skips_the_archive_until_forced() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingFetcher {
+            calls: AtomicUsize,
+        }
+        impl RepoFetcher for CountingFetcher {
+            fn fetch(
+                &self,
+                _repo: &crate::net::RepoRef,
+            ) -> Result<crate::net::FetchedRepo, AppError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let dir = tempfile::tempdir().unwrap();
+                std::fs::create_dir_all(dir.path().join("pdf")).unwrap();
+                std::fs::write(
+                    dir.path().join("pdf/SKILL.md"),
+                    "---\nname: pdf\ndescription: PDF 处理\n---\n",
+                )
+                .unwrap();
+                Ok(crate::net::FetchedRepo {
+                    dir,
+                    branch: "main".into(),
+                })
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let fetcher = CountingFetcher {
+            calls: AtomicUsize::new(0),
+        };
+
+        let first = discover_with_installed(&store, &fetcher, &[repo()], &[], false);
+        assert_eq!(first.skills.len(), 1);
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+
+        // 缓存命中：不再下载，但结果字段完整。
+        let second = discover_with_installed(&store, &fetcher, &[repo()], &[], false);
+        assert_eq!(second.skills.len(), 1);
+        assert_eq!(second.skills[0].suggested_id, "acme-demo-pdf");
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+
+        // 手动刷新必须绕过缓存。
+        let _ = discover_with_installed(&store, &fetcher, &[repo()], &[], true);
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn installed_source_repos_are_suggested_but_not_fetched() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingFetcher {
+            calls: AtomicUsize,
+        }
+        impl RepoFetcher for CountingFetcher {
+            fn fetch(
+                &self,
+                _repo: &crate::net::RepoRef,
+            ) -> Result<crate::net::FetchedRepo, AppError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let dir = tempfile::tempdir().unwrap();
+                std::fs::create_dir_all(dir.path().join("demo")).unwrap();
+                std::fs::write(dir.path().join("demo/SKILL.md"), "---\nname: demo\n---\n")
+                    .unwrap();
+                Ok(crate::net::FetchedRepo {
+                    dir,
+                    branch: "main".into(),
+                })
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        installed_skill(
+            &store,
+            "ask-ui",
+            r#"{"repoOwner":"iamddatm","repoName":"skills","repoBranch":"main"}"#,
+        );
+        let fetcher = CountingFetcher {
+            calls: AtomicUsize::new(0),
+        };
+
+        let report = discover_with_installed(&store, &fetcher, &[repo()], &[], false);
+
+        // 只下载配置的仓库；已安装来源只作为 suggestion 回传。
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(report.repos.len(), 1);
+        assert_eq!(report.installed_repos.len(), 1);
+        assert_eq!(report.installed_repos[0].slug(), "iamddatm/skills");
     }
 }

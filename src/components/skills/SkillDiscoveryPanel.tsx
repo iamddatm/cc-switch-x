@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Download, RefreshCw, Sparkles } from "lucide-react";
+import { Download, ExternalLink, RefreshCw, Sparkles } from "lucide-react";
 import { api } from "../../lib/api";
 import type {
   AssetSummary,
@@ -34,6 +34,15 @@ function formatInstalls(count: number): string {
   if (count >= 1000) return `${(count / 1000).toFixed(1)}k`;
   return String(count);
 }
+
+/** 仓库发现行的 GitHub 目录链接；路径段逐段编码，避免空格/中文把 URL 打断。 */
+function githubSkillUrl(skill: DiscoverableSkill): string {
+  const base = `https://github.com/${skill.repo}/tree/${encodeURIComponent(skill.branch)}`;
+  if (!skill.relativePath || skill.relativePath === ".") return base;
+  const path = skill.relativePath.split("/").map(encodeURIComponent).join("/");
+  return `${base}/${path}`;
+}
+
 
 /** 翻页结果合并：第 0 页直接替换，后续页按 key 去重追加。 */
 function mergeShPage(
@@ -70,6 +79,8 @@ export function SkillDiscoveryPanel({
   const [reposLoading, setReposLoading] = useState(true);
   const [reposError, setReposError] = useState<string | null>(null);
   const [deselectedRepos, setDeselectedRepos] = useState<Set<string>>(new Set());
+  /** 用户勾选的「已安装 Skill 来源仓库」：默认不读，勾选后才传回后端抓取。 */
+  const [extraRepos, setExtraRepos] = useState<SkillRepo[]>([]);
   const [deselectedTargets, setDeselectedTargets] = useState<Set<string>>(new Set());
   const [report, setReport] = useState<SkillDiscoveryReport | null>(null);
   const [discoveryLoading, setDiscoveryLoading] = useState(false);
@@ -110,11 +121,11 @@ export function SkillDiscoveryPanel({
     }
   }, []);
 
-  const refreshDiscovery = useCallback(async () => {
+  const refreshDiscovery = useCallback(async (force = false, extras: SkillRepo[] = []) => {
     setDiscoveryLoading(true);
     setDiscoveryError(null);
     try {
-      setReport(await api.discoverSkills());
+      setReport(await api.discoverSkills({ force, extraRepos: extras }));
     } catch (e) {
       setDiscoveryError(String(e));
     } finally {
@@ -124,7 +135,8 @@ export function SkillDiscoveryPanel({
 
   useEffect(() => {
     void loadRepos();
-    void refreshDiscovery();
+    // 首次只读配置仓库；已安装来源仓库由用户在筛选器里显式勾选后再抓。
+    void refreshDiscovery(false, []);
   }, [loadRepos, refreshDiscovery]);
 
   const loadTrending = useCallback(async (page: number) => {
@@ -151,22 +163,39 @@ export function SkillDiscoveryPanel({
     if (next === "trend" && shTrending.length === 0 && !shTrendingLoading) void loadTrending(0);
   };
 
-  // 发现结果可能来自配置仓库之外的「已安装 Skill 来源仓库」，
-  // 报告没回来之前先用配置列表兜底，避免筛选区闪烁。
-  const discoveryRepos = report?.repos ?? repos;
-  const enabledRepos = useMemo(
-    () => discoveryRepos.filter((repo) => repo.enabled),
-    [discoveryRepos],
+  // 配置仓库以设置列表为准；设置还没读回来时先用报告兜底。
+  // 不能只看“数组是否为空”：用户可以把仓库全删掉，显式空列表必须原样生效。
+  const configuredRepos = useMemo(
+    () => (reposLoading && repos.length === 0 ? (report?.repos ?? []) : repos),
+    [reposLoading, repos, report],
   );
-  const selectedRepoKeys = useMemo(
-    () =>
-      new Set(
-        enabledRepos
-          .filter((repo) => !deselectedRepos.has(repoKey(repo)))
-          .map(repoKey),
-      ),
-    [enabledRepos, deselectedRepos],
+  const enabledConfiguredRepos = useMemo(
+    () => configuredRepos.filter((repo) => repo.enabled),
+    [configuredRepos],
   );
+  const suggestedRepos = report?.installedRepos ?? [];
+  const extraRepoKeys = useMemo(() => new Set(extraRepos.map(repoKey)), [extraRepos]);
+  // 可勾选的仓库：配置启用的 + 已安装来源建议 + 已勾选但还没进报告的。
+  const candidateRepos = useMemo(() => {
+    const seen = new Set<string>();
+    const out: SkillRepo[] = [];
+    for (const repo of [...enabledConfiguredRepos, ...suggestedRepos, ...extraRepos]) {
+      const key = repoKey(repo);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(repo);
+    }
+    return out;
+  }, [enabledConfiguredRepos, suggestedRepos, extraRepos]);
+  const selectedRepoKeys = useMemo(() => {
+    const keys = new Set(
+      enabledConfiguredRepos
+        .filter((repo) => !deselectedRepos.has(repoKey(repo)))
+        .map(repoKey),
+    );
+    for (const key of extraRepoKeys) keys.add(key);
+    return keys;
+  }, [enabledConfiguredRepos, deselectedRepos, extraRepoKeys]);
   const chosenTargets = targets.options.filter((target) => !deselectedTargets.has(target.key));
   const targetLabel = targets.label(chosenTargets);
 
@@ -330,8 +359,34 @@ export function SkillDiscoveryPanel({
     });
   };
 
+  const toggleSuggestedRepo = (repo: SkillRepo, checked: boolean) => {
+    const key = repoKey(repo);
+    const next = checked
+      ? [...extraRepos.filter((item) => repoKey(item) !== key), repo]
+      : extraRepos.filter((item) => repoKey(item) !== key);
+    setExtraRepos(next);
+    // 首次勾选才需要下载；取消勾选只在前端过滤，没必要再拉一次。
+    if (checked) void refreshDiscovery(false, next);
+  };
+
   const toggleAllRepos = (checked: boolean) => {
-    setDeselectedRepos(checked ? new Set() : new Set(enabledRepos.map(repoKey)));
+    if (!checked) {
+      setDeselectedRepos(new Set(candidateRepos.map(repoKey)));
+      setExtraRepos([]);
+      return;
+    }
+    setDeselectedRepos(new Set());
+    setExtraRepos(suggestedRepos);
+    // 全选会把已安装来源仓库也纳入读取，显式操作只触发一次批量刷新。
+    if (suggestedRepos.length > 0) void refreshDiscovery(false, suggestedRepos);
+  };
+
+  const openExternal = async (url: string) => {
+    try {
+      await api.openExternalUrl(url);
+    } catch (e) {
+      setError(String(e));
+    }
   };
 
   const toggleTarget = (id: string, checked: boolean) => {
@@ -360,7 +415,7 @@ export function SkillDiscoveryPanel({
             description={discoveryError}
             actions={
               <>
-                <Button onClick={() => void refreshDiscovery()}>重试</Button>
+                <Button onClick={() => void refreshDiscovery(false, extraRepos)}>重试</Button>
                 <Button onClick={() => setRepoManagerOpen(true)}>管理仓库</Button>
               </>
             }
@@ -375,14 +430,14 @@ export function SkillDiscoveryPanel({
             description={`${failures.length} 个仓库没有读到：${repoFailuresText}`}
             actions={
               <>
-                <Button onClick={() => void refreshDiscovery()}>重试</Button>
+                <Button onClick={() => void refreshDiscovery(false, extraRepos)}>重试</Button>
                 <Button onClick={() => setRepoManagerOpen(true)}>管理仓库</Button>
               </>
             }
           />
         );
       }
-      if (repos.length === 0 || enabledRepos.length === 0) {
+      if (configuredRepos.length === 0 || enabledConfiguredRepos.length === 0) {
         return (
           <EmptyState
             icon={Sparkles}
@@ -448,6 +503,13 @@ export function SkillDiscoveryPanel({
                 )}
               </div>
               <div className="flex shrink-0 items-center gap-2">
+                <IconButton
+                  label="在 GitHub 打开"
+                  size="md"
+                  onClick={() => void openExternal(githubSkillUrl(skill))}
+                >
+                  <ExternalLink size={15} aria-hidden />
+                </IconButton>
                 {skill.installed ? (
                   <Button variant="ghost" size="sm" onClick={onShowInstalled}>
                     已安装
@@ -590,6 +652,13 @@ export function SkillDiscoveryPanel({
                   )}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
+                  <IconButton
+                    label="在 GitHub 打开仓库"
+                    size="md"
+                    onClick={() => void openExternal(skill.readmeUrl)}
+                  >
+                    <ExternalLink size={15} aria-hidden />
+                  </IconButton>
                   {installed ? (
                     <Button variant="ghost" size="sm" onClick={onShowInstalled}>
                       已安装
@@ -630,7 +699,7 @@ export function SkillDiscoveryPanel({
           value={source}
           onValueChange={selectSource}
           items={[
-            { value: "repos", label: `仓库 · ${enabledRepos.length}` },
+            { value: "repos", label: `仓库 · ${selectedRepoKeys.size}` },
             { value: "skillssh", label: "skills.sh" },
             { value: "trend", label: "趋势" },
           ]}
@@ -638,17 +707,17 @@ export function SkillDiscoveryPanel({
         {source === "repos" && (
           <>
             <CheckPopover
-              label={`仓库：${selectedRepoKeys.size}/${enabledRepos.length}`}
+              label={`仓库：${selectedRepoKeys.size}/${candidateRepos.length}`}
             >
               <CheckOption
-                label="全部启用仓库"
+                label="全部仓库"
                 checked={
-                  enabledRepos.length > 0 &&
-                  selectedRepoKeys.size === enabledRepos.length
+                  candidateRepos.length > 0 &&
+                  selectedRepoKeys.size === candidateRepos.length
                 }
                 onChange={toggleAllRepos}
               />
-              {enabledRepos.map((repo) => {
+              {enabledConfiguredRepos.map((repo) => {
                 const key = repoKey(repo);
                 return (
                   <CheckOption
@@ -660,12 +729,31 @@ export function SkillDiscoveryPanel({
                   />
                 );
               })}
+              {suggestedRepos.length > 0 && (
+                <>
+                  <p className="px-1.5 pb-0.5 pt-2 text-caption text-fg-3">
+                    来自已安装 Skill（勾选后读取）
+                  </p>
+                  {suggestedRepos.map((repo) => {
+                    const key = repoKey(repo);
+                    return (
+                      <CheckOption
+                        key={`suggested:${key}`}
+                        mono
+                        label={`${repo.owner}/${repo.name}`}
+                        checked={extraRepoKeys.has(key)}
+                        onChange={(checked) => toggleSuggestedRepo(repo, checked)}
+                      />
+                    );
+                  })}
+                </>
+              )}
             </CheckPopover>
             <IconButton
               label="刷新发现"
               size="md"
               disabled={discoveryLoading}
-              onClick={() => void refreshDiscovery()}
+              onClick={() => void refreshDiscovery(true, extraRepos)}
             >
               <RefreshCw
                 size={15}
@@ -762,7 +850,7 @@ export function SkillDiscoveryPanel({
               {failures.length} 个仓库没有读到：{repoFailuresText}
             </p>
             <div className="mt-2 flex gap-2">
-              <Button size="sm" onClick={() => void refreshDiscovery()}>
+              <Button size="sm" onClick={() => void refreshDiscovery(false, extraRepos)}>
                 重试
               </Button>
               <Button size="sm" onClick={() => setRepoManagerOpen(true)}>
@@ -793,10 +881,11 @@ export function SkillDiscoveryPanel({
           }}
           onClose={() => {
             setRepoManagerOpen(false);
-            void refreshDiscovery();
+            void refreshDiscovery(false, extraRepos);
           }}
         />
       )}
     </div>
   );
 }
+

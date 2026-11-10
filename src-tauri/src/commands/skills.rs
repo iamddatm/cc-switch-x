@@ -37,6 +37,50 @@ where
         .map_err(|error| AppError::InvalidInput(format!("Skill 任务执行失败：{error}")))?
 }
 
+/// 在系统浏览器打开 Skill 的来源页面。
+///
+/// 链接由前端按仓库坐标拼出；这里再校验一次协议与主机，
+/// 避免远端仓库信息变成任意协议/主机的跳板（例如 `file:` 或本地地址）。
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), AppError> {
+    let parsed = validate_external_url(&url)?;
+    let target = parsed.as_str();
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        // 不经过 cmd /C，参数不会被再解析一遍。
+        let mut command = std::process::Command::new("rundll32.exe");
+        command.arg("url.dll,FileProtocolHandler").arg(target);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg(target);
+        command
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(target);
+        command
+    };
+    command.spawn().map(|_| ()).map_err(AppError::Io)
+}
+
+fn validate_external_url(url: &str) -> Result<reqwest::Url, AppError> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|error| AppError::InvalidInput(format!("链接格式不正确：{error}")))?;
+    let host = parsed.host_str().unwrap_or_default();
+    if parsed.scheme() != "https"
+        || !matches!(host, "github.com" | "www.github.com")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(AppError::InvalidInput("只能打开 GitHub 链接".into()));
+    }
+    Ok(parsed)
+}
+
 fn rebuild_index(state: &AppState) -> Result<(), AppError> {
     let mut index = state
         .index
@@ -226,9 +270,14 @@ pub fn set_skill_repos(
     Ok(effective_skill_repos(&updated))
 }
 
+/// 发现仓库里的 Skill。
+/// - `force`：手动刷新时跳过本地缓存，重新下载归档；
+/// - `extra_repos`：前端勾选的「已安装 Skill 来源仓库」，默认不参与发现。
 #[tauri::command]
 pub async fn discover_available_skills(
     state: State<'_, AppState>,
+    force: Option<bool>,
+    extra_repos: Option<Vec<SkillRepo>>,
 ) -> Result<SkillDiscoveryReport, AppError> {
     // 发现只读仓库并写临时目录，不碰真源；不占用 Skill 写任务锁。
     let repos = {
@@ -240,10 +289,16 @@ pub async fn discover_available_skills(
     };
     let store = state.store.clone();
     let proxy = state.proxy_config()?;
+    let force = force.unwrap_or(false);
+    let extra_repos = extra_repos.unwrap_or_default();
     run_blocking(move || {
         let fetcher = HttpFetcher::new(Some(&proxy))?;
         Ok(skill_discovery::discover_with_installed(
-            &store, &fetcher, &repos,
+            &store,
+            &fetcher,
+            &repos,
+            &extra_repos,
+            force,
         ))
     })
     .await
@@ -391,4 +446,18 @@ pub async fn import_unmanaged_skills(
     rebuild_index(&state)?;
     state.notify_git("skill: import unmanaged");
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_external_url;
+
+    #[test]
+    fn external_url_only_opens_github_over_https() {
+        assert!(validate_external_url("https://github.com/acme/skills/tree/main/pdf").is_ok());
+        assert!(validate_external_url("http://github.com/acme/skills").is_err());
+        assert!(validate_external_url("https://evil.example/github.com").is_err());
+        assert!(validate_external_url("file:///C:/Windows/System32/calc.exe").is_err());
+        assert!(validate_external_url("https://github.com@evil.example/x").is_err());
+    }
 }

@@ -179,7 +179,14 @@ export const api = {
   getSkillRepos: () => invoke<SkillRepo[]>("get_skill_repos"),
   setSkillRepos: (repos: SkillRepo[]) =>
     invoke<SkillRepo[]>("set_skill_repos", { repos }),
-  discoverSkills: () => invoke<SkillDiscoveryReport>("discover_available_skills"),
+  /** `force` 跳过本地缓存；`extraRepos` 是用户勾选的「已安装 Skill 来源仓库」。 */
+  discoverSkills: (options?: { force?: boolean; extraRepos?: SkillRepo[] }) =>
+    invoke<SkillDiscoveryReport>("discover_available_skills", {
+      force: options?.force ?? false,
+      extraRepos: options?.extraRepos ?? [],
+    }),
+  /** 在系统浏览器打开 GitHub 页面（后端会再校验协议与主机）。 */
+  openExternalUrl: (url: string) => invoke<void>("open_external_url", { url }),
   installDiscoveredSkill: (input: DiscoveredSkillInstallInput, policy: ConflictPolicy) =>
     invoke<SkillInstallOutcome>("install_discovered_skill", { input, policy }),
   searchSkillsSh: (query: string, limit: number, offset: number) =>
