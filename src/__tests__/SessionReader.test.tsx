@@ -74,6 +74,21 @@ beforeEach(() => {
   vi.mocked(save).mockResolvedValue(null);
 });
 
+test("reader_header_is_outside_the_scrolling_area_and_offers_back_to_top", async () => {
+  const { container } = renderReader();
+
+  const back = await screen.findByRole("button", { name: "返回列表" });
+  expect(back.closest(".overflow-auto")).toBeNull();
+
+  const scroller = container.querySelector(".overflow-auto") as HTMLElement;
+  expect(scroller).not.toBeNull();
+  scroller.scrollTop = 400;
+  fireEvent.scroll(scroller);
+
+  fireEvent.click(screen.getByRole("button", { name: "回到顶部" }));
+  expect(scroller.scrollTop).toBe(0);
+});
+
 test("reader_renders_thinking_tool_call_and_tool_result_as_distinct_blocks", async () => {
   vi.mocked(api.getSession).mockResolvedValue(
     detail([

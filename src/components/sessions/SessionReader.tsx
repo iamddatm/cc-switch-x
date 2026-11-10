@@ -1,5 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
+import {
+  BACK_TO_TOP_THRESHOLD,
+  BackToTopButton,
+} from "../ui/BackToTopButton";
 import { Button } from "../ui/Button";
 import { api } from "../../lib/api";
 import { copyToClipboard } from "../../lib/clipboard";
@@ -40,6 +44,8 @@ export function SessionReader({
   const [exporting, setExporting] = useState(false);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [showBackToTop, setShowBackToTop] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -191,107 +197,134 @@ export function SessionReader({
     }
   };
 
+  const scrollToTop = () => {
+    const element = scrollRef.current;
+    if (!element) return;
+    if (typeof element.scrollTo === "function") {
+      element.scrollTo({ top: 0, behavior: "smooth" });
+    } else {
+      element.scrollTop = 0;
+    }
+  };
+
   return (
-    <section className="space-y-4">
-      <Button variant="secondary" onClick={onBack}>
-        返回列表
-      </Button>
+    <section className="flex h-full min-h-0 flex-col">
+      {/* 顶部操作区固定在滚动区外，长会话滚到中间时仍能返回列表、确认标题。 */}
+      <div className="flex h-[52px] shrink-0 items-center gap-3 border-b border-border px-6">
+        <Button variant="secondary" onClick={onBack}>
+          返回列表
+        </Button>
+        <h2 className="min-w-0 truncate text-page text-fg-1">{session.title}</h2>
+      </div>
 
-      <header className="space-y-1">
-        <h2 className="text-page text-fg-1">{session.title}</h2>
-        <dl className="grid gap-x-4 gap-y-1 text-body sm:grid-cols-2">
-          <div>
-            <dt className="inline text-fg-3">工具：</dt>
-            <dd className="inline">{agentName}</dd>
-          </div>
-          <div>
-            <dt className="inline text-fg-3">项目：</dt>
-            <dd className="inline break-all">
-              {session.projectPath ?? "未知项目"}
-            </dd>
-          </div>
-          <div className="sm:col-span-2">
-            <dt className="inline text-fg-3">源文件：</dt>
-            <dd className="inline break-all">{session.sourcePath}</dd>
-          </div>
-          <div>
-            <dt className="inline text-fg-3">更新时间：</dt>
-            <dd className="inline">{formatTime(session.updatedAt)}</dd>
-          </div>
-        </dl>
-        {session.parseError && (
-          <p className="rounded-panel border border-danger bg-danger-soft p-2 text-body text-danger-text">
-            上次解析失败：{session.parseError}
-          </p>
-        )}
-        <div className="flex flex-wrap items-center gap-2 pt-1 text-body">
-          {resume ? (
-            <>
-              <Button variant="secondary" onClick={() => void copyResume()}>
-                复制恢复命令
-              </Button>
-              {copied && <span className="text-success-text">已复制</span>}
-            </>
-          ) : resumeUnavailable ? (
-            <span className="text-caption text-fg-3">
-              该会话没有可用的恢复命令。
-            </span>
-          ) : null}
-          <Button
-            variant="secondary"
-            disabled={exporting}
-            onClick={() => void exportMarkdown()}
-          >
-            {exporting ? "导出中…" : "导出 Markdown"}
-          </Button>
-        </div>
-        {resume && (
-          <code className="block break-all rounded-control bg-subtle px-2 py-1 text-caption text-fg-2">
-            {resume.command}
-          </code>
-        )}
-        <p className="text-caption text-warning-text">
-          会话可能包含密钥与个人信息，导出文件不受本项目保护。
-        </p>
-        {exportMessage && (
-          <p className="text-body text-success-text">{exportMessage}</p>
-        )}
-        {actionError && (
-          <p role="alert" className="text-body text-danger-text">
-            操作失败：{actionError}
-          </p>
-        )}
-      </header>
-
-      <SessionSearch
-        agentId={session.agentId}
-        sessionId={session.sessionId}
-        onSelect={(match, query) => void jumpTo(match, query)}
-      />
-
-      {error && (
-        <p role="alert" className="rounded-panel border border-danger bg-danger-soft p-2 text-body text-danger-text">
-          读取会话失败：{error}
-        </p>
-      )}
-
-      {loading && messages.length === 0 ? (
-        <p className="text-body text-fg-3">正在载入会话…</p>
-      ) : (
-        <SessionTimeline
-          messages={messages}
-          total={total}
-          loading={loading}
-          highlightedSeq={highlightedSeq}
-          query={highlightQuery}
-          emptyHint={
-            session.agentId === "agy" && total === 0
-              ? "该会话只有摘要索引，原始对话记录已不存在。"
-              : undefined
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={scrollRef}
+          onScroll={(event) =>
+            setShowBackToTop(event.currentTarget.scrollTop > BACK_TO_TOP_THRESHOLD)
           }
-          onLoadMore={() => void loadMore()}
-        />
-      )}
+          className="h-full overflow-auto px-6 py-5"
+        >
+          <div className="space-y-4">
+            <header className="space-y-1">
+              <dl className="grid gap-x-4 gap-y-1 text-body sm:grid-cols-2">
+                <div>
+                  <dt className="inline text-fg-3">工具：</dt>
+                  <dd className="inline">{agentName}</dd>
+                </div>
+                <div>
+                  <dt className="inline text-fg-3">项目：</dt>
+                  <dd className="inline break-all">
+                    {session.projectPath ?? "未知项目"}
+                  </dd>
+                </div>
+                <div className="sm:col-span-2">
+                  <dt className="inline text-fg-3">源文件：</dt>
+                  <dd className="inline break-all">{session.sourcePath}</dd>
+                </div>
+                <div>
+                  <dt className="inline text-fg-3">更新时间：</dt>
+                  <dd className="inline">{formatTime(session.updatedAt)}</dd>
+                </div>
+              </dl>
+              {session.parseError && (
+                <p className="rounded-panel border border-danger bg-danger-soft p-2 text-body text-danger-text">
+                  上次解析失败：{session.parseError}
+                </p>
+              )}
+              <div className="flex flex-wrap items-center gap-2 pt-1 text-body">
+                {resume ? (
+                  <>
+                    <Button variant="secondary" onClick={() => void copyResume()}>
+                      复制恢复命令
+                    </Button>
+                    {copied && <span className="text-success-text">已复制</span>}
+                  </>
+                ) : resumeUnavailable ? (
+                  <span className="text-caption text-fg-3">
+                    该会话没有可用的恢复命令。
+                  </span>
+                ) : null}
+                <Button
+                  variant="secondary"
+                  disabled={exporting}
+                  onClick={() => void exportMarkdown()}
+                >
+                  {exporting ? "导出中…" : "导出 Markdown"}
+                </Button>
+              </div>
+              {resume && (
+                <code className="block break-all rounded-control bg-subtle px-2 py-1 text-caption text-fg-2">
+                  {resume.command}
+                </code>
+              )}
+              <p className="text-caption text-warning-text">
+                会话可能包含密钥与个人信息，导出文件不受本项目保护。
+              </p>
+              {exportMessage && (
+                <p className="text-body text-success-text">{exportMessage}</p>
+              )}
+              {actionError && (
+                <p role="alert" className="text-body text-danger-text">
+                  操作失败：{actionError}
+                </p>
+              )}
+            </header>
+
+            <SessionSearch
+              agentId={session.agentId}
+              sessionId={session.sessionId}
+              onSelect={(match, query) => void jumpTo(match, query)}
+            />
+
+            {error && (
+              <p role="alert" className="rounded-panel border border-danger bg-danger-soft p-2 text-body text-danger-text">
+                读取会话失败：{error}
+              </p>
+            )}
+
+            {loading && messages.length === 0 ? (
+              <p className="text-body text-fg-3">正在载入会话…</p>
+            ) : (
+              <SessionTimeline
+                messages={messages}
+                total={total}
+                loading={loading}
+                highlightedSeq={highlightedSeq}
+                query={highlightQuery}
+                emptyHint={
+                  session.agentId === "agy" && total === 0
+                    ? "该会话只有摘要索引，原始对话记录已不存在。"
+                    : undefined
+                }
+                onLoadMore={() => void loadMore()}
+              />
+            )}
+          </div>
+        </div>
+
+        {showBackToTop && <BackToTopButton onClick={scrollToTop} />}
+      </div>
     </section>
   );
 }

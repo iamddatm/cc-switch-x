@@ -1,8 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Folder, History, Search, Users } from "lucide-react";
 import { AgentGlyph } from "../components/agents/AgentGlyph";
 import { SessionGroupHeader } from "../components/sessions/SessionGroupHeader";
 import { SessionReader } from "../components/sessions/SessionReader";
+import {
+  BACK_TO_TOP_THRESHOLD,
+  BackToTopButton,
+} from "../components/ui/BackToTopButton";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Dialog } from "../components/ui/Dialog";
@@ -18,7 +22,9 @@ import { ALL_SESSIONS_LIMIT, SESSION_SEARCH_LIMIT, useSessions } from "../hooks/
 import { formatRelativeTime } from "../lib/format";
 import {
   groupSessionsByProject,
+  groupSessionsByProjectPreservingOrder,
   groupSessionsByTime,
+  groupSessionsByTimePreservingOrder,
   isSessionInProject,
   projectName,
   projectOf,
@@ -53,24 +59,54 @@ export function SessionsPanel({ project = null }: { project?: ProjectView | null
   const { enabledAgents } = useAgents();
   const [query, setQuery] = useState("");
   const [selectedAgent, setSelectedAgent] = useState("all");
+  const [selectedProject, setSelectedProject] = useState("all");
   const [groupMode, setGroupMode] = useState<GroupMode>("project");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [openSession, setOpenSession] = useState<SessionSummary | null>(null);
   const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [showBackToTop, setShowBackToTop] = useState(false);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const enabledIds = new Set(enabledAgents.map((agent) => agent.id));
   const inProject = (session: SessionSummary) =>
     !project || isSessionInProject(session, project.path);
   const projectSessions = project ? sessions.filter(inProject) : sessions;
-  // 项目范围下每个应用的数量必须按项目集合算，否则下拉写「Claude (300)」而列表只有 3 条。
+  // 全局范围的项目筛选项；键与「按项目」分组一致（原始 projectPath），
+  // 同名项目补完整路径，避免选了「App」分不清是哪个仓库。
+  const projectOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const session of sessions) {
+      const name = projectOf(session);
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+    const entries = [...counts.entries()].sort((left, right) => right[1] - left[1]);
+    const shortNames = new Map<string, number>();
+    for (const [name] of entries) {
+      const short = projectName(name);
+      shortNames.set(short, (shortNames.get(short) ?? 0) + 1);
+    }
+    return entries.map(([name, count]) => ({
+      name,
+      count,
+      label: (shortNames.get(projectName(name)) ?? 0) > 1 ? name : projectName(name),
+    }));
+  }, [sessions]);
+  const matchesProject = (session: SessionSummary) =>
+    Boolean(project) ||
+    selectedProject === "all" ||
+    projectOf(session) === selectedProject;
+  // 项目范围或已筛选到单个项目时，每个应用的数量必须按可见集合算，
+  // 否则下拉写「Claude (300)」而列表只有 3 条。
+  const countsAreScoped = Boolean(project) || selectedProject !== "all";
+  const scopedSessions = projectSessions.filter(matchesProject);
   const countByAgent = new Map<string, number>();
-  if (project) {
-    for (const session of projectSessions) {
+  if (countsAreScoped) {
+    for (const session of scopedSessions) {
       countByAgent.set(session.agentId, (countByAgent.get(session.agentId) ?? 0) + 1);
     }
   }
   const countFor = (provider: SessionProviderStatus) =>
-    project ? (countByAgent.get(provider.agentId) ?? 0) : provider.sessionCount;
+    countsAreScoped ? (countByAgent.get(provider.agentId) ?? 0) : provider.sessionCount;
   const presentProviders = providers.filter(
     (provider) => enabledIds.has(provider.agentId) && countFor(provider) > 0,
   );
@@ -86,16 +122,31 @@ export function SessionsPanel({ project = null }: { project?: ProjectView | null
     }
   }, [presentProviders, selectedAgent]);
 
+  // 重新扫描或切换全局/项目范围后，失效的项目筛选要退回「全部项目」。
+  useEffect(() => {
+    if (
+      selectedProject !== "all" &&
+      !projectOptions.some((option) => option.name === selectedProject)
+    ) {
+      setSelectedProject("all");
+    }
+  }, [projectOptions, selectedProject]);
+
   const matchesAgent = (agentId: string) =>
     (selectedAgent === "all" || agentId === selectedAgent) && enabledIds.has(agentId);
 
-  const visibleSessions = projectSessions.filter((session) => matchesAgent(session.agentId));
+  const visibleSessions = scopedSessions.filter((session) => matchesAgent(session.agentId));
   const visibleHits =
-    hits?.filter((hit) => matchesAgent(hit.session.agentId) && inProject(hit.session)) ?? null;
+    hits?.filter(
+      (hit) =>
+        matchesAgent(hit.session.agentId) &&
+        inProject(hit.session) &&
+        matchesProject(hit.session),
+    ) ?? null;
   const totalCount = presentProviders.reduce((sum, provider) => sum + countFor(provider), 0);
   const allAgents = selectedAgent === "all";
-  // 项目范围下只剩一个项目，按项目分组等于「一个默认折叠的组 + 一片空白」，直接按时间平铺。
-  const byProject = !project && groupMode === "project";
+  // 项目范围或已筛选到单个项目时只剩一个项目，按项目分组等于「一个默认折叠的组 + 一片空白」，直接按时间平铺。
+  const byProject = !project && selectedProject === "all" && groupMode === "project";
   // 过滤会静默剔除没有 cwd 的会话，必须把数量说出来，否则用户以为会话丢了。
   const hiddenUnattributed = project
     ? sessions.filter(
@@ -103,6 +154,18 @@ export function SessionsPanel({ project = null }: { project?: ProjectView | null
       ).length
     : 0;
   const truncated = sessions.length >= ALL_SESSIONS_LIMIT;
+  const searchMode = visibleHits !== null;
+  // 同一会话可能命中多条消息：按会话归组，但保留该会话的全部命中。
+  const hitsBySession = new Map<string, SessionSearchHit[]>();
+  for (const hit of visibleHits ?? []) {
+    const key = sessionKey(hit.session);
+    const sessionHits = hitsBySession.get(key);
+    if (sessionHits) sessionHits.push(hit);
+    else hitsBySession.set(key, [hit]);
+  }
+  const listedSessions = searchMode
+    ? [...hitsBySession.values()].map((sessionHits) => sessionHits[0].session)
+    : visibleSessions;
 
   const toggleGroup = (groupKey: string) => {
     setExpanded((current) => {
@@ -113,9 +176,19 @@ export function SessionsPanel({ project = null }: { project?: ProjectView | null
     });
   };
 
+  const scrollListToTop = () => {
+    const element = listRef.current;
+    if (!element) return;
+    if (typeof element.scrollTo === "function") {
+      element.scrollTo({ top: 0, behavior: "smooth" });
+    } else {
+      element.scrollTop = 0;
+    }
+  };
+
   if (openSession) {
     return (
-      <div className="h-full overflow-auto px-6 py-5">
+      <div className="flex min-h-0 flex-1 flex-col">
         <SessionReader
           session={openSession}
           agentName={providerFor(openSession.agentId)?.displayName ?? openSession.agentId}
@@ -125,11 +198,41 @@ export function SessionsPanel({ project = null }: { project?: ProjectView | null
     );
   }
 
-  const projectGroups = groupSessionsByProject(visibleSessions);
-  const timeGroups = groupSessionsByTime(visibleSessions, Date.now());
+  // 搜索结果按相关度排序，组内不再按更新时间重排，否则最相关的命中会被压到组底。
+  const projectGroups = searchMode
+    ? groupSessionsByProjectPreservingOrder(listedSessions)
+    : groupSessionsByProject(listedSessions);
+  const timeGroups = searchMode
+    ? groupSessionsByTimePreservingOrder(listedSessions, Date.now())
+    : groupSessionsByTime(listedSessions, Date.now());
+
+  const renderRows = (session: SessionSummary, showProject: boolean) => {
+    const key = sessionKey(session);
+    const sessionHits = hitsBySession.get(key);
+    if (sessionHits) {
+      return sessionHits.map((hit, index) => (
+        <SearchHitRow
+          key={`${key}:${index}`}
+          hit={hit}
+          provider={providerFor(session.agentId)}
+          onOpen={setOpenSession}
+        />
+      ));
+    }
+    return (
+      <SessionRow
+        key={key}
+        session={session}
+        provider={providerFor(session.agentId)}
+        showAgent={allAgents}
+        showProject={showProject}
+        onOpen={setOpenSession}
+      />
+    );
+  };
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="relative flex min-h-0 flex-1 flex-col">
       <PageHeader
         icon={History}
         title="会话"
@@ -181,6 +284,22 @@ export function SessionsPanel({ project = null }: { project?: ProjectView | null
           </Select>
         </div>
 
+        {/* 只有一个项目时筛选没有意义，不占位置。 */}
+        {!project && projectOptions.length > 1 && (
+          <Select
+            aria-label="按项目筛选"
+            value={selectedProject}
+            onChange={(event) => setSelectedProject(event.target.value)}
+          >
+            <option value="all">全部项目 ({sessions.length})</option>
+            {projectOptions.map((option) => (
+              <option key={option.name} value={option.name} title={option.name}>
+                {option.label} ({option.count})
+              </option>
+            ))}
+          </Select>
+        )}
+
         <SearchField
           className="min-w-[220px] flex-1"
           value={query}
@@ -202,8 +321,8 @@ export function SessionsPanel({ project = null }: { project?: ProjectView | null
           ariaLabel="搜索会话内容"
         />
 
-        {/* 项目范围下只有一个项目，按项目分组没有信息量，直接按时间平铺。 */}
-        {!project && (
+        {/* 项目范围或已筛选到单个项目时，按项目分组没有信息量，直接按时间平铺。 */}
+        {!project && selectedProject === "all" && (
           <SegmentedControl
             ariaLabel="会话分组方式"
             value={groupMode}
@@ -219,7 +338,13 @@ export function SessionsPanel({ project = null }: { project?: ProjectView | null
         </span>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto px-6 pb-5">
+      <div
+        ref={listRef}
+        onScroll={(event) =>
+          setShowBackToTop(event.currentTarget.scrollTop > BACK_TO_TOP_THRESHOLD)
+        }
+        className="min-h-0 flex-1 overflow-auto px-6 pb-5"
+      >
         {error && (
           <Notice tone="danger" className="mb-3">
             读取会话失败：{error}
@@ -309,46 +434,40 @@ export function SessionsPanel({ project = null }: { project?: ProjectView | null
                 ))}
             </div>
           </>
-        ) : visibleHits !== null ? (
-          visibleHits.length === 0 ? (
+        ) : listedSessions.length === 0 ? (
+          visibleHits !== null ? (
             <EmptyState
               icon={Search}
               title="没有匹配的会话"
               description={
                 project
                   ? `当前项目内没有匹配的结果；搜索先在全库取最近 ${SESSION_SEARCH_LIMIT} 条命中，再按项目筛选。`
-                  : "换个关键词试试。"
+                  : selectedProject !== "all"
+                    ? `当前项目筛选下没有匹配的结果；搜索先在全库取最近 ${SESSION_SEARCH_LIMIT} 条命中，再按项目筛选。`
+                    : "换个关键词试试。"
               }
             />
-          ) : (
-            <div className="overflow-hidden rounded-panel border border-border bg-surface">
-              <ul>
-                {visibleHits.map((hit) => (
-                  <SearchHitRow
-                    key={`${hit.session.agentId}:${hit.session.sessionId}`}
-                    hit={hit}
-                    provider={providerFor(hit.session.agentId)}
-                    onOpen={setOpenSession}
-                  />
-                ))}
-              </ul>
-            </div>
-          )
-        ) : visibleSessions.length === 0 ? (
-          project ? (
+          ) : project ? (
             <EmptyState
               icon={History}
               title="这个项目还没有会话"
               description={`只统计项目目录 ${project.path} 及其子目录里的会话；切到「全局配置」可查看全部。`}
             />
           ) : (
-            <EmptyState icon={History} title="没有匹配的会话" description="换个应用或关键词试试。" />
+            <EmptyState
+              icon={History}
+              title="没有匹配的会话"
+              description={
+                selectedProject === "all" ? "换个应用或关键词试试。" : "换个项目或应用试试。"
+              }
+            />
           )
         ) : (
           <div className="overflow-hidden rounded-panel border border-border bg-surface">
             {byProject ? (
               projectGroups.map((group) => {
-                const isOpen = expanded.has(group.project);
+                // 搜索结果已经过关键词筛选，默认全部展开，避免切换分组后看起来「没反应」。
+                const isOpen = searchMode || expanded.has(group.project);
                 return (
                   <section key={group.project} aria-label={`项目 ${group.project}`}>
                     <SessionGroupHeader
@@ -356,20 +475,11 @@ export function SessionsPanel({ project = null }: { project?: ProjectView | null
                       count={group.sessions.length}
                       latest={group.latest}
                       expanded={isOpen}
-                      onToggle={() => toggleGroup(group.project)}
+                      onToggle={searchMode ? undefined : () => toggleGroup(group.project)}
                     />
                     {isOpen && (
                       <ul>
-                        {group.sessions.map((session) => (
-                          <SessionRow
-                            key={`${session.agentId}:${session.sessionId}`}
-                            session={session}
-                            provider={providerFor(session.agentId)}
-                            showAgent={allAgents}
-                            showProject={false}
-                            onOpen={setOpenSession}
-                          />
-                        ))}
+                        {group.sessions.map((session) => renderRows(session, false))}
                       </ul>
                     )}
                   </section>
@@ -382,16 +492,7 @@ export function SessionsPanel({ project = null }: { project?: ProjectView | null
                     {group.label}
                   </h3>
                   <ul>
-                    {group.sessions.map((session) => (
-                      <SessionRow
-                        key={`${session.agentId}:${session.sessionId}`}
-                        session={session}
-                        provider={providerFor(session.agentId)}
-                        showAgent={allAgents}
-                        showProject={!project}
-                        onOpen={setOpenSession}
-                      />
-                    ))}
+                    {group.sessions.map((session) => renderRows(session, !project))}
                   </ul>
                 </section>
               ))
@@ -399,6 +500,8 @@ export function SessionsPanel({ project = null }: { project?: ProjectView | null
           </div>
         )}
       </div>
+
+      {showBackToTop && <BackToTopButton onClick={scrollListToTop} />}
 
       <Dialog
         open={sourcesOpen}
@@ -530,6 +633,10 @@ function SearchHitRow({
       </button>
     </li>
   );
+}
+
+function sessionKey(session: SessionSummary): string {
+  return `${session.agentId}:${session.sessionId}`;
 }
 
 function providerReason(provider: SessionProviderStatus): string {

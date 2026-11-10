@@ -8,7 +8,8 @@ export interface SessionGroupHeaderProps {
   count: number;
   latest: number;
   expanded: boolean;
-  onToggle: () => void;
+  /** 不传时只作为分组标签，不可折叠（搜索结果的分组头）。 */
+  onToggle?: () => void;
 }
 
 /** 按项目分组头：项目名 + 路径 + 会话数/最近活跃；整行可折叠。 */
@@ -20,21 +21,14 @@ export function SessionGroupHeader({
   onToggle,
 }: SessionGroupHeaderProps) {
   const name = projectName(project);
-  return (
-    <button
-      type="button"
-      aria-expanded={expanded}
-      onClick={onToggle}
-      className={cn(
-        "flex h-9 w-full items-center gap-2 bg-subtle px-3 text-left transition-colors duration-150",
-        "hover:bg-selected",
-      )}
-    >
-      {expanded ? (
-        <ChevronDown size={14} className="shrink-0 text-fg-3" aria-hidden />
-      ) : (
-        <ChevronRight size={14} className="shrink-0 text-fg-3" aria-hidden />
-      )}
+  const content = (
+    <>
+      {onToggle &&
+        (expanded ? (
+          <ChevronDown size={14} className="shrink-0 text-fg-3" aria-hidden />
+        ) : (
+          <ChevronRight size={14} className="shrink-0 text-fg-3" aria-hidden />
+        ))}
       <span className="shrink-0 text-body font-medium text-fg-1">{name}</span>
       {project !== name && project !== "未知项目" && (
         <span className="min-w-0 truncate font-mono text-caption text-fg-3" title={project}>
@@ -44,6 +38,20 @@ export function SessionGroupHeader({
       <span className="ml-auto shrink-0 text-caption text-fg-3">
         {count} 个会话 · {formatRelativeTime(latest)}
       </span>
+    </>
+  );
+  const className = "flex h-9 w-full items-center gap-2 bg-subtle px-3 text-left";
+  if (!onToggle) {
+    return <div className={className}>{content}</div>;
+  }
+  return (
+    <button
+      type="button"
+      aria-expanded={expanded}
+      onClick={onToggle}
+      className={cn(className, "transition-colors duration-150 hover:bg-selected")}
+    >
+      {content}
     </button>
   );
 }

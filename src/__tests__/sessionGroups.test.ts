@@ -2,7 +2,9 @@ import { expect, test } from "vitest";
 import {
   groupSessions,
   groupSessionsByProject,
+  groupSessionsByProjectPreservingOrder,
   groupSessionsByTime,
+  groupSessionsByTimePreservingOrder,
   isSessionInProject,
   normalizeProjectPath,
   projectName,
@@ -109,6 +111,30 @@ test("sessions_inside_one_bucket_are_sorted_by_updated_at_desc", () => {
   );
 
   expect(groups[0].buckets[0].sessions.map((item) => item.title)).toEqual(["晚", "早"]);
+});
+
+test("preserving_order_grouping_keeps_search_relevance_within_groups", () => {
+  const groups = groupSessionsByProjectPreservingOrder([
+    session({ title: "B 最相关", projectPath: "D:/repo-b", updatedAt: 1 }),
+    session({ title: "A 次相关", projectPath: "D:/repo-a", updatedAt: 4 }),
+    session({ title: "B 再次", projectPath: "D:/repo-b", updatedAt: 9 }),
+  ]);
+
+  // 组仍按最近活跃排序，组内保持搜索相关度顺序，不按更新时间重排。
+  expect(groups.map((group) => projectName(group.project))).toEqual(["repo-b", "repo-a"]);
+  expect(groups[0].sessions.map((item) => item.title)).toEqual(["B 最相关", "B 再次"]);
+});
+
+test("preserving_order_time_grouping_does_not_reorder_hits", () => {
+  const groups = groupSessionsByTimePreservingOrder(
+    [
+      session({ title: "早但更相关", updatedAt: new Date("2026-10-22T08:00:00").getTime() }),
+      session({ title: "晚", updatedAt: new Date("2026-10-22T09:00:00").getTime() }),
+    ],
+    NOW,
+  );
+
+  expect(groups[0].sessions.map((item) => item.title)).toEqual(["早但更相关", "晚"]);
 });
 
 test("normalize_project_path_unifies_separators_case_and_trailing_slash", () => {

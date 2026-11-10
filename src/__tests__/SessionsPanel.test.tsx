@@ -251,6 +251,70 @@ test("opening_a_session_and_returning_keeps_the_search_term", async () => {
   expect(screen.getByText("关键字片段")).toBeInTheDocument();
 });
 
+test("switching_grouping_reorganizes_search_hits", async () => {
+  const target = session({ title: "登录问题" });
+  vi.mocked(api.listSessions).mockResolvedValue([target]);
+  vi.mocked(api.sessionProviders).mockResolvedValue([provider()]);
+  vi.mocked(api.searchSessions).mockResolvedValue([
+    { session: target, index: 2, seq: 2, snippet: "这里包含关键字片段" },
+  ]);
+
+  render(<SessionsPanel />);
+
+  const input = await screen.findByLabelText("搜索会话内容");
+  fireEvent.change(input, { target: { value: "关键字" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(await screen.findByText("这里包含关键字片段")).toBeInTheDocument();
+
+  // 搜索结果同样受分组方式影响：按项目默认展开，切到按时间应出现时间分组标题。
+  fireEvent.click(screen.getByRole("button", { name: "按时间" }));
+  expect(screen.getByRole("heading", { name: "今天" })).toBeInTheDocument();
+  expect(screen.getByText("这里包含关键字片段")).toBeInTheDocument();
+});
+
+test("project_filter_narrows_the_list_and_agent_counts", async () => {
+  vi.mocked(api.listSessions).mockResolvedValue([
+    session({ sessionId: "a1", title: "A 项目会话", projectPath: "D:/repo/a" }),
+    session({ sessionId: "b1", title: "B 项目会话", projectPath: "D:/repo/b" }),
+  ]);
+  vi.mocked(api.sessionProviders).mockResolvedValue([provider({ sessionCount: 2 })]);
+
+  render(<SessionsPanel />);
+
+  const select = await screen.findByLabelText("按项目筛选");
+  expect(select).toHaveTextContent("全部项目 (2)");
+  expect(select).toHaveTextContent("a (1)");
+  expect(select).toHaveTextContent("b (1)");
+
+  fireEvent.change(select, { target: { value: "D:/repo/a" } });
+
+  expect(screen.getByText("A 项目会话")).toBeInTheDocument();
+  expect(screen.queryByText("B 项目会话")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("按应用筛选")).toHaveTextContent("全部应用 (1)");
+  // 只剩一个项目，按项目分组没有信息量，切换控件随之隐藏。
+  expect(screen.queryByRole("button", { name: "按时间" })).not.toBeInTheDocument();
+});
+
+test("back_to_top_appears_after_scrolling_and_returns_to_the_top", async () => {
+  vi.mocked(api.listSessions).mockResolvedValue([session()]);
+  vi.mocked(api.sessionProviders).mockResolvedValue([provider()]);
+
+  render(<SessionsPanel />);
+
+  // 默认按项目折叠，先展开项目让会话行渲染出来。
+  fireEvent.click(await screen.findByRole("button", { name: /repo/ }));
+  const row = await screen.findByText("会话标题");
+  const scroller = row.closest(".overflow-auto") as HTMLElement;
+  expect(scroller).not.toBeNull();
+
+  scroller.scrollTop = 400;
+  fireEvent.scroll(scroller);
+  const backToTop = screen.getByRole("button", { name: "回到顶部" });
+
+  fireEvent.click(backToTop);
+  expect(scroller.scrollTop).toBe(0);
+});
+
 test("scan_warnings_show_the_file_and_line", async () => {
   vi.mocked(api.scanSessions).mockResolvedValue({
     added: 0,

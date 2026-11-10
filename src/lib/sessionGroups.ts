@@ -26,8 +26,13 @@ export interface TimeGroup {
   sessions: SessionSummary[];
 }
 
-/** 按项目分组并保持「最近活跃在前」；项目名取末尾目录。 */
-export function groupSessionsByProject(sessions: SessionSummary[]): ProjectGroup[] {
+/**
+ * 按项目分组并按「最近活跃」排序项目，但组内保持传入顺序。
+ * 搜索结果按相关度排序，组内重排会把最相关的命中压到组底。
+ */
+export function groupSessionsByProjectPreservingOrder(
+  sessions: SessionSummary[],
+): ProjectGroup[] {
   const groups = new Map<string, SessionSummary[]>();
   for (const session of sessions) {
     const project = projectOf(session);
@@ -36,15 +41,27 @@ export function groupSessionsByProject(sessions: SessionSummary[]): ProjectGroup
     groups.set(project, items);
   }
   return [...groups.entries()]
-    .map(([project, items]) => {
-      items.sort((left, right) => right.updatedAt - left.updatedAt);
-      return { project, latest: items[0]?.updatedAt ?? 0, sessions: items };
-    })
+    .map(([project, items]) => ({
+      project,
+      latest: Math.max(...items.map((item) => item.updatedAt)),
+      sessions: items,
+    }))
     .sort((left, right) => right.latest - left.latest);
 }
 
-/** 今天 / 昨天 / 本周 / 更早四组；空组不出现。 */
-export function groupSessionsByTime(
+/** 按项目分组并保持「最近活跃在前」；项目名取末尾目录。 */
+export function groupSessionsByProject(sessions: SessionSummary[]): ProjectGroup[] {
+  return groupSessionsByProjectPreservingOrder(sessions).map((group) => ({
+    ...group,
+    sessions: [...group.sessions].sort((left, right) => right.updatedAt - left.updatedAt),
+  }));
+}
+
+/**
+ * 今天 / 昨天 / 本周 / 更早四组，空组不出现；组内保持传入顺序。
+ * 搜索结果按相关度排序，组内重排会把最相关的命中压到组底。
+ */
+export function groupSessionsByTimePreservingOrder(
   sessions: SessionSummary[],
   now: Date | number,
 ): TimeGroup[] {
@@ -62,9 +79,19 @@ export function groupSessionsByTime(
   return BUCKET_ORDER.flatMap((label) => {
     const items = groups.get(label);
     if (!items || items.length === 0) return [];
-    items.sort((left, right) => right.updatedAt - left.updatedAt);
     return [{ label, sessions: items }];
   });
+}
+
+/** 今天 / 昨天 / 本周 / 更早四组；空组不出现。 */
+export function groupSessionsByTime(
+  sessions: SessionSummary[],
+  now: Date | number,
+): TimeGroup[] {
+  return groupSessionsByTimePreservingOrder(sessions, now).map((group) => ({
+    ...group,
+    sessions: [...group.sessions].sort((left, right) => right.updatedAt - left.updatedAt),
+  }));
 }
 
 export function projectOf(session: SessionSummary): string {
