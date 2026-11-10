@@ -1,6 +1,6 @@
 [package]
 name = "cc-switch-x"
-version = "0.21.0"
+version = "0.22.0"
 edition = "2021"
 
 [lib]
@@ -38,3 +38,4 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # 读取登录项当前指向的命令行，升级时只给指向本程序的旧条目补启动参数
 [target.'cfg(windows)'.dependencies]
 winreg = "0.10"
+

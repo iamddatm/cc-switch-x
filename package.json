@@ -1,7 +1,7 @@
 {
   "name": "cc-switch-x",
   "private": true,
-  "version": "0.21.0",
+  "version": "0.22.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -35,3 +35,4 @@
     "vitest": "^3.0.0"
   }
 }
+
