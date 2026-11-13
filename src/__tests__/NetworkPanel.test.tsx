@@ -90,7 +90,7 @@ test("webdav can be taken off the proxy without disabling it globally", async ()
   render(<NetworkPanel />);
   await screen.findByLabelText("代理地址");
 
-  fireEvent.click(screen.getByLabelText("WebDAV 云备份走代理"));
+  fireEvent.click(screen.getByLabelText("云端备份走代理"));
   fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
   await waitFor(() =>

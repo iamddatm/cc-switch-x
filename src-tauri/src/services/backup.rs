@@ -1458,6 +1458,7 @@ mod tests {
                 base_url,
                 username: "me".into(),
                 remote_dir: "ccswitchx".into(),
+                ..CloudBackupSettings::default()
             },
             ..AppSettings::default()
         };

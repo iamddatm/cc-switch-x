@@ -2,16 +2,20 @@ use crate::domain::agent::builtin_agents;
 use crate::domain::secret::SecretRef;
 use crate::error::AppError;
 use crate::net::{parse_github_input, webdav, ProxyConfig};
-use crate::settings::{self, AppSettings, BackupSettings, SkillRepo, Theme};
+use crate::settings::{self, AppSettings, BackupSettings, CloudProvider, SkillRepo, Theme};
 use crate::store::secrets::Secrets;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// 代理密码与 MCP 等资产用同一套本地密钥文件分开存放。
 pub const PROXY_SECRET_SCOPE: &str = "proxy";
 pub const PROXY_SECRET_KEY: &str = "password";
+/// WebDAV 密码。
 pub const CLOUD_SECRET_SCOPE: &str = "cloud.webdav";
 pub const CLOUD_SECRET_KEY: &str = "password";
+/// 阿里云 OSS AccessKey Secret；与 WebDAV 密码分开存，切换通道时不互相覆盖。
+pub const OSS_SECRET_SCOPE: &str = "cloud.oss";
+pub const OSS_SECRET_KEY: &str = "access_key_secret";
 pub const MAX_SKILL_REPOS: usize = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -22,7 +26,7 @@ pub struct ProxySettingsView {
     pub has_password: bool,
     /// 实际生效的开关；没填地址时恒为 false。
     pub enabled: bool,
-    /// WebDAV 云备份是否也用这个代理。
+    /// 云端备份（WebDAV / OSS）是否也用这个代理。
     pub webdav_uses_proxy: bool,
 }
 
@@ -146,10 +150,57 @@ pub struct CloudSettingsView {
     pub auto_download: bool,
     /// 上传防抖窗口（小时），1–24。
     pub upload_delay_hours: u32,
+    /// 当前启用的通道。
+    pub provider: CloudProvider,
     pub base_url: String,
     pub username: String,
     pub remote_dir: String,
     pub has_password: bool,
+    pub oss_region: String,
+    pub oss_bucket: String,
+    pub oss_access_key_id: String,
+    pub oss_prefix: String,
+    pub has_oss_secret: bool,
+}
+
+/// 云备份保存 / 测试连接的输入：两个通道的配置一起传，切换标签页不会丢掉另一边的已存配置。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudSettingsInput {
+    #[serde(default)]
+    pub provider: CloudProvider,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub auto_upload: bool,
+    #[serde(default)]
+    pub auto_download: bool,
+    #[serde(default = "default_upload_delay_hours")]
+    pub upload_delay_hours: u32,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub username: String,
+    /// None = 保留已保存的密码；空串 = 清除。
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub remote_dir: String,
+    #[serde(default)]
+    pub oss_region: String,
+    #[serde(default)]
+    pub oss_bucket: String,
+    #[serde(default)]
+    pub oss_access_key_id: String,
+    /// None = 保留已保存的 AccessKey Secret；空串 = 清除。
+    #[serde(default)]
+    pub oss_access_key_secret: Option<String>,
+    #[serde(default)]
+    pub oss_prefix: String,
+}
+
+fn default_upload_delay_hours() -> u32 {
+    settings::default_upload_delay_hours()
 }
 
 pub fn cloud_secret_ref() -> SecretRef {
@@ -159,38 +210,45 @@ pub fn cloud_secret_ref() -> SecretRef {
     }
 }
 
+pub fn oss_secret_ref() -> SecretRef {
+    SecretRef {
+        scope: OSS_SECRET_SCOPE.into(),
+        key: OSS_SECRET_KEY.into(),
+    }
+}
+
 pub fn cloud_view(settings: &AppSettings, secrets: &Secrets) -> CloudSettingsView {
     CloudSettingsView {
         enabled: settings.cloud.enabled,
         auto_upload: settings.cloud.auto_upload,
         auto_download: settings.cloud.auto_download,
         upload_delay_hours: settings.cloud.upload_delay_hours,
+        provider: settings.cloud.provider,
         base_url: settings.cloud.base_url.clone(),
         username: settings.cloud.username.clone(),
         remote_dir: settings.cloud.remote_dir.clone(),
         has_password: secrets
             .get(&cloud_secret_ref())
             .is_some_and(|value| !value.is_empty()),
+        oss_region: settings.cloud.oss_region.clone(),
+        oss_bucket: settings.cloud.oss_bucket.clone(),
+        oss_access_key_id: settings.cloud.oss_access_key_id.clone(),
+        oss_prefix: settings.cloud.oss_prefix.clone(),
+        has_oss_secret: secrets
+            .get(&oss_secret_ref())
+            .is_some_and(|value| !value.is_empty()),
     }
 }
 
-/// 密码语义：None = 保留旧密码，Some("") = 清除，Some(v) = 覆盖。
-/// 「通道启用」与「自动上传 / 自动下载」分开存：两者都必须先启用通道，关闭通道会一并停掉。
-/// 返回的第三项表示连接参数（地址 / 用户名 / 目录 / 最终密码）是否变化，
-/// 调用方据此作废旧远端的同步基线。
+/// 两个通道的配置分别校验并保存；只有当前通道需要「启用时完整」。
+/// 密码语义：None = 保留旧值，Some("") = 清除，Some(v) = 覆盖。
+/// 返回的第三项表示连接参数（通道 / 地址 / 凭据）是否变化，调用方据此作废旧远端的同步基线。
 pub fn set_cloud_settings_at(
     config_path: &std::path::Path,
     secrets_path: &std::path::Path,
-    base_url: String,
-    username: String,
-    password: Option<String>,
-    remote_dir: String,
-    enabled: bool,
-    auto_upload: bool,
-    auto_download: bool,
-    upload_delay_hours: u32,
+    input: CloudSettingsInput,
 ) -> Result<(AppSettings, Secrets, bool), AppError> {
-    if !(1..=24).contains(&upload_delay_hours) {
+    if !(1..=24).contains(&input.upload_delay_hours) {
         return Err(AppError::InvalidInput("上传延迟需在 1–24 小时之间".into()));
     }
     let mut current = settings::load_from(config_path)?;
@@ -198,25 +256,27 @@ pub fn set_cloud_settings_at(
     // 连接参数以保存前的值为基线：任何一项变化都要让旧远端的同步状态作废。
     let previous_cloud = current.cloud.clone();
     let previous_password = secrets.get(&cloud_secret_ref()).map(str::to_string);
-    let base_url = webdav::normalize_base_url(&base_url)?;
-    let username = username.trim().to_string();
-    let remote_dir = webdav::validate_remote_dir(&remote_dir)?;
-    let auto_upload = enabled && auto_upload;
-    let auto_download = enabled && auto_download;
+    let previous_oss_secret = secrets.get(&oss_secret_ref()).map(str::to_string);
 
+    let provider = input.provider;
+    let base_url = webdav::normalize_base_url(&input.base_url)?;
+    let username = input.username.trim().to_string();
+    let remote_dir = webdav::validate_remote_dir(&input.remote_dir)?;
+    let oss_region = settings::validate_oss_region(&input.oss_region)?;
+    let oss_bucket = settings::validate_oss_bucket(&input.oss_bucket)?;
+    let oss_access_key_id = input.oss_access_key_id.trim().to_string();
+    let oss_prefix = webdav::validate_remote_dir(&input.oss_prefix)?;
+
+    // ── WebDAV 配置：地址为空表示清除这一通道 ──
     if base_url.is_empty() {
         current.cloud.base_url.clear();
         current.cloud.username.clear();
-        current.cloud.remote_dir = remote_dir;
-        current.cloud.enabled = false;
-        current.cloud.auto_upload = false;
-        current.cloud.auto_download = false;
         secrets.remove(&cloud_secret_ref());
     } else {
         if username.is_empty() {
             return Err(AppError::InvalidInput("请填写 WebDAV 用户名".into()));
         }
-        let next_password = match password {
+        let next_password = match input.password {
             Some(value) if value.is_empty() => {
                 secrets.remove(&cloud_secret_ref());
                 None
@@ -229,25 +289,105 @@ pub fn set_cloud_settings_at(
         };
         current.cloud.base_url = base_url;
         current.cloud.username = username;
-        current.cloud.remote_dir = remote_dir;
-        current.cloud.enabled = enabled;
-        current.cloud.auto_upload = auto_upload;
-        current.cloud.auto_download = auto_download;
         secrets.insert(&cloud_secret_ref(), &next_password);
     }
-    current.cloud.upload_delay_hours = upload_delay_hours;
+
+    // ── 阿里云 OSS 配置：Region / Bucket / AccessKey ID 全空表示清除这一通道 ──
+    let oss_present =
+        !oss_region.is_empty() || !oss_bucket.is_empty() || !oss_access_key_id.is_empty();
+    if !oss_present {
+        current.cloud.oss_region.clear();
+        current.cloud.oss_bucket.clear();
+        current.cloud.oss_access_key_id.clear();
+        secrets.remove(&oss_secret_ref());
+    } else {
+        if oss_region.is_empty() || oss_bucket.is_empty() || oss_access_key_id.is_empty() {
+            return Err(AppError::InvalidInput(
+                "请填写完整的阿里云 OSS 地域、Bucket 与 AccessKey ID".into(),
+            ));
+        }
+        let next_secret = match input.oss_access_key_secret {
+            Some(value) if value.is_empty() => {
+                secrets.remove(&oss_secret_ref());
+                None
+            }
+            Some(value) => Some(value),
+            None => secrets.get(&oss_secret_ref()).map(str::to_string),
+        };
+        let Some(next_secret) = next_secret else {
+            return Err(AppError::InvalidInput("请填写阿里云 AccessKey Secret".into()));
+        };
+        current.cloud.oss_region = oss_region;
+        current.cloud.oss_bucket = oss_bucket;
+        current.cloud.oss_access_key_id = oss_access_key_id;
+        current.cloud.oss_prefix = oss_prefix;
+        secrets.insert(&oss_secret_ref(), &next_secret);
+    }
+    current.cloud.remote_dir = remote_dir;
+
+    // 当前通道没有任何配置时，启用请求退化为「不启用」——清空地址本来就是在关通道。
+    let channel_present = match provider {
+        CloudProvider::Webdav => !current.cloud.base_url.is_empty(),
+        CloudProvider::Oss => oss_present,
+    };
+    let enabled = input.enabled && channel_present;
+    // 启用前必须确认当前通道的配置完整，避免自动任务拿着半截配置反复失败。
+    if enabled {
+        let ready = match provider {
+            CloudProvider::Webdav => {
+                !current.cloud.username.is_empty()
+                    && secrets
+                        .get(&cloud_secret_ref())
+                        .is_some_and(|value| !value.is_empty())
+            }
+            CloudProvider::Oss => {
+                !current.cloud.oss_region.is_empty()
+                    && !current.cloud.oss_bucket.is_empty()
+                    && !current.cloud.oss_access_key_id.is_empty()
+                    && secrets
+                        .get(&oss_secret_ref())
+                        .is_some_and(|value| !value.is_empty())
+            }
+        };
+        if !ready {
+            return Err(AppError::InvalidInput(match provider {
+                CloudProvider::Webdav => "请先保存完整的 WebDAV 连接配置".into(),
+                CloudProvider::Oss => "请先保存完整的阿里云 OSS 连接配置".into(),
+            }));
+        }
+    }
+
+    current.cloud.provider = provider;
+    current.cloud.enabled = enabled;
+    current.cloud.auto_upload = enabled && input.auto_upload;
+    current.cloud.auto_download = enabled && input.auto_download;
+    current.cloud.upload_delay_hours = input.upload_delay_hours;
     if current.cloud.enabled {
-        // 远端备份只能选一种：启用 WebDAV 通道时停用 Git 自动同步。
+        // 远端备份只能选一种：启用云备份通道时停用 Git 自动同步。
         current.backup.git.enabled = false;
     }
 
     secrets.save(secrets_path)?;
     settings::save_to(config_path, &current)?;
     let next_password = secrets.get(&cloud_secret_ref()).map(str::to_string);
-    let connection_changed = previous_cloud.base_url != current.cloud.base_url
-        || previous_cloud.username != current.cloud.username
-        || previous_cloud.remote_dir != current.cloud.remote_dir
-        || previous_password != next_password;
+    let next_oss_secret = secrets.get(&oss_secret_ref()).map(str::to_string);
+    // 只比较当前启用的通道：保存另一个通道的配置不应作废当前通道的同步基线。
+    let connection_changed = previous_cloud.provider != current.cloud.provider
+        || match current.cloud.provider {
+            CloudProvider::Webdav => {
+                previous_cloud.base_url != current.cloud.base_url
+                    || previous_cloud.username != current.cloud.username
+                    || previous_cloud.remote_dir != current.cloud.remote_dir
+                    || previous_password != next_password
+            }
+            CloudProvider::Oss => {
+                previous_cloud.oss_region != current.cloud.oss_region
+                    || previous_cloud.oss_bucket != current.cloud.oss_bucket
+                    || previous_cloud.oss_access_key_id != current.cloud.oss_access_key_id
+                    || previous_cloud.oss_prefix != current.cloud.oss_prefix
+                    || previous_oss_secret != next_oss_secret
+            }
+        };
     Ok((current, secrets, connection_changed))
 }
 
@@ -431,6 +571,36 @@ mod tests {
     use crate::net::webdav::{normalize_base_url, remote_url, validate_remote_dir};
     use tempfile::tempdir;
 
+    /// 构造 WebDAV 通道的保存输入；OSS 字段留空，不影响这些用例。
+    fn cloud_input(
+        base_url: &str,
+        username: &str,
+        password: Option<&str>,
+        remote_dir: &str,
+        enabled: bool,
+        auto_upload: bool,
+        auto_download: bool,
+        upload_delay_hours: u32,
+    ) -> CloudSettingsInput {
+        CloudSettingsInput {
+            provider: CloudProvider::Webdav,
+            enabled,
+            auto_upload,
+            auto_download,
+            upload_delay_hours,
+            base_url: base_url.into(),
+            username: username.into(),
+            password: password.map(str::to_string),
+            remote_dir: remote_dir.into(),
+            oss_region: String::new(),
+            oss_bucket: String::new(),
+            oss_access_key_id: String::new(),
+            oss_access_key_secret: None,
+            oss_prefix: String::new(),
+        }
+    }
+
+
     #[test]
     fn set_enabled_agents_validates_and_deduplicates() {
         let dir = tempdir().unwrap();
@@ -508,14 +678,16 @@ mod tests {
         let (with_cloud, _, _) = set_cloud_settings_at(
             &config,
             &secrets_path,
-            "https://dav.example.com/dav".into(),
-            "me".into(),
-            Some("pw".into()),
-            "ccswitchx".into(),
-            true,
-            true,
-            true,
-            1,
+            cloud_input(
+                "https://dav.example.com/dav",
+                "me",
+                Some("pw"),
+                "ccswitchx",
+                true,
+                true,
+                true,
+                1,
+            ),
         )
         .unwrap();
         assert!(with_cloud.cloud.enabled);
@@ -545,14 +717,16 @@ mod tests {
         let (with_cloud_again, _, _) = set_cloud_settings_at(
             &config,
             &secrets_path,
-            "https://dav.example.com/dav".into(),
-            "me".into(),
-            None,
-            "ccswitchx".into(),
-            true,
-            true,
-            true,
-            1,
+            cloud_input(
+                "https://dav.example.com/dav",
+                "me",
+                None,
+                "ccswitchx",
+                true,
+                true,
+                true,
+                1,
+            ),
         )
         .unwrap();
         assert!(with_cloud_again.cloud.auto_upload);
@@ -571,14 +745,16 @@ mod tests {
         let (saved, _, _) = set_cloud_settings_at(
             &config,
             &secrets_path,
-            "https://dav.example.com/dav".into(),
-            "me".into(),
-            Some("pw".into()),
-            "ccswitchx".into(),
-            false,
-            true,
-            false,
-            1,
+            cloud_input(
+                "https://dav.example.com/dav",
+                "me",
+                Some("pw"),
+                "ccswitchx",
+                false,
+                true,
+                false,
+                1,
+            ),
         )
         .unwrap();
         assert!(!saved.cloud.enabled, "通道未启用时不能打开自动上传");
@@ -588,14 +764,16 @@ mod tests {
         let (manual, _, _) = set_cloud_settings_at(
             &config,
             &secrets_path,
-            "https://dav.example.com/dav".into(),
-            "me".into(),
-            None,
-            "ccswitchx".into(),
-            true,
-            false,
-            false,
-            1,
+            cloud_input(
+                "https://dav.example.com/dav",
+                "me",
+                None,
+                "ccswitchx",
+                true,
+                false,
+                false,
+                1,
+            ),
         )
         .unwrap();
         assert!(manual.cloud.enabled);
@@ -611,14 +789,16 @@ mod tests {
         let (saved, _, _) = set_cloud_settings_at(
             &config,
             &secrets_path,
-            "https://dav.example.com/dav".into(),
-            "me".into(),
-            Some("pw".into()),
-            "ccswitchx".into(),
-            false,
-            false,
-            true,
-            1,
+            cloud_input(
+                "https://dav.example.com/dav",
+                "me",
+                Some("pw"),
+                "ccswitchx",
+                false,
+                false,
+                true,
+                1,
+            ),
         )
         .unwrap();
         assert!(!saved.cloud.enabled, "通道未启用时不能打开自动下载");
@@ -627,14 +807,16 @@ mod tests {
         let (enabled, _, _) = set_cloud_settings_at(
             &config,
             &secrets_path,
-            "https://dav.example.com/dav".into(),
-            "me".into(),
-            None,
-            "ccswitchx".into(),
-            true,
-            false,
-            true,
-            1,
+            cloud_input(
+                "https://dav.example.com/dav",
+                "me",
+                None,
+                "ccswitchx",
+                true,
+                false,
+                true,
+                1,
+            ),
         )
         .unwrap();
         assert!(enabled.cloud.enabled);
@@ -651,14 +833,16 @@ mod tests {
             let error = set_cloud_settings_at(
                 &config,
                 &secrets_path,
-                "https://dav.example.com/dav".into(),
-                "me".into(),
-                Some("pw".into()),
-                "ccswitchx".into(),
-                true,
-                false,
-                false,
-                bad,
+                cloud_input(
+                    "https://dav.example.com/dav",
+                    "me",
+                    Some("pw"),
+                    "ccswitchx",
+                    true,
+                    false,
+                    false,
+                    bad,
+                ),
             )
             .unwrap_err();
             assert!(
@@ -670,14 +854,16 @@ mod tests {
         let (saved, _, _) = set_cloud_settings_at(
             &config,
             &secrets_path,
-            "https://dav.example.com/dav".into(),
-            "me".into(),
-            Some("pw".into()),
-            "ccswitchx".into(),
-            true,
-            false,
-            false,
-            24,
+            cloud_input(
+                "https://dav.example.com/dav",
+                "me",
+                Some("pw"),
+                "ccswitchx",
+                true,
+                false,
+                false,
+                24,
+            ),
         )
         .unwrap();
         assert_eq!(saved.cloud.upload_delay_hours, 24);
@@ -692,14 +878,7 @@ mod tests {
             set_cloud_settings_at(
                 &config,
                 &secrets_path,
-                base_url.into(),
-                username.into(),
-                password.map(str::to_string),
-                remote_dir.into(),
-                true,
-                false,
-                false,
-                1,
+                cloud_input(base_url, username, password, remote_dir, true, false, false, 1),
             )
             .map(|(_, _, changed)| changed)
             .unwrap()
@@ -1071,14 +1250,16 @@ mod tests {
         let (saved, secrets, _) = set_cloud_settings_at(
             &config,
             &secrets_path,
-            "https://dav.example.com/dav".into(),
-            "me".into(),
-            Some("app-password".into()),
-            "ccswitchx".into(),
-            true,
-            true,
-            false,
-            1,
+            cloud_input(
+                "https://dav.example.com/dav",
+                "me",
+                Some("app-password"),
+                "ccswitchx",
+                true,
+                true,
+                false,
+                1,
+            ),
         )
         .unwrap();
         assert!(saved.cloud.enabled);
@@ -1092,14 +1273,16 @@ mod tests {
         let (kept, kept_secrets, _) = set_cloud_settings_at(
             &config,
             &secrets_path,
-            "https://dav.example.com/dav".into(),
-            "me".into(),
-            None,
-            "ccswitchx".into(),
-            true,
-            false,
-            false,
-            1,
+            cloud_input(
+                "https://dav.example.com/dav",
+                "me",
+                None,
+                "ccswitchx",
+                true,
+                false,
+                false,
+                1,
+            ),
         )
         .unwrap();
         assert_eq!(kept_secrets.get(&cloud_secret_ref()), Some("app-password"));
@@ -1109,14 +1292,16 @@ mod tests {
         let cleared = set_cloud_settings_at(
             &config,
             &secrets_path,
-            String::new(),
-            String::new(),
-            None,
-            "ccswitchx".into(),
-            true,
-            true,
-            true,
-            1,
+            cloud_input(
+                "",
+                "",
+                None,
+                "ccswitchx",
+                true,
+                true,
+                true,
+                1,
+            ),
         )
         .unwrap();
         assert!(cleared.1.get(&cloud_secret_ref()).is_none());
@@ -1127,16 +1312,104 @@ mod tests {
         assert!(set_cloud_settings_at(
             &config,
             &secrets_path,
-            "https://dav.example.com/dav".into(),
-            "me".into(),
-            Some(String::new()),
-            "ccswitchx".into(),
-            false,
-            false,
-            false,
-            1,
+            cloud_input(
+                "https://dav.example.com/dav",
+                "me",
+                Some(""),
+                "ccswitchx",
+                false,
+                false,
+                false,
+                1,
+            ),
         )
         .is_err());
+    }
+
+    fn oss_input() -> CloudSettingsInput {
+        CloudSettingsInput {
+            provider: CloudProvider::Oss,
+            enabled: true,
+            auto_upload: true,
+            auto_download: false,
+            upload_delay_hours: 1,
+            base_url: "https://dav.example.com/dav".into(),
+            username: "me".into(),
+            password: Some("pw".into()),
+            remote_dir: "ccswitchx".into(),
+            oss_region: "cn-hangzhou".into(),
+            oss_bucket: "my-bucket".into(),
+            oss_access_key_id: "AKID".into(),
+            oss_access_key_secret: Some("SECRET".into()),
+            oss_prefix: "backups".into(),
+        }
+    }
+
+    #[test]
+    fn oss_settings_persist_alongside_webdav_and_switch_channel() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let secrets_path = dir.path().join("secrets.local.json");
+
+        let (saved, secrets, changed) =
+            set_cloud_settings_at(&config, &secrets_path, oss_input()).unwrap();
+        assert!(changed);
+        assert_eq!(saved.cloud.provider, CloudProvider::Oss);
+        assert!(saved.cloud.enabled);
+        assert_eq!(saved.cloud.oss_bucket, "my-bucket");
+        assert_eq!(saved.cloud.oss_prefix, "backups");
+        assert_eq!(secrets.get(&oss_secret_ref()), Some("SECRET"));
+        // 两个通道的凭据同时保留。
+        assert_eq!(secrets.get(&cloud_secret_ref()), Some("pw"));
+
+        // 同样的连接参数再保存一次不算变化，不能作废同步基线。
+        let mut same = oss_input();
+        same.oss_access_key_secret = None;
+        same.password = None;
+        let (kept, kept_secrets, changed) =
+            set_cloud_settings_at(&config, &secrets_path, same).unwrap();
+        assert!(!changed);
+        assert_eq!(kept_secrets.get(&oss_secret_ref()), Some("SECRET"));
+        assert_eq!(kept.cloud.provider, CloudProvider::Oss);
+
+        // 切回 WebDAV：OSS 配置与 Secret 仍在，切换本身要作废旧基线。
+        let mut webdav = oss_input();
+        webdav.provider = CloudProvider::Webdav;
+        let (switched, switched_secrets, changed) =
+            set_cloud_settings_at(&config, &secrets_path, webdav).unwrap();
+        assert!(changed, "换通道必须重置旧基线");
+        assert_eq!(switched.cloud.provider, CloudProvider::Webdav);
+        assert_eq!(switched.cloud.oss_bucket, "my-bucket");
+        assert_eq!(switched_secrets.get(&oss_secret_ref()), Some("SECRET"));
+    }
+
+    #[test]
+    fn oss_requires_secret_and_clearing_keeps_webdav_password() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let secrets_path = dir.path().join("secrets.local.json");
+
+        let mut missing = oss_input();
+        missing.oss_access_key_secret = Some(String::new());
+        let error = set_cloud_settings_at(&config, &secrets_path, missing).unwrap_err();
+        assert!(
+            matches!(&error, AppError::InvalidInput(message) if message.contains("AccessKey Secret")),
+            "{error}"
+        );
+
+        set_cloud_settings_at(&config, &secrets_path, oss_input()).unwrap();
+        // 清空 OSS 三项即清除该通道；WebDAV 凭据不受影响。
+        let mut cleared = oss_input();
+        cleared.enabled = false;
+        cleared.oss_region = String::new();
+        cleared.oss_bucket = String::new();
+        cleared.oss_access_key_id = String::new();
+        let (saved, secrets, _) =
+            set_cloud_settings_at(&config, &secrets_path, cleared).unwrap();
+        assert!(!saved.cloud.enabled);
+        assert_eq!(saved.cloud.oss_bucket, "");
+        assert!(secrets.get(&oss_secret_ref()).is_none());
+        assert_eq!(secrets.get(&cloud_secret_ref()), Some("pw"));
     }
 
     #[test]

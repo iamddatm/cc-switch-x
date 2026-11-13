@@ -176,7 +176,7 @@ export function NetworkPanel() {
             </div>
             <p className="mt-1 text-caption text-fg-2">
               出站请求（Skills 下载、skills.sh 搜索、应用更新）都会经过此代理；留空表示直连。
-              WebDAV 云备份可以单独设为不走代理。
+              云端备份（WebDAV / 阿里云 OSS）可以单独设为不走代理。
             </p>
 
             {loading ? (
@@ -201,7 +201,7 @@ export function NetworkPanel() {
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                   <Checkbox
                     id="proxy-webdav"
-                    label="WebDAV 云备份走代理"
+                    label="云端备份走代理"
                     checked={webdavUsesProxy}
                     onChange={(event) => {
                       setWebdavUsesProxy(event.target.checked);

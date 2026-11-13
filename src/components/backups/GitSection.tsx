@@ -243,8 +243,35 @@ export function GitSection({
               </Button>
             </div>
             <p className="text-caption text-fg-3">
-              凭据交给系统 Git（credential helper / SSH agent），应用不会保存 token；验证远端后才能在上方启用 Git 备份。
+              凭据交给系统 Git（credential helper / SSH agent），应用不会保存 token；验证远端后才能启用 Git 备份。
             </p>
+            <div className="flex flex-wrap items-center gap-2">
+              {settings?.git.enabled ? (
+                <Button
+                  variant="danger"
+                  disabled={!!busy}
+                  onClick={() => onToggle({ enabled: false })}
+                >
+                  停用 Git 备份
+                </Button>
+              ) : (
+                <Button
+                  variant="primary"
+                  disabled={!git.remoteVerified || !!busy}
+                  title={
+                    git.remoteVerified
+                      ? undefined
+                      : "先验证远端，确认可以推送后再启用"
+                  }
+                  onClick={() => onToggle({ enabled: true })}
+                >
+                  启用 Git 备份
+                </Button>
+              )}
+              <span className="text-caption text-fg-3">
+                Git 与云端备份只能启用一种。
+              </span>
+            </div>
             <div className="flex flex-wrap gap-2">
               <Button loading={busy === "commit"} onClick={onCommit}>
                 立即提交

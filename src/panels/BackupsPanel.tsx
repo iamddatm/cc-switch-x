@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { ArchiveRestore, HardDrive } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
@@ -24,6 +24,8 @@ import { api } from "../lib/api";
 import { formatBytes, formatRelativeTime } from "../lib/format";
 import type {
   BackupSettings,
+  CloudProvider,
+  CloudSettingsInput,
   CloudSettingsView,
   GitCommit,
   SnapshotKind,
@@ -32,8 +34,8 @@ import type {
 const INTERVALS = [0, 6, 12, 24, 48, 168];
 const RETAINS = [3, 5, 10, 15, 20, 30, 50];
 
-/** 远端备份只能启用一种；两种都未开启时只做本机快照。 */
-type BackupMethod = "none" | "git" | "webdav";
+/** 远端备份只能启用一种；标签页只控制显示哪个通道的配置。 */
+type BackupTab = "git" | CloudProvider;
 
 /** 后端自动同步成功后推送的载荷；上传带大小，下载带恢复/删除数与安全快照。 */
 type CloudAutoSyncedPayload =
@@ -106,6 +108,15 @@ export function BackupsPanel() {
     received: number;
     total: number;
   } | null>(null);
+  /** 标签页只切显示，不改配置；首次加载后跟随当前启用的方式。 */
+  const [tab, setTab] = useState<BackupTab>("webdav");
+  const tabSeeded = useRef(false);
+  /** 用户先点了标签就以用户为准，数据到齐后不再覆盖。 */
+  const tabTouched = useRef(false);
+  const selectTab = (value: BackupTab) => {
+    tabTouched.current = true;
+    setTab(value);
+  };
 
   // 恢复期间后端按块推下载进度；确认框关掉就断开监听。
   useEffect(() => {
@@ -150,6 +161,21 @@ export function BackupsPanel() {
       unlisten?.();
     };
   }, [refresh]);
+
+  // 初版数据到齐后只定位一次：启用云通道就显示它，否则 Git 已就绪就显示 Git。
+  useEffect(() => {
+    if (tabSeeded.current || tabTouched.current || !cloud || !git || !settings) {
+      return;
+    }
+    tabSeeded.current = true;
+    setTab(
+      cloud.enabled
+        ? cloud.provider
+        : settings.git.enabled && git.remoteVerified
+          ? "git"
+          : "webdav",
+    );
+  }, [cloud, git, settings]);
 
   /** 打开确认框后先拉一次远端状态：缓存可能已经过期，不能拿旧包信息确认覆盖。 */
   const openCloudRestore = async () => {
@@ -332,21 +358,34 @@ export function BackupsPanel() {
     }
   };
 
+  /** 把表单草稿与当前已保存的开关拼成完整输入；两个通道的字段一起传，避免清掉另一边。 */
+  const buildCloudInput = (
+    draft: CloudDraft,
+    overrides: Partial<CloudSettingsInput> = {},
+  ): CloudSettingsInput => ({
+    provider: cloud?.provider ?? "webdav",
+    enabled: cloud?.enabled ?? false,
+    autoUpload: cloud?.autoUpload ?? false,
+    autoDownload: cloud?.autoDownload ?? false,
+    uploadDelayHours: cloud?.uploadDelayHours ?? 1,
+    baseUrl: draft.baseUrl.trim(),
+    username: draft.username.trim(),
+    password: draft.password,
+    remoteDir: draft.remoteDir.trim(),
+    ossRegion: draft.ossRegion.trim(),
+    ossBucket: draft.ossBucket.trim(),
+    ossAccessKeyId: draft.ossAccessKeyId.trim(),
+    ossAccessKeySecret: draft.ossAccessKeySecret,
+    ossPrefix: draft.ossPrefix.trim(),
+    ...overrides,
+  });
+
   /** 保存成功要把后端回读的配置交还给分区，让它把草稿与 dirty 标记收干净。 */
   const saveCloud = async (draft: CloudDraft) => {
     setNotice(null);
     try {
       const saved = await run("cloud-save", () =>
-        api.setCloudSettings({
-          baseUrl: draft.baseUrl.trim(),
-          username: draft.username.trim(),
-          password: draft.password,
-          remoteDir: draft.remoteDir.trim(),
-          enabled: cloud?.enabled ?? false,
-          autoUpload: cloud?.autoUpload ?? false,
-          autoDownload: cloud?.autoDownload ?? false,
-          uploadDelayHours: cloud?.uploadDelayHours ?? 1,
-        }),
+        api.setCloudSettings(buildCloudInput(draft)),
       );
       setNotice("云备份设置已保存");
       return saved;
@@ -359,29 +398,74 @@ export function BackupsPanel() {
   /** 自动上传/下载是策略而非草稿：切换即保存，避免和连接字段的「保存」混在一起。 */
   const toggleCloudAuto = (patch: CloudAutoPatch) => {
     if (!cloud || !cloud.enabled) return;
+    const connection = {
+      baseUrl: cloud.baseUrl,
+      username: cloud.username,
+      remoteDir: cloud.remoteDir,
+      ossRegion: cloud.ossRegion,
+      ossBucket: cloud.ossBucket,
+      ossAccessKeyId: cloud.ossAccessKeyId,
+      ossPrefix: cloud.ossPrefix,
+    };
     void act("cloud-auto", () =>
       api.setCloudSettings({
-        baseUrl: cloud.baseUrl,
-        username: cloud.username,
-        password: null,
-        remoteDir: cloud.remoteDir,
+        ...connection,
+        provider: cloud.provider,
         enabled: true,
         autoUpload: patch.autoUpload ?? cloud.autoUpload,
         autoDownload: patch.autoDownload ?? cloud.autoDownload,
         uploadDelayHours: patch.uploadDelayHours ?? cloud.uploadDelayHours,
+        password: null,
+        ossAccessKeySecret: null,
       }),
     );
   };
 
-  const testCloud = async (draft: CloudDraft) => {
+  /** 启用 / 停用远端通道：启用时只认已保存的配置，两个通道互斥由后端保证。 */
+  const toggleChannel = (provider: CloudProvider, enabled: boolean) => {
+    if (!cloud) return;
+    void act(
+      "cloud-channel",
+      () =>
+        api.setCloudSettings({
+          provider,
+          enabled,
+          autoUpload: enabled ? cloud.autoUpload : false,
+          autoDownload: enabled ? cloud.autoDownload : false,
+          uploadDelayHours: cloud.uploadDelayHours,
+          baseUrl: cloud.baseUrl,
+          username: cloud.username,
+          password: null,
+          remoteDir: cloud.remoteDir,
+          ossRegion: cloud.ossRegion,
+          ossBucket: cloud.ossBucket,
+          ossAccessKeyId: cloud.ossAccessKeyId,
+          ossAccessKeySecret: null,
+          ossPrefix: cloud.ossPrefix,
+        }),
+      enabled
+        ? provider === "oss"
+          ? "已启用阿里云 OSS 备份"
+          : "已启用 WebDAV 云备份"
+        : "已停用云端备份",
+    );
+  };
+
+  const testCloud = async (draft: CloudDraft, provider: CloudProvider) => {
     setNotice(null);
     try {
       const latency = await run("cloud-test", () =>
         api.testCloudConnection({
+          provider,
           baseUrl: draft.baseUrl.trim(),
           username: draft.username.trim(),
           password: draft.password,
           remoteDir: draft.remoteDir.trim(),
+          ossRegion: draft.ossRegion.trim(),
+          ossBucket: draft.ossBucket.trim(),
+          ossAccessKeyId: draft.ossAccessKeyId.trim(),
+          ossAccessKeySecret: draft.ossAccessKeySecret,
+          ossPrefix: draft.ossPrefix.trim(),
         }),
       );
       setNotice(`连接成功（${latency} ms）`);
@@ -420,95 +504,21 @@ export function BackupsPanel() {
 
   const interval = settings?.intervalHours ?? 24;
   const retain = settings?.retainCount ?? 10;
-
-  // 单选值由实际生效的配置推导：Git 必须已验证，否则即使 enabled 也不显示为选中。
-  const method: BackupMethod =
-    settings?.git.enabled && git?.remoteVerified
-      ? "git"
-      : cloud?.enabled
-        ? "webdav"
-        : "none";
-  const gitMethodReady =
-    !!git?.initialized && !!settings?.git.remote && !!git?.remoteVerified;
-  const webdavMethodReady =
-    !!cloud?.baseUrl && !!cloud?.username && !!cloud?.hasPassword;
-  const methodItems: SegmentedItem<BackupMethod>[] = [
-    { value: "none", label: "不启用" },
-    { value: "git", label: "Git 备份", disabled: !gitMethodReady },
-    { value: "webdav", label: "WebDAV 云备份", disabled: !webdavMethodReady },
+  const tabItems: SegmentedItem<BackupTab>[] = [
+    { value: "git", label: "Git 备份" },
+    { value: "webdav", label: "WebDAV" },
+    { value: "oss", label: "阿里云 OSS" },
   ];
-
-  const selectMethod = (value: BackupMethod) => {
-    if (!settings || !cloud) return;
-    if (value === method) {
-      // 未验证的 Git 可能仍残留 enabled；点「不启用」或「WebDAV」时顺带清掉。
-      if (value === "git" || !settings.git.enabled) return;
-    }
-    if (value === "git") {
-      if (!gitMethodReady) return;
-      void act(
-        "method",
-        () =>
-          api.setBackupSettings({
-            ...settings,
-            git: { ...settings.git, enabled: true },
-          }),
-        "已启用 Git 备份",
-      );
-      return;
-    }
-    if (value === "webdav") {
-      if (!webdavMethodReady) return;
-      void act(
-        "method",
-        () =>
-          api.setCloudSettings({
-            baseUrl: cloud.baseUrl,
-            username: cloud.username,
-            password: null,
-            remoteDir: cloud.remoteDir,
-            enabled: true,
-            // 通道与自动上传分开：只启用通道时保留原有的自动备份偏好。
-            autoUpload: cloud.autoUpload,
-            autoDownload: cloud.autoDownload,
-            uploadDelayHours: cloud.uploadDelayHours,
-          }),
-        "已启用 WebDAV 云备份",
-      );
-      return;
-    }
-    void act(
-      "method",
-      async () => {
-        if (settings.git.enabled) {
-          await api.setBackupSettings({
-            ...settings,
-            git: { ...settings.git, enabled: false },
-          });
-        }
-        if (cloud.enabled || cloud.autoUpload) {
-          await api.setCloudSettings({
-            baseUrl: cloud.baseUrl,
-            username: cloud.username,
-            password: null,
-            remoteDir: cloud.remoteDir,
-            enabled: false,
-            autoUpload: false,
-            autoDownload: false,
-            uploadDelayHours: cloud.uploadDelayHours,
-          });
-        }
-      },
-      "已关闭远端备份",
-    );
-  };
+  // 标签页只切显示；未激活的面板保持挂载，切回来时表单草稿还在。
+  const cloudTab: CloudProvider = tab === "oss" ? "oss" : "webdav";
+  const currentChannel = cloud?.enabled ? cloud.provider : null;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader
         icon={ArchiveRestore}
         title="备份"
-        description="快照可跨机器恢复；Git 备份保留提交历史并可同步远端。"
+        description="快照可跨机器恢复；Git、WebDAV 与阿里云 OSS 可把真源同步到远端。"
         actions={
           <>
             <Button
@@ -539,32 +549,67 @@ export function BackupsPanel() {
               <div className="min-w-0 flex-1">
                 <h3 className="text-strong text-fg-1">远端备份方式</h3>
                 <p className="text-caption text-fg-3">
-                  Git 与 WebDAV 只能启用一种；本机快照不受影响。Git 需先初始化并验证远端，WebDAV 需先保存完整连接配置，启用后可在下方分别打开「自动上传」与「自动下载」。
+                  Git、WebDAV 与阿里云 OSS 只能启用一种；标签页只切换显示，未保存的填写不会丢。本机快照不受影响。
                 </p>
               </div>
               <SegmentedControl
                 ariaLabel="远端备份方式"
-                value={method}
-                items={methodItems}
-                onValueChange={selectMethod}
+                value={tab}
+                items={tabItems}
+                onValueChange={selectTab}
               />
             </div>
+            {currentChannel && (
+              <p className="mt-2 text-caption text-fg-3">
+                当前启用：
+                {currentChannel === "oss" ? "阿里云 OSS" : "WebDAV 云备份"}
+              </p>
+            )}
           </section>
 
-          {/* WebDAV 是日常主用的远端通道，排在快照与 Git 之前，省得每次往下滚。 */}
-          <CloudSection
-            cloud={cloud}
-            cloudStatus={cloudStatus}
-            cloudChecking={cloudChecking}
-            loading={loading}
-            busy={busy}
-            onRefreshStatus={() => void refreshCloudStatus()}
-            onTest={(draft) => void testCloud(draft)}
-            onSave={saveCloud}
-            onToggleAuto={toggleCloudAuto}
-            onUpload={() => void uploadCloud()}
-            onOpenRestore={() => void openCloudRestore()}
-          />
+          {/* 三个面板都保持挂载，只切换可见性：切回来时未保存的草稿还在。 */}
+          <div hidden={tab !== "git"}>
+            <GitSection
+              git={git}
+              settings={settings}
+              commits={commits}
+              busy={busy}
+              onInit={() =>
+                void act("git-init", () => api.gitInit(), "Git 备份已初始化")
+              }
+              onSaveRemote={saveRemote}
+              onVerifyRemote={(draft) => void verifyRemote(draft)}
+              onToggle={saveGitToggle}
+              onCommit={() =>
+                void act("commit", () => api.gitCommitNow(), "已提交当前真源")
+              }
+              onPull={() => void pullNow()}
+              onPush={() => void act("push", () => api.gitPushNow(), "已推送到远端")}
+              onRestoreCommit={setGitRestoreTarget}
+              onResolveConflict={setConflictAction}
+              onRevealStore={() =>
+                void act("reveal", () => api.revealBackupLocation("store"))
+              }
+            />
+          </div>
+
+          <div hidden={tab !== "webdav" && tab !== "oss"}>
+            <CloudSection
+              provider={cloudTab}
+              cloud={cloud}
+              cloudStatus={cloudStatus}
+              cloudChecking={cloudChecking}
+              loading={loading}
+              busy={busy}
+              onRefreshStatus={() => void refreshCloudStatus()}
+              onTest={(draft, provider) => void testCloud(draft, provider)}
+              onSave={saveCloud}
+              onToggleChannel={toggleChannel}
+              onToggleAuto={toggleCloudAuto}
+              onUpload={() => void uploadCloud()}
+              onOpenRestore={() => void openCloudRestore()}
+            />
+          </div>
 
           <section className="rounded-panel border border-border bg-surface">
             <div className="flex items-center gap-2 border-b border-border px-4 py-3">
@@ -739,29 +784,6 @@ export function BackupsPanel() {
               <p className="px-4 py-3 text-caption text-fg-3">正在统计占用…</p>
             )}
           </section>
-
-          <GitSection
-            git={git}
-            settings={settings}
-            commits={commits}
-            busy={busy}
-            onInit={() =>
-              void act("git-init", () => api.gitInit(), "Git 备份已初始化")
-            }
-            onSaveRemote={saveRemote}
-            onVerifyRemote={(draft) => void verifyRemote(draft)}
-            onToggle={saveGitToggle}
-            onCommit={() =>
-              void act("commit", () => api.gitCommitNow(), "已提交当前真源")
-            }
-            onPull={() => void pullNow()}
-            onPush={() => void act("push", () => api.gitPushNow(), "已推送到远端")}
-            onRestoreCommit={setGitRestoreTarget}
-            onResolveConflict={setConflictAction}
-            onRevealStore={() =>
-              void act("reveal", () => api.revealBackupLocation("store"))
-            }
-          />
         </div>
       </div>
 

@@ -35,10 +35,10 @@ node scripts/check-release-version.mjs
 - `store/`：文本真源目录布局、原子写、备份、staging 与 `secrets.local.json`。
 - `index/`：SQLite 派生索引（assets / agent_state / runs / drift / sessions / FTS）；`AppState::init` 启动时全量重建 assets，`index.db` 可随时删除。
 - `adapters/`：各 agent 的渲染、键级合并、CLI 通道与归属台账；`ledger.rs` 记录「我们往哪个路径写了哪份字节」。
-- `services/`：`apply`（备份→写→回读→记录→失败整批回滚）、`drift`、`scan`、`import`、`assets`、`agents`、`sessions`、`settings`。Skill 三件套前缀是**单数** `skill_`（`skill_source` / `skill_update` / `skill_discovery`）；项目级 Skills 走 `project_registry` / `project_scan` / `project_install` / `project_migrate` / `project_sync`；备份子系统是 `backup`、`git_sync`（store root 本身是一个 git 仓库）、`cloud_backup`（WebDAV）。
+- `services/`：`apply`（备份→写→回读→记录→失败整批回滚）、`drift`、`scan`、`import`、`assets`、`agents`、`sessions`、`settings`。Skill 三件套前缀是**单数** `skill_`（`skill_source` / `skill_update` / `skill_discovery`）；项目级 Skills 走 `project_registry` / `project_scan` / `project_install` / `project_migrate` / `project_sync`；备份子系统是 `backup`、`git_sync`（store root 本身是一个 git 仓库）、`cloud_backup`（WebDAV / 阿里云 OSS）。
 - `commands/`：薄 Tauri IPC 层；`state.rs` 持有 Store、Index、设置、secrets 与真实 home。
 - `sessions/`：各工具只读会话 provider 注册表；大文件解析走 `spawn_blocking`。
-- `net/`：GitHub 归档下载、ZIP 安全解压、代理配置与 WebDAV 客户端（`webdav.rs`）；同步网络层由调用方放进 `spawn_blocking`，批量 Skill 任务用 `AppState::begin_skill_job` 互斥。
+- `net/`：GitHub 归档下载、ZIP 安全解压、代理配置、WebDAV 客户端（`webdav.rs`）与阿里云 OSS 的 S3 兼容客户端（`oss.rs`，SigV4 签名）；同步网络层由调用方放进 `spawn_blocking`，批量 Skill 任务用 `AppState::begin_skill_job` 互斥。
 
 ## 前端（src）
 

@@ -99,6 +99,9 @@ export interface RestoreBackupReport {
   removedFiles: number;
 }
 
+/** 云备份通道：两种通道的配置并存保存，同一时刻只启用一种。 */
+export type CloudProvider = "webdav" | "oss";
+
 export interface CloudBackupSettings {
   /** 通道是否启用（参与「远端备份方式」单选）。 */
   enabled: boolean;
@@ -108,23 +111,43 @@ export interface CloudBackupSettings {
   autoDownload: boolean;
   /** 上传防抖窗口（小时），1–24。 */
   uploadDelayHours: number;
+  /** 当前启用的通道。 */
+  provider: CloudProvider;
+  // WebDAV
   baseUrl: string;
   username: string;
   remoteDir: string;
+  // 阿里云 OSS（S3 兼容接口）
+  ossRegion: string;
+  ossBucket: string;
+  ossAccessKeyId: string;
+  ossPrefix: string;
 }
 
 export interface CloudSettingsView extends CloudBackupSettings {
   hasPassword: boolean;
+  hasOssSecret: boolean;
 }
 
 export type CloudSettingsInput = CloudBackupSettings & {
   /** null = 保留已保存的密码；空串 = 清除。 */
   password: string | null;
+  /** null = 保留已保存的 AccessKey Secret；空串 = 清除。 */
+  ossAccessKeySecret: string | null;
 };
 
-export type CloudTestInput = Omit<
+export type CloudTestInput = Pick<
   CloudSettingsInput,
-  "enabled" | "autoUpload" | "autoDownload" | "uploadDelayHours"
+  | "provider"
+  | "baseUrl"
+  | "username"
+  | "password"
+  | "remoteDir"
+  | "ossRegion"
+  | "ossBucket"
+  | "ossAccessKeyId"
+  | "ossAccessKeySecret"
+  | "ossPrefix"
 >;
 
 export interface CloudRemoteStatus {
@@ -148,6 +171,8 @@ export interface CloudManifestInfo {
 export interface CloudStatus {
   configured: boolean;
   hasPassword: boolean;
+  /** 当前启用（或待启用）的通道。 */
+  provider: CloudProvider;
   autoUpload: boolean;
   autoDownload: boolean;
   uploadDelayHours: number;
@@ -226,7 +251,7 @@ export interface ProxySettingsView {
   hasPassword: boolean;
   /** 实际生效的开关；没有填写地址时恒为 false。 */
   enabled: boolean;
-  /** WebDAV 云备份是否也用这个代理；关闭后云备份直连。 */
+  /** 云端备份（WebDAV / OSS）是否也用这个代理；关闭后云备份直连。 */
   webdavUsesProxy: boolean;
 }
 

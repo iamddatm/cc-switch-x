@@ -1,8 +1,10 @@
-//! 云备份设置与 WebDAV 操作命令。网络任务放阻塞线程，避免卡住 UI。
+//! 云备份设置与远端操作命令。网络任务放阻塞线程，避免卡住 UI。
 
 use crate::error::AppError;
 use crate::services::cloud_backup::{self, CloudRestoreReport, CloudStatus};
-use crate::services::settings::{cloud_view, set_cloud_settings_at, CloudSettingsView};
+use crate::services::settings::{
+    cloud_view, set_cloud_settings_at, CloudSettingsInput, CloudSettingsView,
+};
 use crate::settings as settings_file;
 use crate::state::AppState;
 use crate::store::secrets::secrets_path;
@@ -34,30 +36,16 @@ pub fn get_cloud_settings(state: State<'_, AppState>) -> Result<CloudSettingsVie
     Ok(cloud_view(&settings, &secrets))
 }
 
-/// `password` 为 None 表示沿用已保存的密码；空串表示清除密码。
+/// 密码 / Secret 为 None 表示沿用已保存的值；空串表示清除。
 #[tauri::command]
 pub fn set_cloud_settings(
     state: State<'_, AppState>,
-    base_url: String,
-    username: String,
-    password: Option<String>,
-    remote_dir: String,
-    enabled: bool,
-    auto_upload: bool,
-    auto_download: bool,
-    upload_delay_hours: u32,
+    input: CloudSettingsInput,
 ) -> Result<CloudSettingsView, AppError> {
     let (updated, secrets, connection_changed) = set_cloud_settings_at(
         &settings_file::settings_path()?,
         &secrets_path(state.store.root()),
-        base_url,
-        username,
-        password,
-        remote_dir,
-        enabled,
-        auto_upload,
-        auto_download,
-        upload_delay_hours,
+        input,
     )?;
     // 换了远端或凭据，旧基线与观测缓存都不再可信。先递增连接代次，
     // 让仍在进行的旧任务在回写运行状态前看到代次已变，避免把旧基线写回来。
@@ -84,20 +72,11 @@ pub fn set_cloud_settings(
 #[tauri::command]
 pub async fn test_cloud_connection(
     app: AppHandle,
-    base_url: String,
-    username: String,
-    password: Option<String>,
-    remote_dir: String,
+    input: CloudSettingsInput,
 ) -> Result<u64, AppError> {
     run_blocking(move || {
         let state = app.state::<AppState>();
-        cloud_backup::test_connection(
-            &state,
-            &base_url,
-            &username,
-            password.as_deref(),
-            &remote_dir,
-        )
+        cloud_backup::test_connection(&state, &input)
     })
     .await
 }

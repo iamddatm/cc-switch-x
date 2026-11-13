@@ -1,3 +1,4 @@
+use crate::error::AppError;
 use crate::store::atomic::write_atomic;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -86,7 +87,17 @@ impl Default for GitBackupSettings {
     }
 }
 
-/// WebDAV 云备份：远端只保留一份最新状态包；与 Git 自动同步互斥，密码单独放在 secrets.local.json。
+/// 云备份通道类型：两种通道共用同一套同步策略与运行状态，连接参数各自保存。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudProvider {
+    #[default]
+    Webdav,
+    Oss,
+}
+
+/// 云备份：远端只保留一份最新状态包；与 Git 自动同步互斥，密码单独放在 secrets.local.json。
+/// WebDAV 与阿里云 OSS 的配置并存保存，`provider` 决定当前启用哪一种。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudBackupSettings {
@@ -103,12 +114,25 @@ pub struct CloudBackupSettings {
     /// 上传防抖窗口（小时），只接受 1–24。
     #[serde(default = "default_upload_delay_hours")]
     pub upload_delay_hours: u32,
+    /// 当前启用的通道；换通道会作废旧远端的同步基线。
+    #[serde(default)]
+    pub provider: CloudProvider,
+    // ── WebDAV ──
     #[serde(default)]
     pub base_url: String,
     #[serde(default)]
     pub username: String,
     #[serde(default = "default_cloud_remote_dir")]
     pub remote_dir: String,
+    // ── 阿里云 OSS（S3 兼容接口）──
+    #[serde(default)]
+    pub oss_region: String,
+    #[serde(default)]
+    pub oss_bucket: String,
+    #[serde(default)]
+    pub oss_access_key_id: String,
+    #[serde(default = "default_cloud_remote_dir")]
+    pub oss_prefix: String,
 }
 
 impl Default for CloudBackupSettings {
@@ -118,9 +142,14 @@ impl Default for CloudBackupSettings {
             auto_upload: false,
             auto_download: false,
             upload_delay_hours: default_upload_delay_hours(),
+            provider: CloudProvider::default(),
             base_url: String::new(),
             username: String::new(),
             remote_dir: default_cloud_remote_dir(),
+            oss_region: String::new(),
+            oss_bucket: String::new(),
+            oss_access_key_id: String::new(),
+            oss_prefix: default_cloud_remote_dir(),
         }
     }
 }
@@ -129,7 +158,7 @@ fn default_cloud_remote_dir() -> String {
     "ccswitchx".to_string()
 }
 
-fn default_upload_delay_hours() -> u32 {
+pub(crate) fn default_upload_delay_hours() -> u32 {
     1
 }
 
@@ -203,6 +232,44 @@ pub fn validate_git_remote(remote: &str) -> Result<(), String> {
     Err("远端地址只支持 https://、ssh://、file:// 或 git@host:path".into())
 }
 
+/// OSS 地域 ID（如 `cn-hangzhou`）。空值表示清除该通道；只允许字母、数字与短横线。
+pub fn validate_oss_region(raw: &str) -> Result<String, AppError> {
+    let raw = raw.trim().to_ascii_lowercase();
+    if raw.is_empty() {
+        return Ok(raw);
+    }
+    if raw.len() > 64
+        || !raw
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    {
+        return Err(AppError::InvalidInput(format!(
+            "OSS 地域格式无效（示例：cn-hangzhou）：{raw}"
+        )));
+    }
+    Ok(raw)
+}
+
+/// OSS Bucket 名：3–63 位，小写字母、数字与短横线，不能以短横线开头或结尾。
+pub fn validate_oss_bucket(raw: &str) -> Result<String, AppError> {
+    let raw = raw.trim().to_ascii_lowercase();
+    if raw.is_empty() {
+        return Ok(raw);
+    }
+    let valid = (3..=63).contains(&raw.len())
+        && raw
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        && !raw.starts_with('-')
+        && !raw.ends_with('-');
+    if !valid {
+        return Err(AppError::InvalidInput(format!(
+            "OSS Bucket 名称无效（3–63 位小写字母、数字或短横线）：{raw}"
+        )));
+    }
+    Ok(raw)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxySettings {
@@ -213,7 +280,7 @@ pub struct ProxySettings {
     /// 代理开关：关闭时保留地址与凭据，但所有出站请求直连。
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// WebDAV 云备份是否也走这个代理；关闭后云备份直连。缺省 true，旧设置文件行为不变。
+    /// 云端备份（WebDAV / OSS）是否也走这个代理；关闭后云备份直连。缺省 true，旧设置文件行为不变。
     #[serde(default = "default_true")]
     pub webdav_uses_proxy: bool,
 }
@@ -414,6 +481,7 @@ mod tests {
                 base_url: "https://dav.example.com/dav".into(),
                 username: "me".into(),
                 remote_dir: "backups/ccswitchx".into(),
+                ..CloudBackupSettings::default()
             },
         };
         save_to(&path, &settings).unwrap();
@@ -617,6 +685,7 @@ mod tests {
                 base_url: "https://dav.example.com/dav".into(),
                 username: "me".into(),
                 remote_dir: "backups/ccswitchx".into(),
+                ..CloudBackupSettings::default()
             },
             ..AppSettings::default()
         };

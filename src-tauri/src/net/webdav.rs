@@ -5,7 +5,7 @@
 
 use crate::error::AppError;
 use crate::net::ProxyConfig;
-use reqwest::blocking::{Body, Client};
+use reqwest::blocking::{Body, Client, RequestBuilder};
 use reqwest::header::{
     HeaderMap, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, LAST_MODIFIED, RANGE,
 };
@@ -39,7 +39,7 @@ const PROGRESS_STEP_BYTES: u64 = 256 * 1024;
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 
 /// 传输类请求的整体超时预算。
-fn transfer_timeout(bytes: u64) -> Duration {
+pub(crate) fn transfer_timeout(bytes: u64) -> Duration {
     Duration::from_secs(
         TRANSFER_BASE_TIMEOUT_SECS.saturating_add(bytes / TRANSFER_MIN_BYTES_PER_SEC),
     )
@@ -65,7 +65,7 @@ pub struct RemoteObject {
 }
 
 impl RemoteObject {
-    fn missing() -> Self {
+    pub(crate) fn missing() -> Self {
         Self {
             exists: false,
             size_bytes: None,
@@ -274,13 +274,7 @@ impl WebDavClient {
         Ok(Some(bytes))
     }
 
-    /// 下载备份包到 `dest`。
-    ///
-    /// 与普通 GET 的差别：
-    /// - 整体超时按包大小缩放（见 [`transfer_timeout`]），慢网不会被固定预算截断；
-    /// - 连接中途断开时用 `Range` 续传，最多 [`MAX_DOWNLOAD_ATTEMPTS`] 次；
-    /// - 边写边算整包 sha256，调用方不必再读一遍文件；
-    /// - `on_progress(已收到字节, 总字节)`，总字节未知时传 0。
+    /// 下载备份包到 `dest`（见 [`download_to_file`]）。
     pub fn get_to_file(
         &self,
         dest: &Path,
@@ -288,154 +282,16 @@ impl WebDavClient {
         on_progress: Option<&dyn Fn(u64, u64)>,
     ) -> Result<DownloadOutcome, AppError> {
         let url = self.object_url()?;
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let mut written = 0u64;
-        let mut total: Option<u64> = None;
-        let mut hasher = Sha256::new();
-        let mut headers = HeaderMap::new();
-        let mut last_error: Option<AppError> = None;
-        let mut completed = false;
-
-        for _ in 1..=MAX_DOWNLOAD_ATTEMPTS {
-            let mut request = self
-                .request(Method::GET, url.clone())
-                .timeout(transfer_timeout(total.unwrap_or(max_bytes)));
-            if written > 0 {
-                request = request.header(RANGE, format!("bytes={written}-"));
-            }
-            let mut response = match request.send() {
-                Ok(response) => response,
-                Err(error) => {
-                    last_error = Some(transport_error("GET")(error));
-                    continue;
-                }
-            };
-
-            let status = response.status();
-            match status.as_u16() {
-                200 => {
-                    // 服务器忽略 Range 时只能从头来，已写的进度与哈希一并作废。
-                    if written > 0 {
-                        written = 0;
-                        hasher = Sha256::new();
-                    }
-                    let declared = header_u64(response.headers(), CONTENT_LENGTH);
-                    if declared.is_some_and(|size| size > max_bytes) {
-                        return Err(oversize_error(max_bytes));
-                    }
-                    total = declared.or(total);
-                }
-                206 => {
-                    let Some((start, size)) = content_range(response.headers()) else {
-                        return Err(AppError::Cloud("云端返回的分段应答无法解析".into()));
-                    };
-                    if start != written {
-                        // 服务端给的起点和本地半成品对不上，丢弃重来。
-                        written = 0;
-                        hasher = Sha256::new();
-                        total = None;
-                        continue;
-                    }
-                    if size > max_bytes {
-                        return Err(oversize_error(max_bytes));
-                    }
-                    total = Some(size);
-                }
-                404 => return Err(AppError::Cloud("云端还没有备份，请先上传".into())),
-                416 => {
-                    // 两次尝试之间远端内容变了（偏移越界）：丢弃半成品重下。
-                    written = 0;
-                    hasher = Sha256::new();
-                    total = None;
-                    continue;
-                }
-                401 | 403 => return Err(auth_error(status)),
-                _ => return Err(status_error("GET", status)),
-            }
-            headers = response.headers().clone();
-
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(dest)?;
-            file.set_len(written)?;
-            file.seek(SeekFrom::Start(written))?;
-            let mut buffer = vec![0u8; READ_CHUNK_BYTES];
-            let mut reported = written;
-            let mut broken: Option<AppError> = None;
-            {
-                let mut limited = response
-                    .by_ref()
-                    .take(max_bytes.saturating_sub(written).saturating_add(1));
-                loop {
-                    match limited.read(&mut buffer) {
-                        Ok(0) => break,
-                        Ok(read) => {
-                            file.write_all(&buffer[..read])?;
-                            hasher.update(&buffer[..read]);
-                            written += read as u64;
-                            if written > max_bytes {
-                                drop(limited);
-                                let _ = fs::remove_file(dest);
-                                return Err(oversize_error(max_bytes));
-                            }
-                            if let Some(callback) = on_progress {
-                                if written - reported >= PROGRESS_STEP_BYTES
-                                    || total.is_some_and(|size| written >= size)
-                                {
-                                    reported = written;
-                                    callback(written, total.unwrap_or(0));
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            broken = Some(AppError::Cloud(format!(
-                                "下载云端备份中断（已收到 {written} 字节）：{error}"
-                            )));
-                            break;
-                        }
-                    }
-                }
-            }
-            file.flush()?;
-
-            if let Some(error) = broken {
-                last_error = Some(error);
-                continue;
-            }
-            // 声明的总长还没下完就读到 EOF，同样按中断处理，下一轮续传。
-            if let Some(size) = total {
-                if written < size {
-                    last_error = Some(AppError::Cloud(format!(
-                        "下载云端备份中断（已收到 {written}/{size} 字节）"
-                    )));
-                    continue;
-                }
-            }
-            completed = true;
-            break;
-        }
-
-        if !completed {
-            let _ = fs::remove_file(dest);
-            return Err(last_error.unwrap_or_else(|| {
-                AppError::Cloud("下载云端备份失败：多次尝试后仍未拿到完整内容".into())
-            }));
-        }
-        if let Some(callback) = on_progress {
-            callback(written, total.unwrap_or(0));
-        }
-        let mut remote = remote_from_headers(&headers, Some(written), true);
-        // 206 应答的 Content-Length 只是这一段的长度；整包大小以 Content-Range 为准。
-        remote.size_bytes = total.or(Some(written));
-        Ok(DownloadOutcome {
-            remote,
-            sha256: format!("{:x}", hasher.finalize()),
-        })
+        let username = self.config.username.clone();
+        let password = self.config.password.clone();
+        download_to_file(
+            &self.client,
+            url,
+            dest,
+            max_bytes,
+            on_progress,
+            move |request, _written| request.basic_auth(username.as_str(), Some(password.as_str())),
+        )
     }
 
     /// 连接测试：目录可创建 / 已存在，对象可 HEAD；404 视为成功。
@@ -585,6 +441,179 @@ impl WebDavClient {
     }
 }
 
+/// 把远端对象流式下载到 `dest`：WebDAV 与 OSS 共用同一套续传、限长与哈希逻辑。
+///
+/// `authenticate` 负责按当前偏移构造带认证信息的 GET 请求（SigV4 每次续传都要重新签名）。
+///
+/// 与普通 GET 的差别：
+/// - 整体超时按包大小缩放（见 [`transfer_timeout`]），慢网不会被固定预算截断；
+/// - 连接中途断开时用 `Range` 续传，最多 [`MAX_DOWNLOAD_ATTEMPTS`] 次；
+/// - 边写边算整包 sha256，调用方不必再读一遍文件；
+/// - `on_progress(已收到字节, 总字节)`，总字节未知时传 0。
+pub(crate) fn download_to_file<F>(
+    client: &Client,
+    url: Url,
+    dest: &Path,
+    max_bytes: u64,
+    on_progress: Option<&dyn Fn(u64, u64)>,
+    mut authenticate: F,
+) -> Result<DownloadOutcome, AppError>
+where
+    F: FnMut(RequestBuilder, u64) -> RequestBuilder,
+{
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut written = 0u64;
+    let mut total: Option<u64> = None;
+    let mut hasher = Sha256::new();
+    let mut headers = HeaderMap::new();
+    let mut last_error: Option<AppError> = None;
+    let mut completed = false;
+
+    for _ in 1..=MAX_DOWNLOAD_ATTEMPTS {
+        let mut request = authenticate(client.get(url.clone()), written)
+            .timeout(transfer_timeout(total.unwrap_or(max_bytes)));
+        if written > 0 {
+            request = request.header(RANGE, format!("bytes={written}-"));
+        }
+        let mut response = match request.send() {
+            Ok(response) => response,
+            Err(error) => {
+                last_error = Some(AppError::Cloud(format!("云端 GET 请求失败：{error}")));
+                continue;
+            }
+        };
+
+        let status = response.status();
+        match status.as_u16() {
+            200 => {
+                // 服务器忽略 Range 时只能从头来，已写的进度与哈希一并作废。
+                if written > 0 {
+                    written = 0;
+                    hasher = Sha256::new();
+                }
+                let declared = header_u64(response.headers(), CONTENT_LENGTH);
+                if declared.is_some_and(|size| size > max_bytes) {
+                    return Err(oversize_error(max_bytes));
+                }
+                total = declared.or(total);
+            }
+            206 => {
+                let Some((start, size)) = content_range(response.headers()) else {
+                    return Err(AppError::Cloud("云端返回的分段应答无法解析".into()));
+                };
+                if start != written {
+                    // 服务端给的起点和本地半成品对不上，丢弃重来。
+                    written = 0;
+                    hasher = Sha256::new();
+                    total = None;
+                    continue;
+                }
+                if size > max_bytes {
+                    return Err(oversize_error(max_bytes));
+                }
+                total = Some(size);
+            }
+            404 => return Err(AppError::Cloud("云端还没有备份，请先上传".into())),
+            416 => {
+                // 两次尝试之间远端内容变了（偏移越界）：丢弃半成品重下。
+                written = 0;
+                hasher = Sha256::new();
+                total = None;
+                continue;
+            }
+            401 | 403 => {
+                return Err(AppError::CloudAuth(format!(
+                    "云端认证失败（HTTP {status}），请检查连接凭据"
+                )))
+            }
+            _ => return Err(AppError::Cloud(format!("云端 GET 失败：HTTP {status}"))),
+        }
+        headers = response.headers().clone();
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dest)?;
+        file.set_len(written)?;
+        file.seek(SeekFrom::Start(written))?;
+        let mut buffer = vec![0u8; READ_CHUNK_BYTES];
+        let mut reported = written;
+        let mut broken: Option<AppError> = None;
+        {
+            let mut limited = response
+                .by_ref()
+                .take(max_bytes.saturating_sub(written).saturating_add(1));
+            loop {
+                match limited.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        file.write_all(&buffer[..read])?;
+                        hasher.update(&buffer[..read]);
+                        written += read as u64;
+                        if written > max_bytes {
+                            drop(limited);
+                            let _ = fs::remove_file(dest);
+                            return Err(oversize_error(max_bytes));
+                        }
+                        if let Some(callback) = on_progress {
+                            if written - reported >= PROGRESS_STEP_BYTES
+                                || total.is_some_and(|size| written >= size)
+                            {
+                                reported = written;
+                                callback(written, total.unwrap_or(0));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        broken = Some(AppError::Cloud(format!(
+                            "下载云端备份中断（已收到 {written} 字节）：{error}"
+                        )));
+                        break;
+                    }
+                }
+            }
+        }
+        file.flush()?;
+
+        if let Some(error) = broken {
+            last_error = Some(error);
+            continue;
+        }
+        // 声明的总长还没下完就读到 EOF，同样按中断处理，下一轮续传。
+        if let Some(size) = total {
+            if written < size {
+                last_error = Some(AppError::Cloud(format!(
+                    "下载云端备份中断（已收到 {written}/{size} 字节）"
+                )));
+                continue;
+            }
+        }
+        completed = true;
+        break;
+    }
+
+    if !completed {
+        let _ = fs::remove_file(dest);
+        return Err(last_error.unwrap_or_else(|| {
+            AppError::Cloud("下载云端备份失败：多次尝试后仍未拿到完整内容".into())
+        }));
+    }
+    if let Some(callback) = on_progress {
+        callback(written, total.unwrap_or(0));
+    }
+    let mut remote = remote_from_headers(&headers, Some(written), true);
+    // 206 应答的 Content-Length 只是这一段的长度；整包大小以 Content-Range 为准。
+    remote.size_bytes = total.or(Some(written));
+    Ok(DownloadOutcome {
+        remote,
+        sha256: format!("{:x}", hasher.finalize()),
+    })
+}
+
 fn mkcol_method() -> Method {
     Method::from_bytes(b"MKCOL").expect("MKCOL is a valid method")
 }
@@ -611,7 +640,7 @@ fn auth_error(status: StatusCode) -> AppError {
     ))
 }
 
-fn oversize_error(max_bytes: u64) -> AppError {
+pub(crate) fn oversize_error(max_bytes: u64) -> AppError {
     AppError::Cloud(format!("云端备份超过下载上限（{max_bytes} 字节）"))
 }
 
@@ -632,7 +661,7 @@ fn header_u64(headers: &HeaderMap, name: reqwest::header::HeaderName) -> Option<
         .and_then(|value| value.parse().ok())
 }
 
-fn remote_from_headers(
+pub(crate) fn remote_from_headers(
     headers: &HeaderMap,
     size_fallback: Option<u64>,
     exists: bool,

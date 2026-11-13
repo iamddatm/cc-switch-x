@@ -1,6 +1,6 @@
 [package]
 name = "cc-switch-x"
-version = "0.23.0"
+version = "0.24.0"
 edition = "2021"
 
 [lib]
@@ -19,6 +19,8 @@ serde_yaml = "0.9"
 toml_edit = "0.22"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
+# 阿里云 OSS 走 S3 兼容接口，需要 HMAC-SHA256 计算 SigV4 签名
+hmac = "0.12"
 thiserror = "2"
 dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }

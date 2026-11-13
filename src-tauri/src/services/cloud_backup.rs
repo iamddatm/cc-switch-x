@@ -3,14 +3,15 @@
 //! 网络请求统一持有 `cloud_ops` 串行锁；请求期间不持有 settings / secrets 锁。
 
 use crate::error::AppError;
+use crate::net::oss::{OssClient, OssConfig};
 use crate::net::webdav::{
     DownloadOutcome, RemoteObject, WebDavClient, WebDavConfig, BACKUP_OBJECT, MAX_CLOUD_BYTES,
 };
 use crate::net::ProxyConfig;
 use crate::services::backup::{self, SnapshotKind};
 use crate::services::git_sync;
-use crate::services::settings::cloud_secret_ref;
-use crate::settings::CloudBackupSettings;
+use crate::services::settings::{cloud_secret_ref, oss_secret_ref, CloudSettingsInput};
+use crate::settings::{CloudBackupSettings, CloudProvider};
 use crate::state::AppState;
 use crate::store::atomic::write_atomic;
 use crate::store::Store;
@@ -243,6 +244,8 @@ fn sha256_file(path: &Path) -> Result<String, AppError> {
 pub struct CloudStatus {
     pub configured: bool,
     pub has_password: bool,
+    /// 当前启用（或待启用）的云备份通道。
+    pub provider: CloudProvider,
     pub auto_upload: bool,
     pub auto_download: bool,
     pub upload_delay_hours: u32,
@@ -311,8 +314,27 @@ pub fn reset_runtime_status(store: &Store) -> Result<(), AppError> {
     }
 }
 
-/// 读设置与密钥但不联网，组装一份可用于「秒开面板」的状态。
-pub fn status_cached(state: &AppState) -> Result<CloudStatus, AppError> {
+/// 当前通道是否具备完整连接参数；两个通道各查各的凭据。
+fn is_configured(cloud: &CloudBackupSettings, has_password: bool, has_oss_secret: bool) -> bool {
+    match cloud.provider {
+        CloudProvider::Webdav => {
+            !cloud.base_url.trim().is_empty()
+                && !cloud.username.trim().is_empty()
+                && has_password
+        }
+        CloudProvider::Oss => {
+            !cloud.oss_region.trim().is_empty()
+                && !cloud.oss_bucket.trim().is_empty()
+                && !cloud.oss_access_key_id.trim().is_empty()
+                && has_oss_secret
+        }
+    }
+}
+
+/// 一次性读出云备份设置与两把凭据；锁顺序固定 settings → secrets。
+fn read_cloud_settings(
+    state: &AppState,
+) -> Result<(CloudBackupSettings, Option<String>, Option<String>), AppError> {
     let cloud = {
         let settings = state
             .settings
@@ -320,23 +342,34 @@ pub fn status_cached(state: &AppState) -> Result<CloudStatus, AppError> {
             .map_err(|_| AppError::Cloud("读取云备份设置失败".into()))?;
         settings.cloud.clone()
     };
-    let password = {
+    let (password, oss_secret) = {
         let secrets = state
             .secrets
             .lock()
             .map_err(|_| AppError::Cloud("读取云备份密钥失败".into()))?;
-        secrets.get(&cloud_secret_ref()).map(str::to_string)
+        (
+            secrets.get(&cloud_secret_ref()).map(str::to_string),
+            secrets.get(&oss_secret_ref()).map(str::to_string),
+        )
     };
+    Ok((cloud, password, oss_secret))
+}
+
+/// 读设置与密钥但不联网，组装一份可用于「秒开面板」的状态。
+pub fn status_cached(state: &AppState) -> Result<CloudStatus, AppError> {
+    let (cloud, password, oss_secret) = read_cloud_settings(state)?;
     let has_password = password
         .as_deref()
         .is_some_and(|value| !value.is_empty());
-    let configured = !cloud.base_url.trim().is_empty()
-        && !cloud.username.trim().is_empty()
-        && has_password;
+    let has_oss_secret = oss_secret
+        .as_deref()
+        .is_some_and(|value| !value.is_empty());
+    let configured = is_configured(&cloud, has_password, has_oss_secret);
     let runtime = load_runtime_status(&state.store);
     Ok(CloudStatus {
         configured,
         has_password,
+        provider: cloud.provider,
         auto_upload: cloud.auto_upload,
         auto_download: cloud.auto_download,
         upload_delay_hours: cloud.upload_delay_hours,
@@ -366,26 +399,14 @@ pub fn status_cached(state: &AppState) -> Result<CloudStatus, AppError> {
 }
 
 pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
-    let cloud = {
-        let settings = state
-            .settings
-            .lock()
-            .map_err(|_| AppError::Cloud("读取云备份设置失败".into()))?;
-        settings.cloud.clone()
-    };
-    let password = {
-        let secrets = state
-            .secrets
-            .lock()
-            .map_err(|_| AppError::Cloud("读取云备份密钥失败".into()))?;
-        secrets.get(&cloud_secret_ref()).map(str::to_string)
-    };
+    let (cloud, password, oss_secret) = read_cloud_settings(state)?;
     let has_password = password
         .as_deref()
         .is_some_and(|value| !value.is_empty());
-    let configured = !cloud.base_url.trim().is_empty()
-        && !cloud.username.trim().is_empty()
-        && has_password;
+    let has_oss_secret = oss_secret
+        .as_deref()
+        .is_some_and(|value| !value.is_empty());
+    let configured = is_configured(&cloud, has_password, has_oss_secret);
     // 与连接快照同时捕获代次：等待 cloud_ops 期间连接若被换掉，探测结果不再回写。
     let epoch = state.cloud_connection_epoch();
     let runtime = load_runtime_status(&state.store);
@@ -393,6 +414,7 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
         return Ok(CloudStatus {
             configured: false,
             has_password,
+            provider: cloud.provider,
             auto_upload: cloud.auto_upload,
             auto_download: cloud.auto_download,
             upload_delay_hours: cloud.upload_delay_hours,
@@ -417,15 +439,12 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
     // 锁要等网络任务结束才能拿到；等待期间上传/恢复可能刚写完新的同步基线，
     // 必须重新读一次，绝不能用锁前的旧快照把 synced_* 覆盖回去。
     let mut runtime = load_runtime_status(&state.store);
-    let client = WebDavClient::new(
-        WebDavConfig {
-            base_url: cloud.base_url,
-            username: cloud.username,
-            password: password.unwrap_or_default(),
-            remote_dir: cloud.remote_dir,
-        },
-        proxy.as_ref(),
-    )?;
+    let connection = CloudConnection {
+        cloud: cloud.clone(),
+        webdav_password: password.unwrap_or_default(),
+        oss_secret: oss_secret.unwrap_or_default(),
+    };
+    let client = client_for(&connection, proxy.as_ref())?;
     let remote = match client.head() {
         Ok(remote) => remote,
         Err(error) => {
@@ -433,6 +452,7 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
             return Ok(CloudStatus {
                 configured,
                 has_password,
+                provider: cloud.provider,
                 auto_upload: cloud.auto_upload,
                 auto_download: cloud.auto_download,
                 upload_delay_hours: cloud.upload_delay_hours,
@@ -501,6 +521,7 @@ pub fn status(state: &AppState) -> Result<CloudStatus, AppError> {
     Ok(CloudStatus {
         configured,
         has_password,
+        provider: cloud.provider,
         auto_upload: cloud.auto_upload,
         auto_download: cloud.auto_download,
         upload_delay_hours: cloud.upload_delay_hours,
@@ -528,97 +549,193 @@ pub struct CloudRestoreReport {
     pub remote_modified_at: Option<i64>,
 }
 
-/// 用表单里的候选连接参数测一次远端；密码 `None` 时沿用已保存的密钥。
+/// 用表单里的候选连接参数测一次远端；密码 / Secret 为 `None` 时沿用已保存的密钥。
 pub fn test_connection(
     state: &AppState,
-    base_url: &str,
-    username: &str,
-    password: Option<&str>,
-    remote_dir: &str,
+    input: &CloudSettingsInput,
 ) -> Result<u64, AppError> {
-    let password = match password {
-        Some(value) if !value.is_empty() => value.to_string(),
-        _ => {
-            let secrets = state
-                .secrets
-                .lock()
-                .map_err(|_| AppError::Cloud("读取云备份密钥失败".into()))?;
-            secrets
-                .get(&cloud_secret_ref())
-                .map(str::to_string)
-                .unwrap_or_default()
-        }
-    };
-    if password.trim().is_empty() {
-        return Err(AppError::InvalidInput("请填写 WebDAV 密码".into()));
-    }
     let proxy = state.webdav_proxy_config()?;
     let _guard = state
         .cloud_ops
         .lock()
         .map_err(|_| AppError::Cloud("云备份任务锁失败".into()))?;
-    let client = WebDavClient::new(
-        WebDavConfig {
-            base_url: base_url.trim().to_string(),
-            username: username.trim().to_string(),
-            password,
-            remote_dir: remote_dir.trim().to_string(),
-        },
-        proxy.as_ref(),
-    )?;
     let started = Instant::now();
-    client.test()?;
+    match input.provider {
+        CloudProvider::Webdav => {
+            let password = match input.password.as_deref() {
+                Some(value) if !value.is_empty() => value.to_string(),
+                _ => {
+                    let secrets = state
+                        .secrets
+                        .lock()
+                        .map_err(|_| AppError::Cloud("读取云备份密钥失败".into()))?;
+                    secrets
+                        .get(&cloud_secret_ref())
+                        .map(str::to_string)
+                        .unwrap_or_default()
+                }
+            };
+            if password.trim().is_empty() {
+                return Err(AppError::InvalidInput("请填写 WebDAV 密码".into()));
+            }
+            let client = WebDavClient::new(
+                WebDavConfig {
+                    base_url: input.base_url.trim().to_string(),
+                    username: input.username.trim().to_string(),
+                    password,
+                    remote_dir: input.remote_dir.trim().to_string(),
+                },
+                proxy.as_ref(),
+            )?;
+            client.test()?;
+        }
+        CloudProvider::Oss => {
+            let secret = match input.oss_access_key_secret.as_deref() {
+                Some(value) if !value.is_empty() => value.to_string(),
+                _ => {
+                    let secrets = state
+                        .secrets
+                        .lock()
+                        .map_err(|_| AppError::Cloud("读取云备份密钥失败".into()))?;
+                    secrets
+                        .get(&oss_secret_ref())
+                        .map(str::to_string)
+                        .unwrap_or_default()
+                }
+            };
+            if secret.trim().is_empty() {
+                return Err(AppError::InvalidInput(
+                    "请填写阿里云 AccessKey Secret".into(),
+                ));
+            }
+            let client = OssClient::new(
+                OssConfig {
+                    region: input.oss_region.trim().to_string(),
+                    bucket: input.oss_bucket.trim().to_string(),
+                    access_key_id: input.oss_access_key_id.trim().to_string(),
+                    access_key_secret: secret,
+                    prefix: input.oss_prefix.trim().to_string(),
+                    endpoint: None,
+                },
+                proxy.as_ref(),
+            )?;
+            client.test()?;
+        }
+    }
     clear_auth_pause(state);
     Ok(started.elapsed().as_millis() as u64)
 }
 
 struct CloudConnection {
     cloud: CloudBackupSettings,
-    password: String,
+    webdav_password: String,
+    oss_secret: String,
 }
 
 fn read_connection(state: &AppState) -> Result<CloudConnection, AppError> {
-    let cloud = {
-        let settings = state
-            .settings
-            .lock()
-            .map_err(|_| AppError::Cloud("读取云备份设置失败".into()))?;
-        settings.cloud.clone()
+    let (cloud, password, oss_secret) = read_cloud_settings(state)?;
+    let webdav_password = password.unwrap_or_default();
+    let oss_secret = oss_secret.unwrap_or_default();
+    let ready = match cloud.provider {
+        CloudProvider::Webdav => {
+            !cloud.base_url.trim().is_empty()
+                && !cloud.username.trim().is_empty()
+                && !webdav_password.trim().is_empty()
+        }
+        CloudProvider::Oss => {
+            !cloud.oss_region.trim().is_empty()
+                && !cloud.oss_bucket.trim().is_empty()
+                && !cloud.oss_access_key_id.trim().is_empty()
+                && !oss_secret.trim().is_empty()
+        }
     };
-    let password = {
-        let secrets = state
-            .secrets
-            .lock()
-            .map_err(|_| AppError::Cloud("读取云备份密钥失败".into()))?;
-        secrets
-            .get(&cloud_secret_ref())
-            .map(str::to_string)
-            .unwrap_or_default()
-    };
-    if cloud.base_url.trim().is_empty()
-        || cloud.username.trim().is_empty()
-        || password.trim().is_empty()
-    {
-        return Err(AppError::InvalidInput(
-            "请先配置完整的 WebDAV 云备份".into(),
-        ));
+    if !ready {
+        return Err(AppError::InvalidInput(match cloud.provider {
+            CloudProvider::Webdav => "请先配置完整的 WebDAV 云备份".into(),
+            CloudProvider::Oss => "请先配置完整的阿里云 OSS 云备份".into(),
+        }));
     }
-    Ok(CloudConnection { cloud, password })
+    Ok(CloudConnection {
+        cloud,
+        webdav_password,
+        oss_secret,
+    })
+}
+
+/// 云备份客户端：两种通道暴露同一组操作，同步流水线不关心具体协议。
+enum CloudClient {
+    WebDav(WebDavClient),
+    Oss(OssClient),
+}
+
+impl CloudClient {
+    fn head(&self) -> Result<RemoteObject, AppError> {
+        match self {
+            Self::WebDav(client) => client.head(),
+            Self::Oss(client) => client.head(),
+        }
+    }
+
+    fn get_manifest(&self) -> Result<Option<Vec<u8>>, AppError> {
+        match self {
+            Self::WebDav(client) => client.get_manifest(),
+            Self::Oss(client) => client.get_manifest(),
+        }
+    }
+
+    fn put_manifest(&self, bytes: &[u8]) -> Result<RemoteObject, AppError> {
+        match self {
+            Self::WebDav(client) => client.put_manifest(bytes),
+            Self::Oss(client) => client.put_manifest(bytes),
+        }
+    }
+
+    fn put(&self, source: &Path) -> Result<RemoteObject, AppError> {
+        match self {
+            Self::WebDav(client) => client.put(source),
+            Self::Oss(client) => client.put(source),
+        }
+    }
+
+    fn get_to_file(
+        &self,
+        dest: &Path,
+        max_bytes: u64,
+        on_progress: Option<&dyn Fn(u64, u64)>,
+    ) -> Result<DownloadOutcome, AppError> {
+        match self {
+            Self::WebDav(client) => client.get_to_file(dest, max_bytes, on_progress),
+            Self::Oss(client) => client.get_to_file(dest, max_bytes, on_progress),
+        }
+    }
 }
 
 fn client_for(
     connection: &CloudConnection,
     proxy: Option<&ProxyConfig>,
-) -> Result<WebDavClient, AppError> {
-    WebDavClient::new(
-        WebDavConfig {
-            base_url: connection.cloud.base_url.clone(),
-            username: connection.cloud.username.clone(),
-            password: connection.password.clone(),
-            remote_dir: connection.cloud.remote_dir.clone(),
-        },
-        proxy,
-    )
+) -> Result<CloudClient, AppError> {
+    match connection.cloud.provider {
+        CloudProvider::Webdav => Ok(CloudClient::WebDav(WebDavClient::new(
+            WebDavConfig {
+                base_url: connection.cloud.base_url.clone(),
+                username: connection.cloud.username.clone(),
+                password: connection.webdav_password.clone(),
+                remote_dir: connection.cloud.remote_dir.clone(),
+            },
+            proxy,
+        )?)),
+        CloudProvider::Oss => Ok(CloudClient::Oss(OssClient::new(
+            OssConfig {
+                region: connection.cloud.oss_region.clone(),
+                bucket: connection.cloud.oss_bucket.clone(),
+                access_key_id: connection.cloud.oss_access_key_id.clone(),
+                access_key_secret: connection.oss_secret.clone(),
+                prefix: connection.cloud.oss_prefix.clone(),
+                endpoint: None,
+            },
+            proxy,
+        )?)),
+    }
 }
 
 /// 连接代次未变才允许回写运行状态：连接参数一旦变化，旧任务的同步与观测结果都不再可信。
@@ -683,6 +800,7 @@ fn status_from_remote(
     CloudStatus {
         configured: true,
         has_password: true,
+        provider: connection.cloud.provider,
         auto_upload: connection.cloud.auto_upload,
         auto_download: connection.cloud.auto_download,
         upload_delay_hours: connection.cloud.upload_delay_hours,
@@ -1333,6 +1451,27 @@ mod tests {
             base_url: server.base_url(),
             username: "me".into(),
             remote_dir: "ccswitchx".into(),
+            ..CloudBackupSettings::default()
+        }
+    }
+
+    /// 测试连接的输入：默认 WebDAV，OSS 字段留空。
+    fn webdav_test_input(base_url: &str, password: Option<&str>) -> CloudSettingsInput {
+        CloudSettingsInput {
+            provider: CloudProvider::Webdav,
+            enabled: false,
+            auto_upload: false,
+            auto_download: false,
+            upload_delay_hours: 1,
+            base_url: base_url.into(),
+            username: "me".into(),
+            password: password.map(str::to_string),
+            remote_dir: "ccswitchx".into(),
+            oss_region: String::new(),
+            oss_bucket: String::new(),
+            oss_access_key_id: String::new(),
+            oss_access_key_secret: None,
+            oss_prefix: String::new(),
         }
     }
 
@@ -1682,9 +1821,12 @@ mod tests {
     fn test_connection_rejects_wrong_password() {
         let server = FakeWebDav::start("me", "pw");
         let state = test_state(config_for(&server), Some("pw"));
-        let error = test_connection(&state, &server.base_url(), "me", Some("wrong"), "ccswitchx")
-            .unwrap_err()
-            .to_string();
+        let error = test_connection(
+            &state,
+            &webdav_test_input(&server.base_url(), Some("wrong")),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("认证失败"));
         assert!(!error.contains("wrong"));
     }
@@ -1694,7 +1836,7 @@ mod tests {
         let server = FakeWebDav::start("me", "pw");
         let state = test_state(config_for(&server), Some("pw"));
         let latency =
-            test_connection(&state, &server.base_url(), "me", Some("pw"), "ccswitchx").unwrap();
+            test_connection(&state, &webdav_test_input(&server.base_url(), Some("pw"))).unwrap();
         assert!(latency < 5_000);
     }
 
@@ -1817,7 +1959,7 @@ mod tests {
         };
 
         save_runtime_status(&state.store, &paused).unwrap();
-        test_connection(&state, &server.base_url(), "me", Some("pw"), "ccswitchx").unwrap();
+        test_connection(&state, &webdav_test_input(&server.base_url(), Some("pw"))).unwrap();
         assert!(
             load_runtime_status(&state.store)
                 .auth_paused_until

@@ -4,6 +4,7 @@ import { BackupsPanel } from "../panels/BackupsPanel";
 import { api } from "../lib/api";
 import type {
   BackupSettings,
+  CloudSettingsInput,
   CloudSettingsView,
   CloudStatus,
   GitStatus,
@@ -66,7 +67,8 @@ const settings: BackupSettings = {
   intervalHours: 24,
   retainCount: 10,
   git: {
-    enabled: true,
+    // 默认不启用，标签页初始落在 WebDAV；Git 用例单独 mock enabled。
+    enabled: false,
     autoCommit: true,
     autoPull: true,
     remote: "git@github.com:me/assets.git",
@@ -103,15 +105,22 @@ const cloudView: CloudSettingsView = {
   autoUpload: false,
   autoDownload: false,
   uploadDelayHours: 1,
+  provider: "webdav",
   baseUrl: "https://dav.example.com/dav",
   username: "me",
   remoteDir: "ccswitchx",
   hasPassword: true,
+  ossRegion: "",
+  ossBucket: "",
+  ossAccessKeyId: "",
+  ossPrefix: "ccswitchx",
+  hasOssSecret: false,
 };
 
 const cloudStatus: CloudStatus = {
   configured: true,
   hasPassword: true,
+  provider: "webdav",
   autoUpload: false,
   autoDownload: false,
   uploadDelayHours: 1,
@@ -192,9 +201,14 @@ function mockBase(git: GitStatus = healthyGit) {
       autoUpload: false,
       autoDownload: false,
       uploadDelayHours: 1,
+      provider: "webdav",
       baseUrl: "",
       username: "",
       remoteDir: "ccswitchx",
+      ossRegion: "",
+      ossBucket: "",
+      ossAccessKeyId: "",
+      ossPrefix: "ccswitchx",
     },
   });
   vi.mocked(api.deleteBackupCategory).mockResolvedValue(1024);
@@ -215,6 +229,33 @@ function mockBase(git: GitStatus = healthyGit) {
     state: "idle",
     conflictFiles: [],
   });
+}
+
+/** 完整云设置输入：未被覆盖的字段取 mock 里的 WebDAV 默认值。 */
+function cloudInput(
+  overrides: Partial<CloudSettingsInput> = {},
+): CloudSettingsInput {
+  return {
+    provider: "webdav",
+    enabled: false,
+    autoUpload: false,
+    autoDownload: false,
+    uploadDelayHours: 1,
+    baseUrl: cloudView.baseUrl,
+    username: cloudView.username,
+    password: null,
+    remoteDir: cloudView.remoteDir,
+    ossRegion: "",
+    ossBucket: "",
+    ossAccessKeyId: "",
+    ossAccessKeySecret: null,
+    ossPrefix: "ccswitchx",
+    ...overrides,
+  };
+}
+
+function openTab(name: "Git 备份" | "WebDAV" | "阿里云 OSS") {
+  fireEvent.click(screen.getByRole("button", { name }));
 }
 
 beforeEach(() => {
@@ -288,34 +329,28 @@ test("saves retention policy", async () => {
   );
 });
 
-test("remote backup method is mutually exclusive", async () => {
+test("enables git from its tab", async () => {
   render(<BackupsPanel />);
   await screen.findByText(snapshot.name);
 
-  fireEvent.click(screen.getByRole("button", { name: "不启用" }));
+  openTab("Git 备份");
+  fireEvent.click(screen.getByRole("button", { name: "启用 Git 备份" }));
   await waitFor(() =>
     expect(api.setBackupSettings).toHaveBeenCalledWith({
       ...settings,
-      git: { ...settings.git, enabled: false },
+      git: { ...settings.git, enabled: true },
     }),
   );
 });
 
-test("enables webdav through the method selector", async () => {
+test("enables webdav from its tab", async () => {
   render(<BackupsPanel />);
   await screen.findByText("云备份（WebDAV）");
-  fireEvent.click(screen.getByRole("button", { name: "WebDAV 云备份" }));
+  fireEvent.click(screen.getByRole("button", { name: "启用 WebDAV 备份" }));
   await waitFor(() =>
-    expect(api.setCloudSettings).toHaveBeenCalledWith({
-      baseUrl: cloudView.baseUrl,
-      username: cloudView.username,
-      password: null,
-      remoteDir: cloudView.remoteDir,
-      enabled: true,
-      autoUpload: false,
-      autoDownload: false,
-      uploadDelayHours: 1,
-    }),
+    expect(api.setCloudSettings).toHaveBeenCalledWith(
+      cloudInput({ enabled: true }),
+    ),
   );
 });
 
@@ -326,30 +361,16 @@ test("toggles auto upload and auto download independently", async () => {
 
   fireEvent.click(screen.getByLabelText("自动上传"));
   await waitFor(() =>
-    expect(api.setCloudSettings).toHaveBeenCalledWith({
-      baseUrl: cloudView.baseUrl,
-      username: cloudView.username,
-      password: null,
-      remoteDir: cloudView.remoteDir,
-      enabled: true,
-      autoUpload: true,
-      autoDownload: false,
-      uploadDelayHours: 1,
-    }),
+    expect(api.setCloudSettings).toHaveBeenCalledWith(
+      cloudInput({ enabled: true, autoUpload: true }),
+    ),
   );
 
   fireEvent.click(screen.getByLabelText("自动下载"));
   await waitFor(() =>
-    expect(api.setCloudSettings).toHaveBeenCalledWith({
-      baseUrl: cloudView.baseUrl,
-      username: cloudView.username,
-      password: null,
-      remoteDir: cloudView.remoteDir,
-      enabled: true,
-      autoUpload: false,
-      autoDownload: true,
-      uploadDelayHours: 1,
-    }),
+    expect(api.setCloudSettings).toHaveBeenCalledWith(
+      cloudInput({ enabled: true, autoDownload: true }),
+    ),
   );
 });
 
@@ -360,16 +381,9 @@ test("changes the upload delay", async () => {
 
   fireEvent.change(screen.getByLabelText("上传延迟"), { target: { value: "6" } });
   await waitFor(() =>
-    expect(api.setCloudSettings).toHaveBeenCalledWith({
-      baseUrl: cloudView.baseUrl,
-      username: cloudView.username,
-      password: null,
-      remoteDir: cloudView.remoteDir,
-      enabled: true,
-      autoUpload: false,
-      autoDownload: false,
-      uploadDelayHours: 6,
-    }),
+    expect(api.setCloudSettings).toHaveBeenCalledWith(
+      cloudInput({ enabled: true, uploadDelayHours: 6 }),
+    ),
   );
 });
 
@@ -386,8 +400,10 @@ test("disables git backup until the remote is verified", async () => {
     remoteVerified: false,
   });
   render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  openTab("Git 备份");
   expect(await screen.findByText("远端未验证")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Git 备份" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "启用 Git 备份" })).toBeDisabled();
 });
 
 test("verifies the filled remote before enabling git backup", async () => {
@@ -396,6 +412,8 @@ test("verifies the filled remote before enabling git backup", async () => {
     remoteVerified: false,
   });
   render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  openTab("Git 备份");
   await screen.findByText("远端未验证");
   fireEvent.click(screen.getByRole("button", { name: "验证远端" }));
   await waitFor(() =>
@@ -417,6 +435,8 @@ test("disables git actions when git is unavailable", async () => {
     state: "unavailable",
   });
   render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  openTab("Git 备份");
   expect(await screen.findByText(/未检测到 Git/)).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "初始化 Git 备份" })).toBeNull();
 });
@@ -429,6 +449,8 @@ test("conflict resolution must be confirmed before force push", async () => {
     lastError: "拉取冲突",
   });
   render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  openTab("Git 备份");
   await screen.findByText(/自动同步已暂停/);
   fireEvent.click(screen.getByRole("button", { name: "保留本地（强推）" }));
   const dialog = await screen.findByRole("alertdialog", {
@@ -608,18 +630,9 @@ test("saves cloud settings without overwriting the saved password", async () => 
   fireEvent.change(screen.getByLabelText("WebDAV 地址"), {
     target: { value: "https://dav.example.com/dav" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存云备份" }));
+  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
   await waitFor(() =>
-    expect(api.setCloudSettings).toHaveBeenCalledWith({
-      baseUrl: "https://dav.example.com/dav",
-      username: "me",
-      password: null,
-      remoteDir: "ccswitchx",
-      enabled: false,
-      autoUpload: false,
-      autoDownload: false,
-      uploadDelayHours: 1,
-    }),
+    expect(api.setCloudSettings).toHaveBeenCalledWith(cloudInput()),
   );
 });
 
@@ -742,20 +755,104 @@ test("shows download progress while restoring", async () => {
   expect(within(dialog).getByText(/25%/)).toBeInTheDocument();
 });
 
+test("keeps unsaved drafts when switching between cloud tabs", async () => {
+  render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  fireEvent.change(screen.getByLabelText("WebDAV 地址"), {
+    target: { value: "https://draft.example.com/dav" },
+  });
+
+  openTab("阿里云 OSS");
+  fireEvent.change(screen.getByLabelText("地域"), {
+    target: { value: "cn-beijing" },
+  });
+
+  openTab("WebDAV");
+  expect(screen.getByLabelText("WebDAV 地址")).toHaveValue(
+    "https://draft.example.com/dav",
+  );
+  openTab("阿里云 OSS");
+  expect(screen.getByLabelText("地域")).toHaveValue("cn-beijing");
+});
+
+test("saves and enables the aliyun oss channel", async () => {
+  const ossView: CloudSettingsView = {
+    ...cloudView,
+    ossRegion: "cn-hangzhou",
+    ossBucket: "my-bucket",
+    ossAccessKeyId: "AKID",
+    ossPrefix: "ccswitchx",
+    hasOssSecret: true,
+  };
+  vi.mocked(api.getCloudSettings).mockResolvedValue(ossView);
+  vi.mocked(api.setCloudSettings).mockResolvedValue(ossView);
+  vi.mocked(api.getCloudStatus).mockResolvedValue({
+    ...cloudStatus,
+    provider: "oss",
+    configured: false,
+  });
+  vi.mocked(api.getCloudStatusCached).mockResolvedValue({
+    ...cloudStatus,
+    provider: "oss",
+    configured: false,
+    fromCache: true,
+  });
+  render(<BackupsPanel />);
+  await screen.findByText("云备份（WebDAV）");
+  openTab("阿里云 OSS");
+  await screen.findByText("云备份（阿里云 OSS）");
+
+  fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+  await waitFor(() =>
+    expect(api.setCloudSettings).toHaveBeenCalledWith(
+      cloudInput({
+        provider: "webdav",
+        ossRegion: "cn-hangzhou",
+        ossBucket: "my-bucket",
+        ossAccessKeyId: "AKID",
+        ossAccessKeySecret: null,
+      }),
+    ),
+  );
+
+  const enable = screen.getByRole("button", { name: "启用 阿里云 OSS 备份" });
+  await waitFor(() => expect(enable).toBeEnabled());
+  fireEvent.click(enable);
+  await waitFor(() =>
+    expect(api.setCloudSettings).toHaveBeenCalledWith(
+      cloudInput({
+        provider: "oss",
+        enabled: true,
+        ossRegion: "cn-hangzhou",
+        ossBucket: "my-bucket",
+        ossAccessKeyId: "AKID",
+        ossAccessKeySecret: null,
+      }),
+    ),
+  );
+});
+
 test("disables cloud actions without config", async () => {
   vi.mocked(api.getCloudSettings).mockResolvedValue({
     enabled: false,
     autoUpload: false,
     autoDownload: false,
     uploadDelayHours: 1,
+    provider: "webdav",
     baseUrl: "",
     username: "",
     remoteDir: "ccswitchx",
     hasPassword: false,
+    ossRegion: "",
+    ossBucket: "",
+    ossAccessKeyId: "",
+    ossPrefix: "ccswitchx",
+    hasOssSecret: false,
   });
   const unconfigured: CloudStatus = {
     configured: false,
     hasPassword: false,
+    provider: "webdav",
     autoUpload: false,
     autoDownload: false,
     uploadDelayHours: 1,
@@ -779,5 +876,5 @@ test("disables cloud actions without config", async () => {
   expect(await screen.findByText("未配置")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "立即上传" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "从云端恢复" })).toBeDisabled();
-  expect(screen.getByRole("button", { name: "WebDAV 云备份" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "启用 WebDAV 备份" })).toBeDisabled();
 });

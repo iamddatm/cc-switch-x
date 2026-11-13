@@ -151,9 +151,9 @@ export const api = {
 
   getCloudSettings: () => invoke<CloudSettingsView>("get_cloud_settings"),
   setCloudSettings: (input: CloudSettingsInput) =>
-    invoke<CloudSettingsView>("set_cloud_settings", { ...input }),
+    invoke<CloudSettingsView>("set_cloud_settings", { input }),
   testCloudConnection: (input: CloudTestInput) =>
-    invoke<number>("test_cloud_connection", { ...input }),
+    invoke<number>("test_cloud_connection", { input }),
   getCloudStatus: () => invoke<CloudStatus>("get_cloud_status"),
   getCloudStatusCached: () => invoke<CloudStatus>("get_cloud_status_cached"),
   cloudUploadNow: () => invoke<CloudStatus>("cloud_upload_now"),
