@@ -813,6 +813,7 @@ export function SkillsPanel() {
               refreshAll();
               void rescanUnmanaged();
             }}
+            onDeleted={() => void rescanUnmanaged()}
           />
         </div>
       )}

@@ -16,6 +16,7 @@ pub mod project_sync;
 pub mod scan;
 pub mod sessions;
 pub mod settings;
+pub mod skill_discard;
 pub mod skill_discovery;
 pub mod skill_local_scan;
 pub mod skill_repair;

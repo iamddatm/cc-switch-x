@@ -8,6 +8,7 @@ use crate::error::AppError;
 use crate::import::mcp::ConflictPolicy;
 use crate::net::HttpFetcher;
 use crate::services::settings as settings_service;
+use crate::services::skill_discard::{self, DiscardReport};
 use crate::services::skill_discovery::{
     self, SkillDiscoveryReport, SkillsShSearchResult, SkillsShTrendingResult,
 };
@@ -446,6 +447,28 @@ pub async fn import_unmanaged_skills(
     rebuild_index(&state)?;
     state.notify_git("skill: import unmanaged");
     Ok(report)
+}
+
+/// 删除未纳管的 Skill 副本：链接只解链，真目录先整份留底再删；不碰真源。
+///
+/// 目录名是唯一入口，实际路径由服务端重新扫描定位，不信任前端传来的路径；
+/// 写任务互斥与 maintenance 锁照 `import_unmanaged_skills` 那一套。
+#[tauri::command]
+pub async fn discard_unmanaged_skills(
+    state: State<'_, AppState>,
+    directories: Vec<String>,
+) -> Result<DiscardReport, AppError> {
+    let _guard = state.begin_skill_job()?;
+    let store = state.store.clone();
+    let home = state.home.clone();
+    let maintenance = state.maintenance.clone();
+    run_blocking(move || {
+        let _write = maintenance
+            .read()
+            .map_err(|_| AppError::InvalidInput("maintenance 锁失败".into()))?;
+        skill_discard::discard(&store, &home, &directories)
+    })
+    .await
 }
 
 #[cfg(test)]

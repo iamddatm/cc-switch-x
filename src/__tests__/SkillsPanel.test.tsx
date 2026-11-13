@@ -34,6 +34,7 @@ vi.mock("../lib/api", () => ({
     listSkillsShTrending: vi.fn(),
     scanUnmanagedSkills: vi.fn(),
     importUnmanagedSkills: vi.fn(),
+    discardUnmanagedSkills: vi.fn(),
   },
 }));
 
@@ -151,6 +152,7 @@ beforeEach(() => {
     warnings: [],
   });
   vi.mocked(api.importUnmanagedSkills).mockResolvedValue({ outcomes: [] });
+  vi.mocked(api.discardUnmanagedSkills).mockResolvedValue({ outcomes: [] });
 });
 
 test("shows the link kind the backend actually used", async () => {
@@ -904,6 +906,69 @@ test("a failed takeover is shown verbatim instead of a success line", async () =
   expect(await screen.findByText(/写入真源失败：磁盘满/)).toBeInTheDocument();
   expect(screen.getByText(/已保留原目录/)).toBeInTheDocument();
   expect(screen.getByText(/^hand-made：失败/)).toBeInTheDocument();
+});
+
+test("deleting an unmanaged copy spells out what happens to each spot", async () => {
+  vi.mocked(api.scanUnmanagedSkills).mockResolvedValue(unmanagedFixture());
+  vi.mocked(api.discardUnmanagedSkills).mockResolvedValue({
+    outcomes: [
+      {
+        directory: "hand-made",
+        deleted: [
+          {
+            sourceId: "claude",
+            label: "Claude Code",
+            path: "C:/Users/me/.claude/skills/hand-made",
+            status: "removedDirectory",
+            detail: "已删除原目录（删除前已整份留底）",
+            backupPath: "store/backups/skills/1_adopt_claude_hand-made",
+          },
+        ],
+      },
+    ],
+  });
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("tab", { name: /未纳管/ }));
+
+  fireEvent.click(await screen.findByRole("button", { name: "删除 手工装的" }));
+  const dialog = await screen.findByRole("alertdialog");
+  // 确认框必须把每一处副本和删除方式讲清楚：链接只解链，目录先留底。
+  expect(within(dialog).getAllByText("目录，整份留底后删除").length).toBe(2);
+  fireEvent.click(within(dialog).getByRole("button", { name: "删除副本" }));
+
+  await waitFor(() => expect(api.discardUnmanagedSkills).toHaveBeenCalledWith(["hand-made"]));
+  expect(await screen.findByText(/1_adopt_claude_hand-made/)).toBeInTheDocument();
+  // 删完要重扫：这份内容已经不在盘上了。
+  await waitFor(() => expect(api.scanUnmanagedSkills).toHaveBeenCalledTimes(2));
+});
+
+test("a refused delete keeps the reason instead of claiming success", async () => {
+  vi.mocked(api.scanUnmanagedSkills).mockResolvedValue(unmanagedFixture());
+  vi.mocked(api.discardUnmanagedSkills).mockResolvedValue({
+    outcomes: [
+      {
+        directory: "hand-made",
+        deleted: [
+          {
+            sourceId: "claude",
+            label: "Claude Code",
+            path: "C:/Users/me/.claude/skills/hand-made",
+            status: "refused",
+            detail: "这一处归我们管，不走删除；请在已安装里停用或卸载",
+          },
+        ],
+      },
+    ],
+  });
+  render(<SkillsPanel />);
+  fireEvent.click(await screen.findByRole("tab", { name: /未纳管/ }));
+
+  fireEvent.click(await screen.findByRole("button", { name: "删除 手工装的" }));
+  const dialog = await screen.findByRole("alertdialog");
+  fireEvent.click(within(dialog).getByRole("button", { name: "删除副本" }));
+
+  expect(await screen.findByText(/未删除/)).toBeInTheDocument();
+  expect(screen.getByText(/请在已安装里停用或卸载/)).toBeInTheDocument();
 });
 
 test("conflicts only offer saving under a new id and never take over", async () => {

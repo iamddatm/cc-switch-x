@@ -63,6 +63,7 @@ import type {
   SessionSearchHit,
   SessionSummary,
   Theme,
+  DiscardReport,
   UnmanagedImportInput,
   UnmanagedImportReport,
   UnmanagedSkillReport,
@@ -196,6 +197,9 @@ export const api = {
   /** 收进真源，并按选择把盘上那份外来目录接管成指向真源的部署。 */
   importUnmanagedSkills: (inputs: UnmanagedImportInput[], policy: ConflictPolicy) =>
     invoke<UnmanagedImportReport>("import_unmanaged_skills", { inputs, policy }),
+  /** 删除盘上那份未纳管副本：链接只解链，真目录先整份留底再删；不碰真源。 */
+  discardUnmanagedSkills: (directories: string[]) =>
+    invoke<DiscardReport>("discard_unmanaged_skills", { directories }),
   listSkillsShTrending: (page: number) =>
     invoke<SkillsShTrendingResult>("list_skills_sh_trending", { page }),
   checkAppUpdate: () => invoke<UpdateInfo | null>("check_app_update"),

@@ -695,6 +695,29 @@ export interface UnmanagedImportReport {
   outcomes: UnmanagedImportOutcome[];
 }
 
+/** 未纳管副本的一处删除结局。 */
+export interface DiscardLocationOutcome {
+  sourceId: string | null;
+  label: string;
+  path: string;
+  /** removedLink（只解链）/ removedDirectory（先整份留底再删）/ missing / refused */
+  status: "removedLink" | "removedDirectory" | "missing" | "refused";
+  detail?: string | null;
+  /** 真目录删除前的整份留底；链接只解链，没有备份。 */
+  backupPath?: string | null;
+}
+
+export interface DiscardOutcome {
+  directory: string;
+  deleted: DiscardLocationOutcome[];
+  /** 本次扫描里找不到该目录时的原因。 */
+  error?: string | null;
+}
+
+export interface DiscardReport {
+  outcomes: DiscardOutcome[];
+}
+
 // ── 项目级 Skills ─────────────────────────────────────────────────
 
 export type ProjectScope = "global" | "project";

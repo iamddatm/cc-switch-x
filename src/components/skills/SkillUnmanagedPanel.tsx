@@ -9,6 +9,7 @@ import { Notice } from "../ui/Notice";
 import { SearchField } from "../ui/SearchField";
 import { api } from "../../lib/api";
 import type {
+  DiscardReport,
   FoundLocation,
   UnmanagedImportReport,
   UnmanagedSkill,
@@ -23,6 +24,9 @@ const STATUS_LABELS: Record<string, string> = {
   linked: "已接管",
   already: "本来就是我们落的",
   refused: "未接管",
+  removedLink: "已解链",
+  removedDirectory: "已删除目录",
+  missing: "已不在",
 };
 
 function statusLabel(status: string): string {
@@ -69,12 +73,38 @@ function summarize(
   });
 }
 
+/** 删除结果折算成提示；拒绝与失败原样可见，不压成一句「已删除」。 */
+function summarizeDiscard(
+  report: DiscardReport | null,
+): { key: string; tone: "success" | "warning" | "danger"; text: string }[] {
+  if (!report) return [];
+  const label = (status: string) => (status === "refused" ? "未删除" : statusLabel(status));
+  return report.outcomes.map((outcome, index) => {
+    const details = outcome.deleted.map(
+      (item) =>
+        `${item.label}：${label(item.status)}${item.detail ? `（${item.detail}）` : ""}` +
+        (item.backupPath ? `，留底 ${item.backupPath}` : ""),
+    );
+    if (outcome.error) details.push(outcome.error);
+    const refused = outcome.deleted.some((item) => item.status === "refused");
+    return {
+      key: `discard-${index}`,
+      tone: outcome.error || refused ? ("warning" as const) : ("success" as const),
+      text: `${outcome.directory || "所选 Skill"}：${
+        details.length > 0 ? details.join("；") : "没有可删除的副本"
+      }`,
+    };
+  });
+}
+
 /**
- * 「未纳管」视图：列出各 agent 的 skills 落点里**不是我们落的** Skill，查看并导入。
+ * 「未纳管」视图：列出各 agent 的 skills 落点里**不是我们落的** Skill，查看、导入或删除。
  *
- * 扫描是只读的、由父面板持有（页签计数与横幅要和这里共用一份结果）；本组件只管查看与导入。
+ * 扫描是只读的、由父面板持有（页签计数与横幅要和这里共用一份结果）；本组件只管查看与写入。
  * 导入的落盘口径见 `src-tauri/src/services/skill_takeover.rs`：先收进中央库真源，
  * 再按勾选把盘上那份换成指向真源的部署（真目录先整份留底，链接只解链不删真身）。
+ * 删除的落盘口径见 `src-tauri/src/services/skill_discard.rs`：链接只解链，
+ * 真目录先整份留底再删；两者都不碰中央库真源。
  */
 export function SkillUnmanagedPanel({
   report,
@@ -82,19 +112,23 @@ export function SkillUnmanagedPanel({
   error,
   onRescan,
   onImported,
+  onDeleted,
 }: {
   report: UnmanagedSkillReport | null;
   scanning: boolean;
   error: string | null;
   onRescan: () => void;
   onImported: () => void;
+  onDeleted: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pending, setPending] = useState<UnmanagedSkill[] | null>(null);
   const [takeOver, setTakeOver] = useState<Set<string>>(new Set());
+  const [discardPending, setDiscardPending] = useState<UnmanagedSkill | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<UnmanagedImportReport | null>(null);
+  const [discardResult, setDiscardResult] = useState<DiscardReport | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
 
   const skills = useMemo(() => {
@@ -125,6 +159,7 @@ export function SkillUnmanagedPanel({
   }, [query, report]);
   const locations = useMemo(() => takeoverLocations(pending ?? []), [pending]);
   const outcomeLines = useMemo(() => summarize(result), [result]);
+  const discardLines = useMemo(() => summarizeDiscard(discardResult), [discardResult]);
 
   const toggleOne = (directory: string, checked: boolean) => {
     setSelected((current) => {
@@ -139,6 +174,7 @@ export function SkillUnmanagedPanel({
     if (items.length === 0) return;
     setFailure(null);
     setResult(null);
+    setDiscardResult(null);
     setPending(items);
     // 默认接管「已实测可写」的发现位置，不留一条启不起来的死路；不想要就取消勾选。
     setTakeOver(new Set(takeoverLocations(items).map((found) => found.sourceId as string)));
@@ -174,6 +210,7 @@ export function SkillUnmanagedPanel({
     setBusy(true);
     setFailure(null);
     setResult(null);
+    setDiscardResult(null);
     try {
       const imported = await api.importUnmanagedSkills(
         [{ directory: item.directory, takeOver: [] }],
@@ -185,6 +222,29 @@ export function SkillUnmanagedPanel({
       setFailure(String(reason));
     } finally {
       setBusy(false);
+    }
+  };
+
+  /** 删除盘上那份副本。清单由后端重新扫描定位；链接只解链，真目录先整份留底。 */
+  const runDiscard = async () => {
+    if (!discardPending) return;
+    setBusy(true);
+    setFailure(null);
+    setResult(null);
+    setDiscardResult(null);
+    try {
+      setDiscardResult(await api.discardUnmanagedSkills([discardPending.directory]));
+      setSelected((current) => {
+        const next = new Set(current);
+        next.delete(discardPending.directory);
+        return next;
+      });
+      onDeleted();
+    } catch (reason) {
+      setFailure(String(reason));
+    } finally {
+      setBusy(false);
+      setDiscardPending(null);
     }
   };
 
@@ -209,10 +269,15 @@ export function SkillUnmanagedPanel({
         </span>
       </div>
 
-      {(error || failure || outcomeLines.length > 0) && (
+      {(error || failure || outcomeLines.length > 0 || discardLines.length > 0) && (
         <div className="space-y-2 px-6 pb-3">
           {(error || failure) && <Notice tone="danger">{(error ?? failure) as string}</Notice>}
           {outcomeLines.map((line) => (
+            <Notice key={line.key} tone={line.tone}>
+              {line.text}
+            </Notice>
+          ))}
+          {discardLines.map((line) => (
             <Notice key={line.key} tone={line.tone}>
               {line.text}
             </Notice>
@@ -302,6 +367,7 @@ export function SkillUnmanagedPanel({
                       busy={busy}
                       onChecked={(checked) => toggleOne(item.directory, checked)}
                       onImport={() => askImport([item])}
+                      onDelete={() => setDiscardPending(item)}
                     />
                   ))}
                 </ul>
@@ -332,6 +398,7 @@ export function SkillUnmanagedPanel({
                       importLabel="另存为新 ID"
                       onChecked={() => undefined}
                       onImport={() => void runSaveAsNew(item)}
+                      onDelete={() => setDiscardPending(item)}
                     />
                   ))}
                 </ul>
@@ -418,6 +485,40 @@ export function SkillUnmanagedPanel({
         onConfirm={() => void runImport()}
         onCancel={() => setPending(null)}
       />
+
+      <ConfirmDialog
+        open={discardPending !== null}
+        title={`删除 ${discardPending?.name ?? ""} 的盘上副本？`}
+        pending={busy}
+        danger
+        confirmLabel="删除副本"
+        body={
+          <div className="space-y-3">
+            <p>只删除盘上这份副本，不动中央库真源，也不改启用矩阵。</p>
+            <ul className="max-h-40 space-y-1 overflow-y-auto">
+              {(discardPending?.foundIn ?? []).map((found) => (
+                <li
+                  key={`${found.sourceId ?? "shared"}-${found.path}`}
+                  className="flex items-center gap-2"
+                >
+                  <span className="shrink-0 text-body">{found.label}</span>
+                  <span className="min-w-0 flex-1 truncate font-mono text-caption text-fg-3">
+                    {found.path}
+                  </span>
+                  <span className="shrink-0 text-caption text-fg-3">
+                    {found.linkTarget ? "链接，只解链" : "目录，整份留底后删除"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="text-caption text-fg-3">
+              链接删除不会影响它指向的内容；目录会先整份备份到 backups/skills 再删除。
+            </p>
+          </div>
+        }
+        onConfirm={() => void runDiscard()}
+        onCancel={() => setDiscardPending(null)}
+      />
     </div>
   );
 }
@@ -430,6 +531,7 @@ function SkillRow({
   importLabel = "导入并接管",
   onChecked,
   onImport,
+  onDelete,
 }: {
   item: UnmanagedSkill;
   checked: boolean;
@@ -438,6 +540,7 @@ function SkillRow({
   importLabel?: string;
   onChecked: (checked: boolean) => void;
   onImport: () => void;
+  onDelete: () => void;
 }) {
   const detail = [
     item.description,
@@ -484,6 +587,9 @@ function SkillRow({
         ))}
         <Button size="sm" disabled={busy} onClick={onImport}>
           {importLabel}
+        </Button>
+        <Button size="sm" variant="danger" disabled={busy} aria-label={`删除 ${item.name}`} onClick={onDelete}>
+          删除
         </Button>
       </div>
     </li>

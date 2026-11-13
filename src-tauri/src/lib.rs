@@ -141,6 +141,7 @@ pub fn run() {
             commands::sessions::session_providers,
             commands::sessions::session_resume,
             commands::skills::check_skill_updates,
+            commands::skills::discard_unmanaged_skills,
             commands::skills::discover_available_skills,
             commands::skills::get_skill_repos,
             commands::skills::install_discovered_skill,
