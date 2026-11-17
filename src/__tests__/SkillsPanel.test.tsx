@@ -660,6 +660,83 @@ test("discovery rows can open the matching repo directory on github", async () =
   );
 });
 
+test("installed skills open their github source from the row menu", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([
+    {
+      assetType: "skill",
+      id: "pdf",
+      name: "pdf",
+      updatedAt: 1,
+      hash: "h",
+      origin: {
+        kind: "github",
+        repo: "acme/skills",
+        branch: "main",
+        sourceUrl: "https://github.com/acme/skills",
+        readmeUrl: "https://github.com/acme/skills/blob/main/pdf/SKILL.md",
+        updateAvailable: false,
+        updatable: true,
+      },
+    },
+  ]);
+  render(<SkillsPanel />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "pdf 的更多操作" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "在浏览器打开来源" }));
+
+  await waitFor(() =>
+    expect(api.openExternalUrl).toHaveBeenCalledWith(
+      "https://github.com/acme/skills/blob/main/pdf/SKILL.md",
+    ),
+  );
+});
+
+test("clicking the source badge opens the source without opening the detail", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([
+    {
+      assetType: "skill",
+      id: "pdf",
+      name: "pdf",
+      updatedAt: 1,
+      hash: "h",
+      origin: {
+        kind: "github",
+        repo: "acme/skills",
+        branch: "main",
+        readmeUrl: "https://github.com/acme/skills/blob/main/pdf/SKILL.md",
+        updateAvailable: false,
+        updatable: true,
+      },
+    },
+  ]);
+  render(<SkillsPanel />);
+
+  fireEvent.click(
+    await screen.findByRole("button", { name: "在浏览器打开 acme/skills 的来源" }),
+  );
+
+  await waitFor(() =>
+    expect(api.openExternalUrl).toHaveBeenCalledWith(
+      "https://github.com/acme/skills/blob/main/pdf/SKILL.md",
+    ),
+  );
+  expect(api.readAsset).not.toHaveBeenCalled();
+});
+
+test("right-clicking a row opens the same actions at the pointer", async () => {
+  render(<SkillsPanel />);
+
+  fireEvent.contextMenu(await screen.findByRole("button", { name: "查看 demo" }), {
+    clientX: 40,
+    clientY: 60,
+  });
+
+  const menu = await screen.findByRole("menu", { name: "demo 的操作" });
+  fireEvent.click(within(menu).getByRole("menuitem", { name: "查看" }));
+
+  expect(await screen.findByText("SKILL.md 正文")).toBeInTheDocument();
+});
+
 test("source filter hides skills from other origins", async () => {
   vi.mocked(api.listAssets).mockResolvedValue([
     {

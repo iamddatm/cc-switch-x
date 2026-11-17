@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import { cn } from "../../lib/cn";
 
 export interface AssetRowProps {
@@ -22,6 +22,8 @@ export interface AssetRowProps {
   footer?: string | null;
   footerTone?: "muted" | "warning";
   active?: boolean;
+  /** 右键菜单：由调用方按指针位置弹出可快速访问的操作。 */
+  onContextMenu?: (event: MouseEvent<HTMLDivElement>) => void;
 }
 
 /**
@@ -44,10 +46,12 @@ export function AssetRow({
   footer,
   footerTone = "muted",
   active = false,
+  onContextMenu,
 }: AssetRowProps) {
   return (
     <li className="border-t border-border first:border-t-0">
       <div
+        onContextMenu={onContextMenu}
         className={cn(
           "relative flex h-14 items-center transition-colors duration-150 hover:bg-subtle",
           active && "bg-subtle",

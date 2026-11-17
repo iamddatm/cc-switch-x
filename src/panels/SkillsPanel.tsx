@@ -11,7 +11,7 @@ import { SkillDiscoveryPanel } from "../components/skills/SkillDiscoveryPanel";
 import { SkillDeploymentNotice } from "../components/skills/SkillDeploymentNotice";
 import { SkillInstallSheet } from "../components/skills/SkillInstallSheet";
 import { SkillUnmanagedPanel } from "../components/skills/SkillUnmanagedPanel";
-import { originRepoLabel, SkillSourceBadge } from "../components/skills/SkillSourceBadge";
+import { originRepoLabel, skillSourceUrl, SkillSourceBadge } from "../components/skills/SkillSourceBadge";
 import { SkillFormSheet } from "../components/skills/SkillFormSheet";
 import { SkillRepoFilter } from "../components/skills/SkillRepoFilter";
 import { SkillViewTabs, type SkillView } from "../components/skills/SkillViewTabs";
@@ -22,6 +22,7 @@ import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Checkbox } from "../components/ui/Checkbox";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
+import { ContextMenu } from "../components/ui/ContextMenu";
 import { EmptyState } from "../components/ui/EmptyState";
 import { FeedbackBar } from "../components/ui/FeedbackBar";
 import { Menu, type MenuItem } from "../components/ui/Menu";
@@ -86,6 +87,12 @@ export function SkillsPanel() {
   const [viewing, setViewing] = useState<{ item: AssetSummary; form: SkillForm } | null>(null);
   const [loadingEdit, setLoadingEdit] = useState(false);
   const [deleting, setDeleting] = useState<AssetSummary[] | null>(null);
+  // 右键菜单记下指针位置，弹出与「⋯」相同的操作。
+  const [contextMenu, setContextMenu] = useState<{
+    item: AssetSummary;
+    x: number;
+    y: number;
+  } | null>(null);
   const [pendingDelete, setPendingDelete] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -416,11 +423,25 @@ export function SkillsPanel() {
     }
   };
 
+  const openSource = async (item: AssetSummary) => {
+    const url = skillSourceUrl(item.origin);
+    if (!url) return;
+    setActionError(null);
+    try {
+      await api.openExternalUrl(url);
+    } catch (e) {
+      setActionError(String(e));
+    }
+  };
+
   const rowMenuItems = (item: AssetSummary): MenuItem[] => {
     const menu: MenuItem[] = [
       { label: "查看", onSelect: () => void openView(item) },
       { label: "编辑", onSelect: () => void openEdit(item) },
     ];
+    if (skillSourceUrl(item.origin)) {
+      menu.push({ label: "在浏览器打开来源", onSelect: () => void openSource(item) });
+    }
     if (item.origin?.updatable) {
       menu.push(
         { label: "检查更新", onSelect: () => void checkUpdates([item.id]) },
@@ -742,7 +763,16 @@ export function SkillsPanel() {
                     titleBadges={
                       item.origin?.updateAvailable ? <Badge tone="warning">可更新</Badge> : undefined
                     }
-                    badges={<SkillSourceBadge item={item} />}
+                    badges={
+                      <SkillSourceBadge
+                        item={item}
+                        onOpen={
+                          skillSourceUrl(item.origin)
+                            ? () => void openSource(item)
+                            : undefined
+                        }
+                      />
+                    }
                     agentCells={
                       <AgentColumnCells
                         assetType="skill"
@@ -770,6 +800,14 @@ export function SkillsPanel() {
                     footerTone="warning"
                     openLabel={`查看 ${item.name}`}
                     onOpen={() => void openView(item)}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      setContextMenu({
+                        item,
+                        x: event.clientX,
+                        y: event.clientY,
+                      });
+                    }}
                   />
                 );
               })}
@@ -816,6 +854,16 @@ export function SkillsPanel() {
             onDeleted={() => void rescanUnmanaged()}
           />
         </div>
+      )}
+
+      {contextMenu && (
+        <ContextMenu
+          label={`${contextMenu.item.name} 的操作`}
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={rowMenuItems(contextMenu.item)}
+          onClose={() => setContextMenu(null)}
+        />
       )}
 
       {viewing && (
