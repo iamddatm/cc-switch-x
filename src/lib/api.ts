@@ -38,6 +38,7 @@ import type {
   ProjectSkillsView,
   ProjectSyncReport,
   ProjectView,
+  PromptTarget,
   MigrationDecision,
   ProjectMigrationReport,
   RestoreBackupReport,
@@ -228,6 +229,9 @@ export const api = {
     }),
   deactivatePrompt: (agentId: string) =>
     invoke<boolean>("deactivate_prompt", { agentId }),
+  /** 读取 agent 提示词目标文件的当前内容；文件不存在返回 null（只读，不写盘）。 */
+  readPromptTarget: (agentId: string) =>
+    invoke<PromptTarget | null>("read_prompt_target", { agentId }),
 
   /** 返回实测标签：written / removed / absent；外来内容会直接报错 */
   setRuleEnabled: (id: string, agentId: string, enabled: boolean) =>

@@ -415,6 +415,12 @@ export function enabledFor(agent: AgentStatus, kind: AssetType): string[] {
   }
 }
 
+/** 某个 agent 提示词目标文件的当前内容；只用于编辑器里与真源对比。 */
+export interface PromptTarget {
+  path: string;
+  content: string;
+}
+
 export type DriftKind = "modified" | "missing";
 
 /** 后端 drift::DriftRecord。targetPath 是绝对路径，处置前用户要能看到到底在动哪个文件。 */

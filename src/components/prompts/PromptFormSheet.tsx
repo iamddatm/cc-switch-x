@@ -5,41 +5,42 @@ import { Input, Textarea } from "../ui/Input";
 import { Notice } from "../ui/Notice";
 import { Sheet } from "../ui/Sheet";
 import { api } from "../../lib/api";
-import { renderPrompt, type PromptForm } from "../../lib/canonical";
+import { generatePromptId, renderPrompt, type PromptForm } from "../../lib/canonical";
 import { formatBytes } from "../../lib/format";
+import type { PromptTarget } from "../../types";
 
 export interface PromptFormSheetProps {
   mode: "create" | "edit";
   id: string;
   initial: PromptForm;
+  /** 已有的提示词 ID：新建时用来避免生成重名。 */
+  existingIds: string[];
+  /** 正在编辑的提示词是当前 agent 的启用项时，目标文件的当前内容。 */
+  target?: PromptTarget | null;
   onClose: () => void;
   onSaved: () => void;
 }
-
-const ID_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 export function PromptFormSheet({
   mode,
   id: initialId,
   initial,
+  existingIds,
+  target = null,
   onClose,
   onSaved,
 }: PromptFormSheetProps) {
-  const [id, setId] = useState(initialId);
   const [form, setForm] = useState<PromptForm>(initial);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const bytes = new TextEncoder().encode(form.body).length;
+  // 目标文件写的是正文，真源还多一层 frontmatter，所以只比正文部分。
+  const targetDiffers = target !== null && target.content.trimEnd() !== form.body.trimEnd();
 
   const set = <K extends keyof PromptForm>(key: K, value: PromptForm[K]) =>
     setForm((current) => ({ ...current, [key]: value }));
 
   const save = async () => {
-    const trimmedId = id.trim();
-    if (!ID_PATTERN.test(trimmedId) || trimmedId === "." || trimmedId === "..") {
-      setError("ID 只能包含字母、数字、点、下划线和短横线");
-      return;
-    }
     if (!form.title.trim()) {
       setError("名称不能为空");
       return;
@@ -47,7 +48,9 @@ export function PromptFormSheet({
     setSaving(true);
     setError(null);
     try {
-      await api.writeAsset("prompt", trimmedId, renderPrompt(form));
+      // ID 只是真源文件名，用户填完名称后自动生成；编辑时沿用原 ID。
+      const finalId = mode === "edit" ? initialId : generatePromptId(form.title, existingIds);
+      await api.writeAsset("prompt", finalId, renderPrompt(form));
       onSaved();
     } catch (e) {
       setError(String(e));
@@ -73,30 +76,14 @@ export function PromptFormSheet({
     >
       <div className="mx-auto max-w-3xl space-y-4">
         {error && <Notice tone="danger">{error}</Notice>}
-        <div className="grid grid-cols-2 gap-4">
-          <Field
-            label="ID"
-            htmlFor="prompt-id"
-            required={mode === "create"}
-            hint={mode === "edit" ? "ID 即真源文件名，编辑时不能改。" : "只能使用 slug 字符，例如 team-style。"}
-          >
-            <Input
-              id="prompt-id"
-              className="font-mono"
-              value={id}
-              readOnly={mode === "edit"}
-              onChange={(e) => setId(e.target.value)}
-            />
-          </Field>
-          <Field label="名称" htmlFor="prompt-title" required>
-            <Input
-              id="prompt-title"
-              value={form.title}
-              onChange={(e) => set("title", e.target.value)}
-              placeholder="例如 团队编码规范"
-            />
-          </Field>
-        </div>
+        <Field label="名称" htmlFor="prompt-title" required>
+          <Input
+            id="prompt-title"
+            value={form.title}
+            onChange={(e) => set("title", e.target.value)}
+            placeholder="例如 团队编码规范"
+          />
+        </Field>
         <Field label="说明" htmlFor="prompt-description" hint="只在客户端显示，不写进目标文件。">
           <Textarea
             id="prompt-description"
@@ -106,6 +93,18 @@ export function PromptFormSheet({
             placeholder="可选，一句话说明这条提示词的用途"
           />
         </Field>
+        {targetDiffers && target && (
+          <Notice tone="warning">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="min-w-0 flex-1">
+                目标文件 {target.path} 的内容与这里不一致。
+              </span>
+              <Button size="sm" onClick={() => set("body", target.content)}>
+                替换成目标文件
+              </Button>
+            </div>
+          </Notice>
+        )}
         <Field label="正文" htmlFor="prompt-body" hint="启用时会整份写入目标文件，frontmatter 不会混进去。">
           <Textarea
             id="prompt-body"

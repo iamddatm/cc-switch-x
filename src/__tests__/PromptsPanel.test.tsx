@@ -18,6 +18,7 @@ vi.mock("../lib/api", () => ({
     rescanDrift: vi.fn(),
     verifySkillDeployments: vi.fn().mockResolvedValue([]),
     resolveDrift: vi.fn(),
+    readPromptTarget: vi.fn().mockResolvedValue(null),
   },
 }));
 
@@ -52,15 +53,12 @@ beforeEach(() => {
   });
 });
 
-test("creates a prompt from the form", async () => {
+test("creates a prompt with a generated id", async () => {
   vi.mocked(api.listAssets).mockResolvedValue([]);
   render(<PromptsPanel />);
   const [add] = await screen.findAllByRole("button", { name: "添加提示词" });
   fireEvent.click(add);
-  fireEvent.change(await screen.findByLabelText(/^ID/), {
-    target: { value: "team" },
-  });
-  fireEvent.change(screen.getByLabelText(/^名称/), {
+  fireEvent.change(await screen.findByLabelText(/^名称/), {
     target: { value: "团队" },
   });
   fireEvent.change(screen.getByLabelText(/^正文/), {
@@ -70,10 +68,68 @@ test("creates a prompt from the form", async () => {
   await waitFor(() =>
     expect(api.writeAsset).toHaveBeenCalledWith(
       "prompt",
-      "team",
+      "prompt",
       expect.stringContaining("title: 团队"),
     ),
   );
+});
+
+test("imports a prompt from an agent target file", async () => {
+  vi.mocked(api.readPromptTarget).mockResolvedValue({
+    path: "C:/x/.claude/CLAUDE.md",
+    content: "现有规范\n",
+  });
+  render(<PromptsPanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "提示词的更多操作" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "从 Agent 目标文件导入" }));
+
+  expect(await screen.findByText("C:/x/.claude/CLAUDE.md")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /导入选中/ }));
+
+  await waitFor(() =>
+    expect(api.writeAsset).toHaveBeenCalledWith(
+      "prompt",
+      "claude-code",
+      expect.stringContaining("现有规范"),
+    ),
+  );
+  await waitFor(() =>
+    expect(api.activatePrompt).toHaveBeenCalledWith("claude-code", "claude", {
+      confirm: true,
+    }),
+  );
+});
+
+test("the editor offers the target file's content when they differ", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agentStatus({ activePrompt: "claude-team" }),
+  ]);
+  vi.mocked(api.readPromptTarget).mockResolvedValue({
+    path: "C:/x/.claude/CLAUDE.md",
+    content: "磁盘上的正文\n",
+  });
+  render(<PromptsPanel />);
+  const [edit] = await screen.findAllByRole("button", { name: "编辑 team" });
+  fireEvent.click(edit);
+
+  fireEvent.click(await screen.findByRole("button", { name: "替换成目标文件" }));
+  expect(screen.getByLabelText(/^正文/)).toHaveValue("磁盘上的正文\n");
+});
+
+test("no replace action when the target already matches the source", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agentStatus({ activePrompt: "claude-team" }),
+  ]);
+  vi.mocked(api.readPromptTarget).mockResolvedValue({
+    path: "C:/x/.claude/CLAUDE.md",
+    content: "正文\n",
+  });
+  render(<PromptsPanel />);
+  const [edit] = await screen.findAllByRole("button", { name: "编辑 team" });
+  fireEvent.click(edit);
+
+  await screen.findByLabelText(/^正文/);
+  expect(screen.queryByRole("button", { name: "替换成目标文件" })).not.toBeInTheDocument();
 });
 
 test("foreign target asks for a decision instead of overwriting", async () => {

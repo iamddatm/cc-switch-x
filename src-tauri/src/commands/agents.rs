@@ -174,6 +174,39 @@ pub fn set_skill_enabled(
     Ok(label)
 }
 
+/// 提示词目标文件的只读快照，编辑器拿它和真源正文对比。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptTarget {
+    pub path: PathBuf,
+    pub content: String,
+}
+
+/// 读取 agent 提示词目标文件的当前内容；文件不存在返回 `None`。
+/// 只读：不建目录、不写盘，也不受「未检测到」门禁影响。
+#[tauri::command]
+pub fn read_prompt_target(
+    state: State<'_, AppState>,
+    agent_id: String,
+) -> Result<Option<PromptTarget>, AppError> {
+    let descriptor = builtin_agents()
+        .into_iter()
+        .find(|agent| agent.id == agent_id)
+        .ok_or_else(|| AppError::NotFound(format!("注册表里没有 {agent_id}")))?;
+    let base = override_base(&state, &agent_id)?;
+    let path = prompt::target_file(&descriptor, &state.home, base.as_deref());
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let content = String::from_utf8(bytes).map_err(|_| {
+                AppError::InvalidInput(format!("{} 不是 UTF-8，无法与真源对比", path.display()))
+            })?;
+            Ok(Some(PromptTarget { path, content }))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// `confirm=false` 时遇到外来内容只返回 `needsConfirmation`，不写盘；
 /// `saveExistingAs` 给了新 ID 就先把旧内容抢救成一条 prompt 再覆盖。
 #[tauri::command]

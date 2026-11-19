@@ -248,6 +248,27 @@ export function renderPrompt(form: PromptForm): string {
   return `${frontmatter}${form.body.replace(/\n+$/, "")}\n`;
 }
 
+/**
+ * 新建提示词时由名称生成真源文件 ID。中文等无法转成 slug 的标题回退为 `prompt`，
+ * 与已有 ID 冲突时追加序号，保证写入不会静默覆盖别人的真源。
+ */
+export function generatePromptId(title: string, existing: Iterable<string>): string {
+  const taken = new Set(existing);
+  const slug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "")
+    .slice(0, 64)
+    .replace(/[-.]+$/, "");
+  const base = slug || "prompt";
+  if (!taken.has(base)) return base;
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${base}-${suffix}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
 /** SKILL.md 的 name/description/body；其余 frontmatter 行原样带着。 */
 export function parseSkill(text: string): SkillForm {
   const normalized = text.replace(/^﻿/, "");

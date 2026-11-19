@@ -5,6 +5,7 @@ import { AssetRow } from "../components/assets/AssetRow";
 import { DriftBanner } from "../components/DriftBanner";
 import { ImportDialog } from "../components/ImportDialog";
 import { PromptFormSheet } from "../components/prompts/PromptFormSheet";
+import { PromptImportDialog } from "../components/prompts/PromptImportDialog";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Dialog } from "../components/ui/Dialog";
@@ -21,12 +22,11 @@ import { useAssets } from "../hooks/useAssets";
 import { useDrift } from "../hooks/useDrift";
 import { api } from "../lib/api";
 import { parsePrompt, type PromptForm } from "../lib/canonical";
-import { formatBytes, formatRelativeTime } from "../lib/format";
-import { supported, switchable, type AssetSummary } from "../types";
+import { supported, switchable, type AssetSummary, type PromptTarget } from "../types";
 
 type Editing =
   | { mode: "create"; form: PromptForm }
-  | { mode: "edit"; id: string; form: PromptForm };
+  | { mode: "edit"; id: string; form: PromptForm; target: PromptTarget | null };
 
 const EMPTY_FORM: PromptForm = { title: "", description: "", body: "" };
 
@@ -46,6 +46,7 @@ export function PromptsPanel() {
   const [message, setMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const [importingTargets, setImportingTargets] = useState(false);
   const [takeover, setTakeover] = useState<{
     promptId: string;
     agentId: string;
@@ -82,8 +83,13 @@ export function PromptsPanel() {
     setLoadingEdit(true);
     setActionError(null);
     try {
-      const text = await api.readAsset("prompt", item.id);
-      setEditing({ mode: "edit", id: item.id, form: parsePrompt(text) });
+      // 只有当前启用项才对应这个 agent 的目标文件；读取失败不影响编辑真源。
+      const targetAgentId = item.id === activePrompt ? selectedAgentId : null;
+      const [text, target] = await Promise.all([
+        api.readAsset("prompt", item.id),
+        targetAgentId ? api.readPromptTarget(targetAgentId).catch(() => null) : null,
+      ]);
+      setEditing({ mode: "edit", id: item.id, form: parsePrompt(text), target });
     } catch (e) {
       setActionError(String(e));
     } finally {
@@ -193,6 +199,12 @@ export function PromptsPanel() {
             <Menu
               label="提示词的更多操作"
               items={[
+                {
+                  label: "从 Agent 目标文件导入",
+                  onSelect: () => setImportingTargets(true),
+                  disabled: promptAgents.length === 0,
+                  hint: promptAgents.length === 0 ? "还没有支持提示词的 Agent" : undefined,
+                },
                 { label: "从 cc-switch 导入", onSelect: () => setImporting(true) },
                 { label: "刷新列表", onSelect: refreshAll },
               ]}
@@ -298,19 +310,11 @@ export function PromptsPanel() {
             <ul>
               {visible.map((item) => {
                 const active = activePrompt === item.id;
-                const details = [
-                  item.description,
-                  item.size != null ? formatBytes(item.size) : null,
-                  item.mtime ? `${formatRelativeTime(item.mtime)}更新` : null,
-                ]
-                  .filter(Boolean)
-                  .join(" · ");
                 return (
                   <AssetRow
                     key={item.id}
                     title={item.name}
-                    subtitle={item.id}
-                    description={details || undefined}
+                    description={item.description || undefined}
                     active={active}
                     titleBadges={active ? <Badge tone="success">已启用</Badge> : undefined}
                     agentCells={
@@ -359,6 +363,8 @@ export function PromptsPanel() {
           mode={editing.mode}
           id={editing.mode === "edit" ? editing.id : ""}
           initial={editing.form}
+          existingIds={items.map((item) => item.id)}
+          target={editing.mode === "edit" ? editing.target : null}
           onClose={() => setEditing(null)}
           onSaved={() => {
             const savedId = editing.mode === "edit" ? editing.id : null;
@@ -381,6 +387,18 @@ export function PromptsPanel() {
             setImporting(false);
             refreshAll();
           }}
+        />
+      )}
+
+      {importingTargets && (
+        <PromptImportDialog
+          agents={promptAgents}
+          existing={items}
+          onClose={() => {
+            setImportingTargets(false);
+            refreshAll();
+          }}
+          onDone={refreshAll}
         />
       )}
 
