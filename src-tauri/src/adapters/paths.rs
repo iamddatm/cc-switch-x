@@ -175,11 +175,17 @@ mod tests {
 
     #[test]
     fn expanded_paths_use_one_separator_style() {
-        let expanded = expand_root("~/.claude/CLAUDE.md", None, Path::new("C:/Users/me"));
-        let text = expanded.to_string_lossy();
-        assert_eq!(text.replace('\\', "/"), "C:/Users/me/.claude/CLAUDE.md");
+        // 声明里的 `/` 要换成本机分隔符；home 自己也用本机写法，才知道整条路径是否混用。
         #[cfg(windows)]
-        assert!(!text.contains('/'), "展开后的路径不该混用分隔符：{text}");
+        assert_eq!(
+            expand_root("~/.claude/CLAUDE.md", None, Path::new(r"C:\Users\me")).to_string_lossy(),
+            r"C:\Users\me\.claude\CLAUDE.md"
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            expand_root("~/.claude/CLAUDE.md", None, Path::new("/home/me")).to_string_lossy(),
+            "/home/me/.claude/CLAUDE.md"
+        );
     }
 
     #[test]

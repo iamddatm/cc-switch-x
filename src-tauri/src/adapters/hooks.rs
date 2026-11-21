@@ -844,8 +844,10 @@ mod codex_tests {
             "没打开开关就不能写：{message}"
         );
         assert!(message.contains("[features].hooks = true"), "{message}");
+        // 逐段 join，得到本机分隔符的绝对路径，才能和报错里的规范化路径逐字比。
+        let config_path = box_.base.join(".codex").join("config.toml");
         assert!(
-            message.contains(&box_.base.join(".codex/config.toml").display().to_string()),
+            message.contains(&config_path.display().to_string()),
             "报告里必须给出该改哪个文件的绝对路径：{message}"
         );
         assert!(
