@@ -207,6 +207,25 @@ pub fn read_prompt_target(
     }
 }
 
+/// 用系统默认程序打开该 agent 的提示词目标文件；只读，不建目录、不写盘。
+/// 路径与 `read_prompt_target` 同一口径（注册表 + `baseOverride`），前端不传路径。
+#[tauri::command]
+pub fn open_prompt_target(state: State<'_, AppState>, agent_id: String) -> Result<(), AppError> {
+    let descriptor = builtin_agents()
+        .into_iter()
+        .find(|agent| agent.id == agent_id)
+        .ok_or_else(|| AppError::NotFound(format!("注册表里没有 {agent_id}")))?;
+    let base = override_base(&state, &agent_id)?;
+    let path = prompt::target_file(&descriptor, &state.home, base.as_deref());
+    if !path.is_file() {
+        return Err(AppError::NotFound(format!(
+            "目标文件还不存在：{}",
+            path.display()
+        )));
+    }
+    super::backup::open_file(&path)
+}
+
 /// `confirm=false` 时遇到外来内容只返回 `needsConfirmation`，不写盘；
 /// `saveExistingAs` 给了新 ID 就先把旧内容抢救成一条 prompt 再覆盖。
 #[tauri::command]

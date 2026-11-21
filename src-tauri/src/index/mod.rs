@@ -9,6 +9,7 @@ use crate::domain::{display_name, AssetState, AssetSummary, AssetType, DriftKind
 use crate::store::Store;
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
@@ -42,18 +43,47 @@ impl Index {
     }
 
     /// 全量重建：清空 assets 后按真源文件重新写入，因此删掉/改名的资产不会留下旧行。
+    ///
+    /// `updated_at` 记的是配置内容的最后变化时间，不是本次重建时间：先读出旧表，
+    /// 内容没变的行沿用旧值，否则每次启动都会把全部条目刷成「刚刚」。
     pub fn rebuild(&mut self, store: &Store) -> Result<(), IndexError> {
+        let mut previous: HashMap<(String, String), (i64, String)> = HashMap::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT asset_type,id,updated_at,hash FROM assets")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (asset_type, id, updated_at, hash) = row?;
+                previous.insert((asset_type, id), (updated_at, hash));
+            }
+        }
+
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM assets", [])?;
         for asset_type in AssetType::ALL {
             for id in store.list_ids(asset_type)? {
-                let bytes = match asset_type {
+                let path = match asset_type {
                     AssetType::Skill => {
                         let Ok(dir) = store.entry_path(asset_type, &id) else {
                             continue;
                         };
-                        std::fs::read(dir.join("SKILL.md")).unwrap_or_default()
+                        dir.join("SKILL.md")
                     }
+                    _ => match store.entry_path(asset_type, &id) {
+                        Ok(path) => path,
+                        Err(_) => continue,
+                    },
+                };
+                let bytes = match asset_type {
+                    AssetType::Skill => std::fs::read(&path).unwrap_or_default(),
                     _ => match store.read(asset_type, &id) {
                         Ok(bytes) => bytes,
                         Err(_) => continue,
@@ -64,9 +94,16 @@ impl Index {
                     Err(_) => continue,
                 };
                 let hash = sha256_hex(&bytes);
+                // 内容没变就保留索引里的时间；变了（外部编辑、同步拉取）则以真源文件
+                // mtime 作为这次变化落盘的时刻。
+                let key = (asset_type_key(asset_type).to_string(), id.clone());
+                let updated_at = match previous.get(&key) {
+                    Some((previous_at, previous_hash)) if previous_hash == &hash => *previous_at,
+                    _ => modified_millis(&path).unwrap_or_else(now_millis),
+                };
                 tx.execute(
                     "INSERT INTO assets (asset_type,id,name,updated_at,hash) VALUES (?1,?2,?3,?4,?5)",
-                    params![asset_type_key(asset_type), id, name, now_millis(), hash],
+                    params![asset_type_key(asset_type), id, name, updated_at, hash],
                 )?;
             }
         }
@@ -397,6 +434,15 @@ fn now_millis() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+fn modified_millis(path: &Path) -> Option<i64> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| elapsed.as_millis() as i64)
+}
+
 fn asset_type_key(asset_type: AssetType) -> &'static str {
     match asset_type {
         AssetType::Mcp => "mcp",
@@ -475,6 +521,39 @@ mod tests {
         let all = index.list(Some(AssetType::Mcp)).unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].id, "ctx");
+    }
+
+    #[test]
+    fn rebuild_keeps_updated_at_for_unchanged_assets() {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        store
+            .write(
+                AssetType::Mcp,
+                "pw",
+                br#"{"id":"pw","name":"Playwright","transport":"stdio","command":"npx"}"#,
+            )
+            .unwrap();
+        let mut index = Index::open(&dir.path().join("index.db")).unwrap();
+        index.rebuild(&store).unwrap();
+        // 模拟写入流水线记下的配置更新时间，再重建：内容没变不能刷成现在。
+        index
+            .conn
+            .execute("UPDATE assets SET updated_at=42", [])
+            .unwrap();
+        index.rebuild(&store).unwrap();
+        assert_eq!(index.list(Some(AssetType::Mcp)).unwrap()[0].updated_at, 42);
+
+        // 真源内容变了：时间改为这次变化落盘的时刻，而不是继续沿用 42。
+        store
+            .write(
+                AssetType::Mcp,
+                "pw",
+                br#"{"id":"pw","name":"Playwright 2","transport":"stdio","command":"npx"}"#,
+            )
+            .unwrap();
+        index.rebuild(&store).unwrap();
+        assert_ne!(index.list(Some(AssetType::Mcp)).unwrap()[0].updated_at, 42);
     }
 
     #[test]

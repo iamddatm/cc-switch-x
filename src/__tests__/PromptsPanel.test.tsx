@@ -19,6 +19,7 @@ vi.mock("../lib/api", () => ({
     verifySkillDeployments: vi.fn().mockResolvedValue([]),
     resolveDrift: vi.fn(),
     readPromptTarget: vi.fn().mockResolvedValue(null),
+    openPromptTarget: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -74,6 +75,31 @@ test("creates a prompt with a generated id", async () => {
   );
 });
 
+test("shows the config's last updated time, not the file mtime", async () => {
+  const now = Date.now();
+  vi.mocked(api.listAssets).mockResolvedValue([
+    {
+      assetType: "prompt",
+      id: "claude-team",
+      name: "team",
+      updatedAt: now - 2 * 24 * 60 * 60 * 1000,
+      mtime: now,
+      hash: "h",
+    },
+  ]);
+  render(<PromptsPanel />);
+  expect(await screen.findByText(/更新于 2 天前/)).toBeInTheDocument();
+});
+
+test("opens the selected agent's prompt target file", async () => {
+  render(<PromptsPanel />);
+  const target = await screen.findByRole("button", {
+    name: "目标文件：C:/x/.claude/CLAUDE.md",
+  });
+  fireEvent.click(target);
+  await waitFor(() => expect(api.openPromptTarget).toHaveBeenCalledWith("claude"));
+});
+
 test("imports a prompt from an agent target file", async () => {
   vi.mocked(api.readPromptTarget).mockResolvedValue({
     path: "C:/x/.claude/CLAUDE.md",
@@ -83,7 +109,10 @@ test("imports a prompt from an agent target file", async () => {
   fireEvent.click(await screen.findByRole("button", { name: "提示词的更多操作" }));
   fireEvent.click(await screen.findByRole("menuitem", { name: "从 Agent 目标文件导入" }));
 
-  expect(await screen.findByText("C:/x/.claude/CLAUDE.md")).toBeInTheDocument();
+  const targetPath = await screen.findByRole("button", { name: "C:/x/.claude/CLAUDE.md" });
+  fireEvent.click(targetPath);
+  await waitFor(() => expect(api.openPromptTarget).toHaveBeenCalledWith("claude"));
+
   fireEvent.click(screen.getByRole("button", { name: /导入选中/ }));
 
   await waitFor(() =>

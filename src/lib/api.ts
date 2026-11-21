@@ -232,6 +232,9 @@ export const api = {
   /** 读取 agent 提示词目标文件的当前内容；文件不存在返回 null（只读，不写盘）。 */
   readPromptTarget: (agentId: string) =>
     invoke<PromptTarget | null>("read_prompt_target", { agentId }),
+  /** 用系统默认程序打开 agent 的提示词目标文件；文件不存在时后端报错。 */
+  openPromptTarget: (agentId: string) =>
+    invoke<void>("open_prompt_target", { agentId }),
 
   /** 返回实测标签：written / removed / absent；外来内容会直接报错 */
   setRuleEnabled: (id: string, agentId: string, enabled: boolean) =>

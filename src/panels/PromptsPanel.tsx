@@ -22,6 +22,7 @@ import { useAssets } from "../hooks/useAssets";
 import { useDrift } from "../hooks/useDrift";
 import { api } from "../lib/api";
 import { parsePrompt, type PromptForm } from "../lib/canonical";
+import { formatRelativeTime } from "../lib/format";
 import { supported, switchable, type AssetSummary, type PromptTarget } from "../types";
 
 type Editing =
@@ -99,6 +100,17 @@ export function PromptsPanel() {
 
   const create = () => {
     setEditing({ mode: "create", form: EMPTY_FORM });
+  };
+
+  /** 目标文件由后端按注册表解析；文件还不存在时后端会报错，这里原样展示。 */
+  const openTarget = async () => {
+    if (!selectedAgentId) return;
+    setActionError(null);
+    try {
+      await api.openPromptTarget(selectedAgentId);
+    } catch (e) {
+      setActionError(String(e));
+    }
   };
 
   /**
@@ -233,12 +245,14 @@ export function PromptsPanel() {
           </Select>
         </div>
         {selectedAgent && (
-          <code
-            className="max-w-[360px] truncate font-mono text-caption text-fg-3"
-            title={selectedAgent.promptPath}
+          <button
+            type="button"
+            className="max-w-[360px] cursor-pointer truncate font-mono text-caption text-fg-3 hover:text-fg-1 hover:underline"
+            title={`用默认程序打开 ${selectedAgent.promptPath}`}
+            onClick={() => void openTarget()}
           >
             目标文件：{selectedAgent.promptPath}
-          </code>
+          </button>
         )}
         <SearchField
           className="ml-auto w-[240px]"
@@ -310,11 +324,18 @@ export function PromptsPanel() {
             <ul>
               {visible.map((item) => {
                 const active = activePrompt === item.id;
+                // 时间取索引里的配置更新时间（保存/导入时记录），不用真源文件 mtime。
+                const details = [
+                  item.description,
+                  `更新于 ${formatRelativeTime(item.updatedAt)}`,
+                ]
+                  .filter(Boolean)
+                  .join(" · ");
                 return (
                   <AssetRow
                     key={item.id}
                     title={item.name}
-                    description={item.description || undefined}
+                    description={details}
                     active={active}
                     titleBadges={active ? <Badge tone="success">已启用</Badge> : undefined}
                     agentCells={

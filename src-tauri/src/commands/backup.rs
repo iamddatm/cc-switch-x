@@ -168,6 +168,30 @@ pub fn reveal_backup_location(state: State<'_, AppState>, id: String) -> Result<
     open_directory(&path)
 }
 
+/// 用系统默认关联程序打开文件；路径由后端按注册表推出，不接受前端传任意路径。
+pub(crate) fn open_file(path: &Path) -> Result<(), AppError> {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        // 不经过 cmd /C，参数不会被再解析一遍；FileProtocolHandler 按文件关联打开。
+        let mut command = Command::new("rundll32.exe");
+        command.arg("url.dll,FileProtocolHandler").arg(path);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(path);
+        command
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+    command.spawn().map(|_| ()).map_err(AppError::Io)
+}
+
 pub(crate) fn open_directory(path: &Path) -> Result<(), AppError> {
     #[cfg(target_os = "windows")]
     let mut command = {

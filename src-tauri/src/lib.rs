@@ -87,6 +87,7 @@ pub fn run() {
             commands::agents::check_agent_versions,
             commands::agents::deactivate_prompt,
             commands::agents::list_agents,
+            commands::agents::open_prompt_target,
             commands::agents::read_prompt_target,
             commands::agents::set_mcp_enabled,
             commands::agents::set_skill_enabled,

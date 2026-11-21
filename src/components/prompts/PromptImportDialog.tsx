@@ -39,6 +39,7 @@ export function PromptImportDialog({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState<{ imported: number; failed: string[] } | null>(null);
+  const [openError, setOpenError] = useState<string | null>(null);
   const eligible = useMemo(() => agents.filter((agent) => switchable(agent, "prompt")), [agents]);
 
   // 只在打开时扫一次：导入后面板刷新会换掉 agents/existing 引用，重扫会把结果清空。
@@ -71,6 +72,16 @@ export function PromptImportDialog({
       cancelled = true;
     };
   }, []);
+
+  /** 路径只作参考：真正打开的是后端按 agent 注册表解析出的文件。 */
+  const openTarget = async (agentId: string) => {
+    setOpenError(null);
+    try {
+      await api.openPromptTarget(agentId);
+    } catch (e) {
+      setOpenError(String(e));
+    }
+  };
 
   const toggle = (agentId: string) => {
     setSelected((current) => {
@@ -139,6 +150,11 @@ export function PromptImportDialog({
         </>
       }
     >
+      {openError && (
+        <Notice tone="danger" className="mb-3">
+          {openError}
+        </Notice>
+      )}
       {candidates === null && <p className="text-body text-fg-3">正在读取各 Agent 的目标文件…</p>}
       {candidates?.length === 0 && (
         <p className="text-body text-fg-3">没有找到可导入的目标文件内容。</p>
@@ -168,9 +184,14 @@ export function PromptImportDialog({
                     {candidate.content.length} 字符
                   </span>
                 </div>
-                <p className="truncate font-mono text-caption text-fg-3" title={candidate.path}>
+                <button
+                  type="button"
+                  className="block max-w-full cursor-pointer truncate text-left font-mono text-caption text-fg-3 hover:text-fg-1 hover:underline"
+                  title={`用默认程序打开 ${candidate.path}`}
+                  onClick={() => void openTarget(candidate.agent.id)}
+                >
                   {candidate.path}
-                </p>
+                </button>
                 <p className="mt-1 truncate text-caption text-fg-2" title={candidate.content}>
                   {candidate.content.trim()}
                 </p>
