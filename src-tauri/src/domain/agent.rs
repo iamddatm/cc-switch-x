@@ -411,7 +411,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
         },
         AgentDescriptor {
             id: "pi".into(),
-            display_name: "Pi Coding Agent".into(),
+            display_name: "pi".into(),
             // 证据：pi 自带 docs/configuration.md（agent dir = ~/.pi/agent）
             // 与 dist/extensions/mcp/config.js（读 <agentDir>/mcp.json 的 mcpServers）。
             // 提示词落点已用 sha1 与 cc-switch 的 pi 行比对一致。
@@ -472,7 +472,7 @@ mod support_tests {
         );
         assert!(
             !agent("pi").support[&AssetKind::Rule].supported,
-            "Pi 不读 ~/.pi/agent/rules"
+            "pi 不读 ~/.pi/agent/rules"
         );
     }
 

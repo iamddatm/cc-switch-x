@@ -7,6 +7,7 @@ pub mod cloud_backup;
 pub mod drift;
 pub mod git_sync;
 pub mod import;
+pub mod pi_prompt;
 pub mod project_install;
 pub mod project_migrate;
 pub mod project_registry;

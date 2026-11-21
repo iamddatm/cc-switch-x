@@ -298,8 +298,8 @@ fn junction(source: &Path, target: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// `expand_root` 会保留声明里的 `/`（Windows API 能吃），但 `cmd` 的 `mklink`
-/// 把混用分隔符的路径判成「无效参数」，junction 就会永远悄悄降级成 copy。
+/// 路径可能来自台账、用户输入或旧版本留下的混用分隔符；Windows API 吃得下，
+/// 但 `cmd` 的 `mklink` 会判成「无效参数」，junction 就悄悄降级成 copy。
 /// 交给 cmd 前一律换成反斜杠。
 #[cfg(windows)]
 fn for_cmd(path: &Path) -> String {
@@ -509,12 +509,12 @@ mod tests {
         assert!(!target.exists());
     }
 
-    /// `expand_root` 会保留声明里的 `/`。Windows API 能吃这种混用分隔符的路径，
+    /// 混用分隔符的路径（旧台账、外部输入都可能带来）Windows API 吃得下，
     /// 但 `cmd` 的 `mklink` 判它「无效参数」—— 只有符号链接不可用时才走 junction，
     /// 那条路不能被分隔符悄悄打死，否则这台机器永远只能 copy 部署。
     #[cfg(windows)]
     #[test]
-    fn junction_accepts_the_mixed_separators_expand_root_leaves_behind() {
+    fn junction_accepts_mixed_separators() {
         let dir = tempdir().unwrap();
         let real = dir.path().join("real").join("skill");
         std::fs::create_dir_all(&real).unwrap();

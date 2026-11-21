@@ -7,7 +7,6 @@ import { Sheet } from "../ui/Sheet";
 import { api } from "../../lib/api";
 import { generatePromptId, renderPrompt, type PromptForm } from "../../lib/canonical";
 import { formatBytes } from "../../lib/format";
-import type { PromptTarget } from "../../types";
 
 export interface PromptFormSheetProps {
   mode: "create" | "edit";
@@ -15,8 +14,6 @@ export interface PromptFormSheetProps {
   initial: PromptForm;
   /** 已有的提示词 ID：新建时用来避免生成重名。 */
   existingIds: string[];
-  /** 正在编辑的提示词是当前 agent 的启用项时，目标文件的当前内容。 */
-  target?: PromptTarget | null;
   onClose: () => void;
   onSaved: () => void;
 }
@@ -26,7 +23,6 @@ export function PromptFormSheet({
   id: initialId,
   initial,
   existingIds,
-  target = null,
   onClose,
   onSaved,
 }: PromptFormSheetProps) {
@@ -34,8 +30,6 @@ export function PromptFormSheet({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const bytes = new TextEncoder().encode(form.body).length;
-  // 目标文件写的是正文，真源还多一层 frontmatter，所以只比正文部分。
-  const targetDiffers = target !== null && target.content.trimEnd() !== form.body.trimEnd();
 
   const set = <K extends keyof PromptForm>(key: K, value: PromptForm[K]) =>
     setForm((current) => ({ ...current, [key]: value }));
@@ -93,18 +87,6 @@ export function PromptFormSheet({
             placeholder="可选，一句话说明这条提示词的用途"
           />
         </Field>
-        {targetDiffers && target && (
-          <Notice tone="warning">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="min-w-0 flex-1">
-                目标文件 {target.path} 的内容与这里不一致。
-              </span>
-              <Button size="sm" onClick={() => set("body", target.content)}>
-                替换成目标文件
-              </Button>
-            </div>
-          </Notice>
-        )}
         <Field label="正文" htmlFor="prompt-body" hint="启用时会整份写入目标文件，frontmatter 不会混进去。">
           <Textarea
             id="prompt-body"

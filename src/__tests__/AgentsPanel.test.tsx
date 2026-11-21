@@ -34,7 +34,7 @@ beforeEach(() => {
     agentStatus(),
     agentStatus({
       id: "pi",
-      displayName: "Pi Coding Agent",
+      displayName: "pi",
       detected: false,
       cliAvailable: false,
       cliProgram: "pi",
@@ -49,7 +49,8 @@ beforeEach(() => {
 test("lists all agents with CLI and config state", async () => {
   render(<AgentsPanel />);
   expect(await screen.findByText("Claude Code")).toBeInTheDocument();
-  expect(screen.getByText("Pi Coding Agent")).toBeInTheDocument();
+  // 名称与 CLI 名同为 pi，列表里会出现两处
+  expect(screen.getAllByText("pi").length).toBeGreaterThan(0);
   expect(screen.getByText("CLI 已安装")).toBeInTheDocument();
   expect(screen.getByText("CLI 未安装")).toBeInTheDocument();
   expect(screen.getByText("配置目录已就绪")).toBeInTheDocument();
@@ -60,17 +61,17 @@ test("lists all agents with CLI and config state", async () => {
 
 test("toggling an agent persists the new enabled set", async () => {
   render(<AgentsPanel />);
-  fireEvent.click(await screen.findByRole("checkbox", { name: "启用 Pi Coding Agent" }));
+  fireEvent.click(await screen.findByRole("checkbox", { name: "启用 pi" }));
   await waitFor(() =>
     expect(api.setEnabledAgents).toHaveBeenCalledWith(["claude", "pi"]),
   );
-  expect(await screen.findByText(/已启用 Pi Coding Agent/)).toBeInTheDocument();
+  expect(await screen.findByText(/已启用 pi/)).toBeInTheDocument();
 });
 
 test("disabling an agent keeps the rest enabled", async () => {
   vi.mocked(api.listAgents).mockResolvedValue([
     agentStatus(),
-    agentStatus({ id: "pi", displayName: "Pi Coding Agent" }),
+    agentStatus({ id: "pi", displayName: "pi" }),
   ]);
   render(<AgentsPanel />);
   fireEvent.click(await screen.findByRole("checkbox", { name: "启用 Claude Code" }));
@@ -81,14 +82,14 @@ test("disabling an agent keeps the rest enabled", async () => {
 test("a failed save surfaces the backend reason", async () => {
   vi.mocked(api.setEnabledAgents).mockRejectedValue("非法输入：未知的 agent：pi");
   render(<AgentsPanel />);
-  fireEvent.click(await screen.findByRole("checkbox", { name: "启用 Pi Coding Agent" }));
+  fireEvent.click(await screen.findByRole("checkbox", { name: "启用 pi" }));
   expect(await screen.findByText(/未知的 agent/)).toBeInTheDocument();
 });
 
 test("dragging a row onto another persists the new order", async () => {
   render(<AgentsPanel />);
   const first = (await screen.findByText("Claude Code")).closest("li")!;
-  const second = screen.getByText("Pi Coding Agent").closest("li")!;
+  const second = screen.getAllByText("pi")[0].closest("li")!;
   const dataTransfer = {
     effectAllowed: "",
     dropEffect: "",
@@ -129,7 +130,7 @@ test("checking versions marks only the agent that is actually behind", async () 
       // 没装的那条只报上游版本，本机没有可比较的基准，不能写成「有新版本」
       versionStatus({
         id: "pi",
-        displayName: "Pi Coding Agent",
+        displayName: "pi",
         cliFound: false,
         installedVersion: null,
         latestVersion: "0.9.0",

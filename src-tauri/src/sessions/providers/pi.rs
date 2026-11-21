@@ -1,4 +1,4 @@
-//! Pi Coding Agent 会话解析器。本机 51 个真实样本全部是 `version=3`：
+//! pi 会话解析器。本机 51 个真实样本全部是 `version=3`：
 //! 首行 `type=session` 是头，后续是带 `id/parentId` 的树形 entry，只输出活动分支。
 
 use crate::domain::session::{
@@ -21,7 +21,7 @@ pub fn parse_pi(path: &Path) -> Result<ParsedSession, SessionError> {
     let metadata = std::fs::metadata(path)?;
     if metadata.len() > MAX_FILE_BYTES {
         return Err(SessionError::Unsupported(format!(
-            "Pi 会话超过 128 MiB：{} 字节",
+            "pi 会话超过 128 MiB：{} 字节",
             metadata.len()
         )));
     }
@@ -60,7 +60,7 @@ pub fn parse_pi(path: &Path) -> Result<ParsedSession, SessionError> {
         if header.is_none() {
             if value.get("type").and_then(Value::as_str) != Some("session") {
                 return Err(SessionError::Unsupported(
-                    "Pi 会话缺少 session 头".to_string(),
+                    "pi 会话缺少 session 头".to_string(),
                 ));
             }
             header = Some(value);
@@ -68,7 +68,7 @@ pub fn parse_pi(path: &Path) -> Result<ParsedSession, SessionError> {
         }
         if entries.len() >= MAX_ENTRIES {
             return Err(SessionError::Unsupported(format!(
-                "Pi 会话超过 {MAX_ENTRIES} 条 entry"
+                "pi 会话超过 {MAX_ENTRIES} 条 entry"
             )));
         }
         if value.get("type").and_then(Value::as_str) == Some("session_info") {
@@ -106,7 +106,7 @@ pub fn parse_pi(path: &Path) -> Result<ParsedSession, SessionError> {
     }
 
     let header =
-        header.ok_or_else(|| SessionError::Unsupported("Pi 会话缺少 session 头".to_string()))?;
+        header.ok_or_else(|| SessionError::Unsupported("pi 会话缺少 session 头".to_string()))?;
     let session_id = header
         .get("id")
         .and_then(Value::as_str)

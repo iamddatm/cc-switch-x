@@ -116,7 +116,7 @@ test("first_run_offers_a_manual_scan_and_does_not_autoscan", async () => {
 test("empty_state_names_each_provider_and_why_it_has_no_sessions", async () => {
   vi.mocked(api.listAgents).mockResolvedValue([
     agent("claude", "Claude Code"),
-    agent("pi", "Pi Coding Agent"),
+    agent("pi", "pi"),
     agent("gemini", "Gemini CLI"),
   ]);
   vi.mocked(api.sessionProviders).mockResolvedValue([
@@ -129,7 +129,7 @@ test("empty_state_names_each_provider_and_why_it_has_no_sessions", async () => {
     }),
     provider({
       agentId: "pi",
-      displayName: "Pi Coding Agent",
+      displayName: "pi",
       parseReady: false,
       foundFiles: 5,
       sessionCount: 0,
@@ -390,7 +390,7 @@ test("project_scope_keeps_only_that_project_including_subdirectories", async () 
 test("project_scope_counts_agents_within_the_project", async () => {
   vi.mocked(api.listAgents).mockResolvedValue([
     agent("claude", "Claude Code"),
-    agent("pi", "Pi"),
+    agent("pi", "pi"),
   ]);
   vi.mocked(api.listSessions).mockResolvedValue([
     session({ sessionId: "c1", title: "本项目 Claude 会话", projectPath: "D:/repos/ai/App" }),
@@ -404,7 +404,7 @@ test("project_scope_counts_agents_within_the_project", async () => {
   ]);
   vi.mocked(api.sessionProviders).mockResolvedValue([
     provider({ sessionCount: 300 }),
-    provider({ agentId: "pi", displayName: "Pi", sessionCount: 5 }),
+    provider({ agentId: "pi", displayName: "pi", sessionCount: 5 }),
   ]);
 
   render(<SessionsPanel project={project()} />);
@@ -412,7 +412,7 @@ test("project_scope_counts_agents_within_the_project", async () => {
   const select = await screen.findByLabelText("按应用筛选");
   expect(select).toHaveTextContent("全部应用 (2)");
   expect(select).toHaveTextContent("Claude Code (1)");
-  expect(select).toHaveTextContent("Pi (1)");
+  expect(select).toHaveTextContent("pi (1)");
 });
 
 test("project_scope_without_sessions_explains_the_scope_instead_of_offering_a_full_scan", async () => {

@@ -421,6 +421,22 @@ export interface PromptTarget {
   content: string;
 }
 
+/** pi 的两个固定系统提示文件：存在即生效，没有启用开关。 */
+export type PiPromptFileKind = "system_append" | "system_override";
+
+export interface PiPromptFileSnapshot {
+  exists: boolean;
+  revision: string;
+  content: string;
+}
+
+/** pi 的斜杠命令模板：`~/.pi/agent/prompts/<slug>.md`。 */
+export interface PiPromptTemplate {
+  slug: string;
+  content: string;
+  revision: string;
+}
+
 export type DriftKind = "modified" | "missing";
 
 /** 后端 drift::DriftRecord。targetPath 是绝对路径，处置前用户要能看到到底在动哪个文件。 */

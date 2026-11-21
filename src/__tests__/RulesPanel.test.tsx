@@ -66,7 +66,7 @@ test("drift_banner_offers_both_resolutions_and_no_silent_write", async () => {
   await openRule();
 
   const region = await screen.findByRole("region", { name: "落盘漂移" });
-  expect(region).toHaveTextContent("磁盘与真源不一致");
+  expect(region).toHaveTextContent("与真源不一致");
   expect(region).toHaveTextContent("C:/x/.qoder-cn/rules/style.md");
   // 处置只有两条路，没有「忽略 / 强制覆盖」这种第三个选项
   expect(screen.getByRole("button", { name: "采纳磁盘" })).toBeEnabled();

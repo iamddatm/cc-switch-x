@@ -254,14 +254,14 @@ test("imports a skill directory picked through the native dialog", async () => {
 test("only enabled agents get a checkbox column", async () => {
   vi.mocked(api.listAgents).mockResolvedValue([
     claude,
-    agentStatus({ id: "pi", displayName: "Pi Coding Agent", enabled: false }),
+    agentStatus({ id: "pi", displayName: "pi", enabled: false }),
   ]);
   render(<SkillsPanel />);
   expect(
     await screen.findByRole("checkbox", { name: "Claude Code 启用 demo" }),
   ).toBeInTheDocument();
   expect(
-    screen.queryByRole("checkbox", { name: "Pi Coding Agent 启用 demo" }),
+    screen.queryByRole("checkbox", { name: "pi 启用 demo" }),
   ).not.toBeInTheDocument();
 });
 
@@ -269,7 +269,7 @@ test("the unassigned filter ignores deployments of disabled agents", async () =>
   vi.mocked(api.listAgents).mockResolvedValue([
     agentStatus({
       id: "pi",
-      displayName: "Pi Coding Agent",
+      displayName: "pi",
       enabled: false,
       enabledSkills: ["demo"],
     }),

@@ -31,8 +31,13 @@ impl<'a> WriteTarget<'a> {
 }
 
 /// 把注册表里声明式路径（一律以 `~/` 开头）展开成真实路径。
+///
+/// 声明里写的是 `/`，展开时按平台重新拼一遍：Windows 上落到 `\`，
+/// 否则 `PathBuf` 会留下 `C:\Users\x\.claude/CLAUDE.md` 这种混用分隔符，
+/// 显示给用户和写进台账都不整齐。
 pub fn expand_root(declared: &str, base_override: Option<&Path>, home: &Path) -> PathBuf {
     let rest = declared.strip_prefix("~/").unwrap_or(declared);
+    let rest: PathBuf = Path::new(rest).components().collect();
     base_override.unwrap_or(home).join(rest)
 }
 
@@ -166,6 +171,15 @@ mod tests {
             is_known_agent("pi"),
             "cc-switch 的 enabled_pi 列与 pi 的 prompt 行必须认得，否则导入会丢条目"
         );
+    }
+
+    #[test]
+    fn expanded_paths_use_one_separator_style() {
+        let expanded = expand_root("~/.claude/CLAUDE.md", None, Path::new("C:/Users/me"));
+        let text = expanded.to_string_lossy();
+        assert_eq!(text.replace('\\', "/"), "C:/Users/me/.claude/CLAUDE.md");
+        #[cfg(windows)]
+        assert!(!text.contains('/'), "展开后的路径不该混用分隔符：{text}");
     }
 
     #[test]

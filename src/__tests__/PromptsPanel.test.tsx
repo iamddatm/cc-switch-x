@@ -20,6 +20,12 @@ vi.mock("../lib/api", () => ({
     resolveDrift: vi.fn(),
     readPromptTarget: vi.fn().mockResolvedValue(null),
     openPromptTarget: vi.fn().mockResolvedValue(undefined),
+    readPiPromptFile: vi.fn(),
+    replacePiPromptFile: vi.fn(),
+    deletePiPromptFile: vi.fn(),
+    listPiPromptTemplates: vi.fn(),
+    savePiPromptTemplate: vi.fn(),
+    deletePiPromptTemplate: vi.fn(),
   },
 }));
 
@@ -129,36 +135,94 @@ test("imports a prompt from an agent target file", async () => {
   );
 });
 
-test("the editor offers the target file's content when they differ", async () => {
+test("the editor leaves target-file differences to the drift banner", async () => {
   vi.mocked(api.listAgents).mockResolvedValue([
     agentStatus({ activePrompt: "claude-team" }),
   ]);
-  vi.mocked(api.readPromptTarget).mockResolvedValue({
-    path: "C:/x/.claude/CLAUDE.md",
-    content: "磁盘上的正文\n",
-  });
+  vi.mocked(api.listDrifts).mockResolvedValue([drift]);
   render(<PromptsPanel />);
+
+  // 面板先报漂移，编辑表单里不再重复提示、也不给第三条替换路径
+  const region = await screen.findByRole("region", { name: "落盘漂移" });
+  expect(region).toHaveTextContent("文件被改过");
   const [edit] = await screen.findAllByRole("button", { name: "编辑 team" });
   fireEvent.click(edit);
-
-  fireEvent.click(await screen.findByRole("button", { name: "替换成目标文件" }));
-  expect(screen.getByLabelText(/^正文/)).toHaveValue("磁盘上的正文\n");
-});
-
-test("no replace action when the target already matches the source", async () => {
-  vi.mocked(api.listAgents).mockResolvedValue([
-    agentStatus({ activePrompt: "claude-team" }),
-  ]);
-  vi.mocked(api.readPromptTarget).mockResolvedValue({
-    path: "C:/x/.claude/CLAUDE.md",
-    content: "正文\n",
-  });
-  render(<PromptsPanel />);
-  const [edit] = await screen.findAllByRole("button", { name: "编辑 team" });
-  fireEvent.click(edit);
-
   await screen.findByLabelText(/^正文/);
   expect(screen.queryByRole("button", { name: "替换成目标文件" })).not.toBeInTheDocument();
+  // 打开编辑器不需要去读目标文件
+  expect(api.readPromptTarget).not.toHaveBeenCalled();
+});
+
+test("pi splits prompts into library, system files and templates", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agentStatus({
+      id: "pi",
+      displayName: "pi",
+      promptPath: "C:/Users/me/.pi/agent/AGENTS.md",
+    }),
+  ]);
+  vi.mocked(api.readPiPromptFile).mockImplementation(async (kind) =>
+    kind === "system_append"
+      ? { exists: true, revision: "rev-append", content: "旧约定\n" }
+      : { exists: false, revision: "missing", content: "" },
+  );
+  vi.mocked(api.replacePiPromptFile).mockResolvedValue({
+    exists: true,
+    revision: "rev-new",
+    content: "新约定\n",
+  });
+  render(<PromptsPanel />);
+
+  // 三个区块都在；提示库仍是默认视图
+  expect(await screen.findByRole("button", { name: "提示库" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "系统提示" }));
+
+  expect(await screen.findByText("追加系统提示")).toBeInTheDocument();
+  expect(screen.getByText("替换系统提示")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "编辑 APPEND_SYSTEM.md" }));
+
+  const body = await screen.findByLabelText(/^正文/);
+  expect(body).toHaveValue("旧约定\n");
+  fireEvent.change(body, { target: { value: "新约定\n" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+  await waitFor(() =>
+    expect(api.replacePiPromptFile).toHaveBeenCalledWith(
+      "system_append",
+      "rev-append",
+      "新约定\n",
+    ),
+  );
+});
+
+test("pi templates can be created from the templates section", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agentStatus({ id: "pi", displayName: "pi" }),
+  ]);
+  vi.mocked(api.listPiPromptTemplates).mockResolvedValue([]);
+  vi.mocked(api.savePiPromptTemplate).mockResolvedValue({
+    slug: "review",
+    content: "检查\n",
+    revision: "r1",
+  });
+  render(<PromptsPanel />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "模板" }));
+  const [createTemplate] = await screen.findAllByRole("button", { name: "新建模板" });
+  fireEvent.click(createTemplate);
+
+  fireEvent.change(screen.getByLabelText(/^名称/), { target: { value: "review" } });
+  fireEvent.change(screen.getByLabelText(/^模板正文/), { target: { value: "检查\n" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+  await waitFor(() =>
+    expect(api.savePiPromptTemplate).toHaveBeenCalledWith(
+      "review",
+      undefined,
+      "missing",
+      "检查\n",
+    ),
+  );
 });
 
 test("foreign target asks for a decision instead of overwriting", async () => {

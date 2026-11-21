@@ -123,7 +123,7 @@ test("drift_banner_offers_both_resolutions_and_no_silent_write", async () => {
   await openSubagent();
 
   const region = await screen.findByRole("region", { name: "落盘漂移" });
-  expect(region).toHaveTextContent("磁盘与真源不一致");
+  expect(region).toHaveTextContent("与真源不一致");
   expect(region).toHaveTextContent("C:/x/.qoder-cn/agents/reviewer.md");
   expect(screen.getByRole("button", { name: "采纳磁盘" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "重刷真源" })).toBeEnabled();

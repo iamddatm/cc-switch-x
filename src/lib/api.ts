@@ -38,6 +38,9 @@ import type {
   ProjectSkillsView,
   ProjectSyncReport,
   ProjectView,
+  PiPromptFileKind,
+  PiPromptFileSnapshot,
+  PiPromptTemplate,
   PromptTarget,
   MigrationDecision,
   ProjectMigrationReport,
@@ -235,6 +238,36 @@ export const api = {
   /** 用系统默认程序打开 agent 的提示词目标文件；文件不存在时后端报错。 */
   openPromptTarget: (agentId: string) =>
     invoke<void>("open_prompt_target", { agentId }),
+
+  /** pi 的系统提示文件（SYSTEM.md / APPEND_SYSTEM.md）。 */
+  readPiPromptFile: (kind: PiPromptFileKind) =>
+    invoke<PiPromptFileSnapshot>("read_pi_prompt_file", { kind }),
+  replacePiPromptFile: (kind: PiPromptFileKind, expectedRevision: string, content: string) =>
+    invoke<PiPromptFileSnapshot>("replace_pi_prompt_file", {
+      kind,
+      expectedRevision,
+      content,
+    }),
+  deletePiPromptFile: (kind: PiPromptFileKind, expectedRevision: string) =>
+    invoke<boolean>("delete_pi_prompt_file", { kind, expectedRevision }),
+
+  /** pi 的斜杠命令模板目录。 */
+  listPiPromptTemplates: () =>
+    invoke<PiPromptTemplate[]>("list_pi_prompt_templates"),
+  savePiPromptTemplate: (
+    slug: string,
+    originalSlug: string | undefined,
+    expectedRevision: string,
+    content: string,
+  ) =>
+    invoke<PiPromptTemplate>("save_pi_prompt_template", {
+      slug,
+      originalSlug,
+      expectedRevision,
+      content,
+    }),
+  deletePiPromptTemplate: (slug: string, expectedRevision: string) =>
+    invoke<boolean>("delete_pi_prompt_template", { slug, expectedRevision }),
 
   /** 返回实测标签：written / removed / absent；外来内容会直接报错 */
   setRuleEnabled: (id: string, agentId: string, enabled: boolean) =>
