@@ -162,6 +162,14 @@ pub struct SessionProviderStatus {
     pub session_count: usize,
 }
 
+/// 某个 Skill 在统计窗口内的调用次数；按会话里 `Skill` 工具的 `skill` 入参聚合。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillUsageStat {
+    pub name: String,
+    pub calls: u32,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     #[error("IO 错误：{0}")]

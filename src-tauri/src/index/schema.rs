@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS session_messages (
     tool_name TEXT,
     PRIMARY KEY (agent_id, session_id, seq)
 );
+-- Skill 调用统计要按工具名筛消息；索引让统计查询不必整表扫描。
+CREATE INDEX IF NOT EXISTS session_messages_by_tool ON session_messages (tool_name, kind);
 CREATE TABLE IF NOT EXISTS session_files (
     agent_id TEXT NOT NULL,
     source_path TEXT NOT NULL,

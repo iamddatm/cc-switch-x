@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import { open } from "@tauri-apps/plugin-dialog";
-import { SkillsPanel } from "../panels/SkillsPanel";
+import { SKILL_USAGE_REFRESH_DAY_KEY, SkillsPanel } from "../panels/SkillsPanel";
 import { api } from "../lib/api";
 import { resetSkillUpdateCheck } from "../hooks/useSkillUpdateCheck";
 import { agentStatus, capabilities } from "../test/agents";
@@ -25,6 +25,8 @@ vi.mock("../lib/api", () => ({
     updateSkills: vi.fn(),
     uninstallSkills: vi.fn(),
     setSkillsEnabled: vi.fn(),
+    skillUsageStats: vi.fn(),
+    scanSessions: vi.fn(),
     getSkillRepos: vi.fn(),
     setSkillRepos: vi.fn(),
     discoverSkills: vi.fn(),
@@ -44,9 +46,19 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 const claude = agentStatus();
 
+function todayKey(): string {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   resetSkillUpdateCheck();
+  // 默认模拟「今天已经自动刷新过」，避免每个用例都触发会话扫描。
+  localStorage.clear();
+  localStorage.setItem(SKILL_USAGE_REFRESH_DAY_KEY, todayKey());
   vi.mocked(api.listAssets).mockResolvedValue([
     { assetType: "skill", id: "demo", name: "demo", updatedAt: 1, hash: "h" },
   ]);
@@ -79,6 +91,15 @@ beforeEach(() => {
   vi.mocked(api.updateSkills).mockResolvedValue({ outcomes: [] });
   vi.mocked(api.uninstallSkills).mockResolvedValue({ outcomes: [] });
   vi.mocked(api.setSkillsEnabled).mockResolvedValue({ ok: [], failed: [] });
+  vi.mocked(api.skillUsageStats).mockResolvedValue([]);
+  vi.mocked(api.scanSessions).mockResolvedValue({
+    added: 0,
+    updated: 0,
+    removed: 0,
+    unchanged: 0,
+    failures: [],
+    warnings: [],
+  });
   vi.mocked(api.previewSkillSource).mockResolvedValue({
     kind: "local",
     stagingId: null,
@@ -164,6 +185,61 @@ test("shows the link kind the backend actually used", async () => {
   expect(api.setSkillEnabled).toHaveBeenCalledTimes(1);
   // 勾选动过盘，落点核对要跟着重读：挂载时一次，开关之后再一次，横幅不能停在旧计数上
   await vi.waitFor(() => expect(api.verifySkillDeployments).toHaveBeenCalledTimes(2));
+});
+
+test("shows 30-day usage counts and sorts by them", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([
+    { assetType: "skill", id: "beta", name: "Beta", updatedAt: 1, hash: "h" },
+    { assetType: "skill", id: "alpha", name: "Alpha", updatedAt: 1, hash: "h" },
+  ]);
+  vi.mocked(api.skillUsageStats).mockResolvedValue([
+    { name: "Alpha", calls: 7 },
+    { name: "Beta", calls: 2 },
+  ]);
+  render(<SkillsPanel />);
+
+  expect(await screen.findByText("近30天 7 次")).toBeInTheDocument();
+  expect(screen.getByText("近30天 2 次")).toBeInTheDocument();
+  const rowLabels = () =>
+    screen
+      .getAllByRole("button", { name: /^查看 / })
+      .map((button) => button.getAttribute("aria-label"));
+  expect(rowLabels()).toEqual(["查看 Beta", "查看 Alpha"]);
+
+  fireEvent.change(screen.getByLabelText("按调用次数排序"), {
+    target: { value: "usageDesc" },
+  });
+  await waitFor(() => expect(rowLabels()).toEqual(["查看 Alpha", "查看 Beta"]));
+
+  fireEvent.change(screen.getByLabelText("按调用次数排序"), {
+    target: { value: "usageAsc" },
+  });
+  await waitFor(() => expect(rowLabels()).toEqual(["查看 Beta", "查看 Alpha"]));
+});
+
+test("refreshing usage scans sessions before reloading counts", async () => {
+  render(<SkillsPanel />);
+  await screen.findByLabelText("按调用次数排序");
+  fireEvent.click(screen.getByRole("button", { name: "Skills 的更多操作" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "刷新调用统计" }));
+  await waitFor(() => expect(api.scanSessions).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(api.skillUsageStats).toHaveBeenCalledTimes(2));
+});
+
+test("auto-refreshes usage on the first visit of the day", async () => {
+  localStorage.removeItem(SKILL_USAGE_REFRESH_DAY_KEY);
+  render(<SkillsPanel />);
+  await waitFor(() => expect(api.scanSessions).toHaveBeenCalledTimes(1));
+  expect(api.skillUsageStats).toHaveBeenCalled();
+  await waitFor(() =>
+    expect(localStorage.getItem(SKILL_USAGE_REFRESH_DAY_KEY)).toBe(todayKey()),
+  );
+});
+
+test("does not auto-refresh usage again on the same day", async () => {
+  render(<SkillsPanel />);
+  await waitFor(() => expect(api.skillUsageStats).toHaveBeenCalled());
+  expect(api.scanSessions).not.toHaveBeenCalled();
 });
 
 test("一键处理先讲清要动什么，确认后才动盘并重读核对", async () => {

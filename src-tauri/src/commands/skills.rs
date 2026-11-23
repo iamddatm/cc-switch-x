@@ -4,6 +4,7 @@
 //! 网络与整目录文件操作都放进 `spawn_blocking`；await 期间不持 index/settings 锁，
 //! 完成后单独锁 index 重建（索引始终是可丢弃的派生缓存）。
 
+use crate::domain::session::SkillUsageStat;
 use crate::error::AppError;
 use crate::import::mcp::ConflictPolicy;
 use crate::net::HttpFetcher;
@@ -27,6 +28,9 @@ use crate::settings::{effective_skill_repos, SkillRepo};
 use crate::state::AppState;
 use serde::Deserialize;
 use tauri::State;
+
+/// Skill 调用统计窗口：近 30 天。
+const SKILL_USAGE_WINDOW_DAYS: i64 = 30;
 
 async fn run_blocking<T, F>(task: F) -> Result<T, AppError>
 where
@@ -246,6 +250,22 @@ pub async fn set_skills_enabled(
         if enabled { "enable" } else { "disable" }
     ));
     Ok(report)
+}
+
+/// 近 30 天本地会话里每个 Skill 的调用次数（按 Skill 调用名聚合）。
+///
+/// 只读派生索引，不触发会话扫描；需要最新数据由前端先调用 `scan_sessions`。
+#[tauri::command]
+pub fn skill_usage_stats(
+    state: State<'_, AppState>,
+) -> Result<Vec<SkillUsageStat>, AppError> {
+    let since = chrono::Utc::now().timestamp_millis()
+        - SKILL_USAGE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+    let index = state
+        .index
+        .lock()
+        .map_err(|_| AppError::InvalidInput("index 锁失败".into()))?;
+    Ok(index.skill_usage_counts(since)?)
 }
 
 #[tauri::command]

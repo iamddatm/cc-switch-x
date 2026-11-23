@@ -39,6 +39,12 @@ export interface SkillOrigin {
   updatable: boolean;
 }
 
+/** 近 30 天本地会话里某个 Skill 的调用次数（按调用名聚合）。 */
+export interface SkillUsageStat {
+  name: string;
+  calls: number;
+}
+
 export interface AppSettings {
   storeRoot: string;
   theme: Theme;

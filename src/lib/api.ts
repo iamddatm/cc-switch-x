@@ -58,6 +58,7 @@ import type {
   SkillSourcePreview,
   SkillUninstallReport,
   SkillUpdateReport,
+  SkillUsageStat,
   SkillsShSearchResult,
   SkillsShTrendingResult,
   SessionDetail,
@@ -104,6 +105,8 @@ export const api = {
     invoke<SkillUninstallReport>("uninstall_skills", { ids }),
   setSkillsEnabled: (ids: string[], agentId: string, enabled: boolean) =>
     invoke<SkillBatchReport>("set_skills_enabled", { ids, agentId, enabled }),
+  /** 近 30 天本地会话里每个 Skill 的调用次数；刷新前需先 scanSessions。 */
+  skillUsageStats: () => invoke<SkillUsageStat[]>("skill_usage_stats"),
   getSettings: () => invoke<AppSettings>("get_settings"),
   setTheme: (theme: Theme) => invoke<AppSettings>("set_theme", { theme }),
   setStoreRoot: (storeRoot: string) => invoke<boolean>("set_store_root", { storeRoot }),

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderInput, Plus, RefreshCw, Sparkles } from "lucide-react";
 import { AgentColumnCells } from "../components/assets/AgentColumnCells";
@@ -42,12 +42,30 @@ import {
   supported,
   type AssetSummary,
   type SkillRepairItem,
+  type SkillUsageStat,
   type UnmanagedSkillReport,
 } from "../types";
 
 type Editing =
   | { mode: "create"; id: string; form: SkillForm }
   | { mode: "edit"; id: string; form: SkillForm };
+
+type SkillSort = "default" | "usageDesc" | "usageAsc";
+
+const SORT_OPTIONS: { value: SkillSort; label: string }[] = [
+  { value: "default", label: "默认排序" },
+  { value: "usageDesc", label: "调用次数从高到低" },
+  { value: "usageAsc", label: "调用次数从低到高" },
+];
+
+/** 当日是否已经自动刷新过调用统计；存本地日期，跨天首次进入再刷一次。 */
+export const SKILL_USAGE_REFRESH_DAY_KEY = "cc-switch-x:skill-usage:lastAutoRefreshDay";
+
+function localDayKey(date = new Date()): string {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
 
 const EMPTY_FORM: SkillForm = { name: "", description: "", body: "", extraFrontmatter: "" };
 
@@ -83,6 +101,10 @@ export function SkillsPanel() {
   const [dismissedUnmanaged, setDismissedUnmanaged] = useState<number | null>(null);
   const [agentFilter, setAgentFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "on" | "off">("all");
+  const [sortOrder, setSortOrder] = useState<SkillSort>("default");
+  // 调用次数按 Skill 调用名聚合；详情数据由本地会话索引派生。
+  const [usage, setUsage] = useState<Record<string, number>>({});
+  const [usageLoading, setUsageLoading] = useState(false);
   const [editing, setEditing] = useState<Editing | null>(null);
   const [viewing, setViewing] = useState<{ item: AssetSummary; form: SkillForm } | null>(null);
   const [loadingEdit, setLoadingEdit] = useState(false);
@@ -164,6 +186,48 @@ export function SkillsPanel() {
     void rescanUnmanaged();
   }, []);
 
+  // 统计只读会话索引；跨天首次进入时自动增量扫描一次，其余情况只在
+  // 「刷新调用统计」里显式扫描，避免每次进页面都重扫本机会话。
+  const loadUsage = async (scan = false): Promise<boolean> => {
+    setUsageLoading(true);
+    setActionError(null);
+    let scanned = true;
+    try {
+      if (scan) {
+        try {
+          await api.scanSessions();
+        } catch (reason) {
+          // 扫描失败也把旧索引里的次数显示出来，只是不记录「今天已刷新」。
+          scanned = false;
+          setActionError(String(reason));
+        }
+      }
+      const stats: SkillUsageStat[] = await api.skillUsageStats();
+      setUsage(Object.fromEntries(stats.map((stat) => [stat.name, stat.calls])));
+      return scanned;
+    } catch (reason) {
+      setActionError(String(reason));
+      return false;
+    } finally {
+      setUsageLoading(false);
+    }
+  };
+
+  // StrictMode 会重复执行挂载 effect；用 ref 保证一次进入只自动刷一次。
+  const autoUsageChecked = useRef(false);
+  useEffect(() => {
+    if (autoUsageChecked.current) return;
+    autoUsageChecked.current = true;
+    const today = localDayKey();
+    if (localStorage.getItem(SKILL_USAGE_REFRESH_DAY_KEY) === today) {
+      void loadUsage();
+      return;
+    }
+    void loadUsage(true).then((ok) => {
+      if (ok) localStorage.setItem(SKILL_USAGE_REFRESH_DAY_KEY, today);
+    });
+  }, []);
+
   const unmanagedCount =
     (unmanaged?.skills.length ?? 0) + (unmanaged?.conflicts.length ?? 0);
 
@@ -189,17 +253,25 @@ export function SkillsPanel() {
         : agentsForType.filter((agent) => agent.id === agentFilter),
     [agentFilter, agentsForType],
   );
+  // Skill 调用名来自 SKILL.md 的 frontmatter；目录 id 只在没有 name 时兜底。
+  const usageCount = (item: AssetSummary) => usage[item.name] ?? usage[item.id] ?? 0;
+
   // 搜索 / 来源 / 仓库三轴在 useSkillFilters 里；「启用状态」这一轴是用户级特有的。
   // 这条要 memo：每个搜索字符都会带着整张启用表重跑一遍谓词。
-  const visible = useMemo(
-    () =>
-      matched.filter((item) => {
-        if (statusFilter === "all") return true;
-        const enabled = statusAgents.some((agent) => enabledFor(agent, "skill").includes(item.id));
-        return statusFilter === "on" ? enabled : !enabled;
-      }),
-    [matched, statusAgents, statusFilter],
-  );
+  const visible = useMemo(() => {
+    const filtered = matched.filter((item) => {
+      if (statusFilter === "all") return true;
+      const enabled = statusAgents.some((agent) => enabledFor(agent, "skill").includes(item.id));
+      return statusFilter === "on" ? enabled : !enabled;
+    });
+    if (sortOrder === "default") return filtered;
+    const direction = sortOrder === "usageDesc" ? -1 : 1;
+    return [...filtered].sort((left, right) => {
+      const calls = usage[left.name] ?? usage[left.id] ?? 0;
+      const other = usage[right.name] ?? usage[right.id] ?? 0;
+      return calls === other ? left.name.localeCompare(right.name) : direction * (calls - other);
+    });
+  }, [matched, statusAgents, statusFilter, sortOrder, usage]);
   const updateIds = checkReport?.updates.map((update) => update.id) ?? [];
   const updatesCount = updateIds.length;
 
@@ -512,6 +584,11 @@ export function SkillsPanel() {
               label="Skills 的更多操作"
               items={[
                 { label: "从 cc-switch 导入", onSelect: () => setImporting(true) },
+                {
+                  label: usageLoading ? "正在刷新调用统计…" : "刷新调用统计",
+                  onSelect: () => void loadUsage(true),
+                  disabled: usageLoading,
+                },
                 { label: "刷新列表", onSelect: refreshAll },
               ]}
             />
@@ -580,8 +657,21 @@ export function SkillsPanel() {
               </option>
             ))}
           </Select>
-          <span className="ml-auto text-caption text-fg-3">
+          <Select
+            aria-label="按调用次数排序"
+            className="ml-auto"
+            value={sortOrder}
+            onChange={(event) => setSortOrder(event.target.value as SkillSort)}
+          >
+            {SORT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
+          <span className="text-caption text-fg-3">
             {visible.length} / {items.length} 个 Skill
+            {usageLoading && " · 统计刷新中…"}
           </span>
         </div>
 
@@ -761,7 +851,15 @@ export function SkillsPanel() {
                     }
                     selected={selected.has(item.id)}
                     titleBadges={
-                      item.origin?.updateAvailable ? <Badge tone="warning">可更新</Badge> : undefined
+                      <>
+                        {item.origin?.updateAvailable && <Badge tone="warning">可更新</Badge>}
+                        <Badge
+                          tone={usageCount(item) > 0 ? "brand" : "neutral"}
+                          title="近 30 天本地会话中的调用次数；在「更多操作 → 刷新调用统计」里更新"
+                        >
+                          近30天 {usageCount(item)} 次
+                        </Badge>
+                      </>
                     }
                     badges={
                       <SkillSourceBadge

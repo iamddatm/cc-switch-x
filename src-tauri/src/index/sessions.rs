@@ -3,10 +3,11 @@
 use super::{Index, IndexError};
 use crate::domain::session::{
     ParsedSession, SessionDetail, SessionMessage, SessionMessageKind, SessionRole, SessionSummary,
+    SkillUsageStat,
 };
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// 单条消息进索引前保留的最大 UTF-8 字节数；超出部分截断并留下可解释的标记。
 /// 截断点会回退到字符边界。`Image` 行不走这个上限（解析器已限制 data URL 大小）。
@@ -384,6 +385,41 @@ impl Index {
         Ok(usize::try_from(count).unwrap_or(usize::MAX))
     }
 
+    /// 按 Skill 调用名聚合统计窗口内的调用次数，按次数降序返回。
+    ///
+    /// 消息本身没有时间戳，窗口只能按会话的 `updated_at` 判断：近 30 天更新过的
+    /// 会话里，更早的调用也会被算进来。这是索引现有粒度的上限，比按文件 mtime
+    /// 猜时间更可靠。
+    pub fn skill_usage_counts(
+        &self,
+        since_millis: i64,
+    ) -> Result<Vec<SkillUsageStat>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.content FROM session_messages m \
+             JOIN sessions s ON s.agent_id=m.agent_id AND s.session_id=m.session_id \
+             WHERE m.kind='tool_call' AND m.tool_name='Skill' AND s.updated_at>=?1",
+        )?;
+        let rows = stmt.query_map([since_millis], |row| row.get::<_, String>(0))?;
+        let mut counts: HashMap<String, u32> = HashMap::new();
+        for row in rows {
+            if let Some(name) = skill_name_of_input(&row?) {
+                let calls = counts.entry(name).or_insert(0);
+                *calls = calls.saturating_add(1);
+            }
+        }
+        let mut out: Vec<SkillUsageStat> = counts
+            .into_iter()
+            .map(|(name, calls)| SkillUsageStat { name, calls })
+            .collect();
+        out.sort_by(|left, right| {
+            right
+                .calls
+                .cmp(&left.calls)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        Ok(out)
+    }
+
     /// 标题、项目目录与会话 ID 也参与搜索（规格 3.2）；命中这些字段时
     /// 用 `index=0` 占位，前端只展示 snippet，不做会话内跳转。
     fn metadata_hits(&self, query: &str, limit: u32) -> Result<Vec<SessionSearchHit>, IndexError> {
@@ -498,6 +534,29 @@ impl Index {
         }
         Ok(out)
     }
+}
+
+/// `Skill` 工具入参形如 `{"skill":"name","args":...}`。
+///
+/// 索引在 4 KiB 处截断超长消息，截断后不再是合法 JSON；`skill` 键排在入参最前，
+/// 因此解析失败时退化为在前缀里取紧随其后的字符串值。Skill 名是普通标识符，
+/// 不会出现需要解码的 JSON 转义。
+fn skill_name_of_input(content: &str) -> Option<String> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
+        if let Some(name) = value.get("skill").and_then(|value| value.as_str()) {
+            let name = name.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    let key = content.find("\"skill\"")?;
+    let after_key = &content[key + "\"skill\"".len()..];
+    let after_colon = after_key.trim_start().strip_prefix(':')?.trim_start();
+    let quoted = after_colon.strip_prefix('"')?;
+    let end = quoted.find('"')?;
+    let name = quoted[..end].trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 fn delete_session_rows(
@@ -644,6 +703,112 @@ mod tests {
             capped.len()
         );
         assert!(capped.contains("已截断"), "{capped}");
+    }
+
+    #[test]
+    fn skill_usage_counts_only_recent_skill_tool_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut index = Index::open(&dir.path().join("index.db")).unwrap();
+        let message = |kind, content: String, tool_name: &str| {
+            crate::domain::session::ParsedMessage {
+                role: SessionRole::Assistant,
+                kind,
+                content,
+                tool_name: Some(tool_name.to_string()),
+            }
+        };
+        let session = |id: &str, updated_at, messages| ParsedSession {
+            session_id: id.into(),
+            title: id.into(),
+            project_path: None,
+            created_at: None,
+            updated_at,
+            messages,
+            warnings: Vec::new(),
+        };
+
+        let truncated = format!("{{\"skill\":\"alpha\",\"args\":\"{}", "A".repeat(5000));
+        index
+            .upsert_session(
+                "claude",
+                &session(
+                    "recent",
+                    2_000,
+                    vec![
+                        message(
+                            SessionMessageKind::ToolCall,
+                            r#"{"skill":"alpha","args":"x"}"#.into(),
+                            "Skill",
+                        ),
+                        message(SessionMessageKind::ToolCall, truncated, "Skill"),
+                        // 工具结果同样带 tool_name，但不是一次调用。
+                        message(
+                            SessionMessageKind::ToolResult,
+                            r#"{"skill":"hidden"}"#.into(),
+                            "Skill",
+                        ),
+                        // 其他工具入参里出现 skill 字段不算 Skill 调用。
+                        message(
+                            SessionMessageKind::ToolCall,
+                            r#"{"skill":"ignored"}"#.into(),
+                            "Bash",
+                        ),
+                    ],
+                ),
+                "D:/recent.jsonl",
+                1,
+                1,
+            )
+            .unwrap();
+        index
+            .upsert_session(
+                "claude",
+                &session(
+                    "older",
+                    1_000,
+                    vec![message(
+                        SessionMessageKind::ToolCall,
+                        r#"{"skill":"beta"}"#.into(),
+                        "Skill",
+                    )],
+                ),
+                "D:/older.jsonl",
+                1,
+                1,
+            )
+            .unwrap();
+        index
+            .upsert_session(
+                "claude",
+                &session(
+                    "expired",
+                    100,
+                    vec![message(
+                        SessionMessageKind::ToolCall,
+                        r#"{"skill":"alpha"}"#.into(),
+                        "Skill",
+                    )],
+                ),
+                "D:/expired.jsonl",
+                1,
+                1,
+            )
+            .unwrap();
+
+        let stats = index.skill_usage_counts(500).unwrap();
+        assert_eq!(
+            stats,
+            vec![
+                SkillUsageStat {
+                    name: "alpha".into(),
+                    calls: 2
+                },
+                SkillUsageStat {
+                    name: "beta".into(),
+                    calls: 1
+                }
+            ]
+        );
     }
 
     #[test]

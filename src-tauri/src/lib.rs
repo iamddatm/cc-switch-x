@@ -163,6 +163,7 @@ pub fn run() {
             commands::skills::search_skills_sh,
             commands::skills::set_skill_repos,
             commands::skills::set_skills_enabled,
+            commands::skills::skill_usage_stats,
             commands::skills::uninstall_skills,
             commands::skills::update_skills,
             commands::skills::verify_skill_deployments,
