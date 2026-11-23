@@ -2,7 +2,8 @@ mod schema;
 pub mod sessions;
 
 pub use sessions::{
-    SessionFileRow, SessionFilter, SessionMatch, SessionSearchHit, INDEX_CONTENT_CAP,
+    SessionFileRow, SessionFilter, SessionIndexRow, SessionMatch, SessionSearchHit,
+    INDEX_CONTENT_CAP,
 };
 
 use crate::domain::{display_name, AssetState, AssetSummary, AssetType, DriftKind};
@@ -39,6 +40,7 @@ impl Index {
         }
         let conn = Connection::open(path)?;
         conn.execute_batch(schema::SCHEMA)?;
+        migrate_session_index(&conn)?;
         Ok(Self { conn })
     }
 
@@ -441,6 +443,26 @@ fn modified_millis(path: &Path) -> Option<i64> {
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|elapsed| elapsed.as_millis() as i64)
+}
+
+/// 会话索引升级：旧版 FTS 行与消息行没有 rowid 对应关系，删除时只能整表扫描。
+/// 会话表都是派生缓存，清空后由下一次扫描按新格式重建；assets 等表不受影响。
+fn migrate_session_index(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version >= schema::SESSION_INDEX_VERSION {
+        return Ok(());
+    }
+    // 整表 DROP 只释放页面，不逐行删除；在大索引上比 DELETE 快几个数量级。
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS session_messages_fts;
+         DROP TABLE IF EXISTS session_messages;
+         DROP TABLE IF EXISTS sessions;
+         DROP TABLE IF EXISTS session_files;",
+    )?;
+    // 重新执行 schema 建回会话表与 FTS。
+    conn.execute_batch(schema::SCHEMA)?;
+    conn.pragma_update(None, "user_version", schema::SESSION_INDEX_VERSION)?;
+    Ok(())
 }
 
 fn asset_type_key(asset_type: AssetType) -> &'static str {

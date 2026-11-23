@@ -82,3 +82,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
     tokenize='trigram'
 );
 "#;
+
+/// 会话索引格式版本。
+///
+/// 2：FTS 行的 rowid 与 `session_messages` 对齐（删除会话时按 rowid 精确删除，
+///    不再对 FTS 整表扫描）。1 及以前的索引必须清空会话缓存后重建。
+pub const SESSION_INDEX_VERSION: i64 = 2;

@@ -3,7 +3,9 @@
 use crate::adapters::paths::expand_root;
 use crate::domain::session::{ParsedSession, SessionDetail, SessionProviderStatus, SessionSummary};
 use crate::error::AppError;
-use crate::index::{Index, SessionFilter, SessionMatch, SessionSearchHit};
+use crate::index::{
+    Index, SessionFileRow, SessionFilter, SessionIndexRow, SessionMatch, SessionSearchHit,
+};
 use crate::services::agents::load_state;
 use crate::sessions::{discover_provider, providers, SessionProvider};
 use crate::store::Store;
@@ -107,16 +109,191 @@ pub fn search_in_session(
     )?)
 }
 
+/// 扫描分四段：发现（无锁）→ 快照（短持锁）→ 计划（无锁解析）→ 分批落库（逐批短持锁）。
+///
+/// 之所以拆开，是因为全量扫描本机会话可能要几分钟（大文件解析与清理过期行），
+/// 期间若一直持有 `AppState::index`，所有读取索引的命令（MCP 列表等）都会排队，
+/// 前端表现为整页卡死。
+///
+/// 一次扫描（测试与内部调用）：解析与落库在同一线程完成。
 pub fn scan_all(
     store: &Store,
     index: &mut Index,
     home: &Path,
 ) -> Result<SessionScanReport, AppError> {
-    let mut report = SessionScanReport::default();
-    for provider in providers() {
-        scan_provider(store, index, home, provider, &mut report)?;
+    let discovered = discover_files(store, home)?;
+    let snapshot = snapshot_index(index, discovered)?;
+    let plan = plan_scan(snapshot);
+    let (mut report, batches) = plan.into_parts();
+    for batch in batches {
+        apply_batch(index, batch, &mut report)?;
     }
     Ok(report)
+}
+
+/// 发现阶段的结果：一个 provider 待扫描的文件，不需要索引锁。
+pub struct DiscoveredFiles {
+    provider: &'static SessionProvider,
+    files: Vec<PathBuf>,
+}
+
+/// 索引快照：增量判定与重复裁决需要的历史行，持锁读一次即可。
+pub struct ScanSnapshot {
+    providers: Vec<ProviderSnapshot>,
+}
+
+struct ProviderSnapshot {
+    provider: &'static SessionProvider,
+    files: Vec<PathBuf>,
+    file_rows: HashMap<String, SessionFileRow>,
+    sessions: HashMap<String, SessionIndexRow>,
+}
+
+/// 扫描计划：解析阶段已完成，落库按批次逐个执行。
+pub struct ScanPlan {
+    report: SessionScanReport,
+    batches: Vec<ScanBatch>,
+}
+
+impl ScanPlan {
+    /// 解析阶段已经确定的统计：新增 / 更新 / 未变 / 失败 / 警告；移除数在落库时累加。
+    pub fn into_parts(self) -> (SessionScanReport, Vec<ScanBatch>) {
+        (self.report, self.batches)
+    }
+}
+
+/// 落库批次。每批一个事务，调用方在批与批之间释放索引锁，让其它命令插队。
+pub enum ScanBatch {
+    /// 一个文件解析出的赢家会话与文件行；同时清理该源下已不在的旧会话。
+    File {
+        agent_id: &'static str,
+        source_path: String,
+        mtime: i64,
+        size: i64,
+        file_session_id: Option<String>,
+        parsed: Vec<ParsedSession>,
+        keep: Vec<String>,
+    },
+    /// 解析失败：只记录文件行错误，不动已有会话。
+    Failure {
+        agent_id: &'static str,
+        source_path: String,
+        session_id: Option<String>,
+        mtime: i64,
+        size: i64,
+        reason: String,
+    },
+    /// 磁盘上已消失的源文件：删文件行与该源下的会话。
+    Stale {
+        agent_id: &'static str,
+        sources: Vec<String>,
+    },
+}
+
+/// 单个过期清理批次包含的源文件数：批次小一点，其它命令更容易在批与批之间拿到锁。
+const STALE_BATCH: usize = 16;
+
+/// 发现阶段：只读文件系统与 local agent 覆盖，不碰索引。
+pub fn discover_files(store: &Store, home: &Path) -> Result<Vec<DiscoveredFiles>, AppError> {
+    let mut out = Vec::new();
+    for provider in providers() {
+        if provider.parse.is_none() {
+            continue;
+        }
+        let base_override = load_state(store, provider.agent_id)?.base_override;
+        let files = discover_provider(provider, home, base_override.as_deref());
+        out.push(DiscoveredFiles { provider, files });
+    }
+    Ok(out)
+}
+
+/// 快照阶段：一次读入每个 provider 的文件行与会话摘要，供后续无锁解析使用。
+pub fn snapshot_index(
+    index: &Index,
+    discovered: Vec<DiscoveredFiles>,
+) -> Result<ScanSnapshot, AppError> {
+    let mut providers = Vec::new();
+    for entry in discovered {
+        let file_rows = index
+            .session_files_for_agent(entry.provider.agent_id)?
+            .into_iter()
+            .map(|row| (row.source_path.clone(), row))
+            .collect();
+        let sessions = index
+            .session_rows_for_agent(entry.provider.agent_id)?
+            .into_iter()
+            .map(|row| (row.session_id.clone(), row))
+            .collect();
+        providers.push(ProviderSnapshot {
+            provider: entry.provider,
+            files: entry.files,
+            file_rows,
+            sessions,
+        });
+    }
+    Ok(ScanSnapshot { providers })
+}
+
+/// 计划阶段：读取文件元数据并解析，不持任何锁。这里是扫描最耗时的部分。
+pub fn plan_scan(snapshot: ScanSnapshot) -> ScanPlan {
+    let mut plan = ScanPlan {
+        report: SessionScanReport::default(),
+        batches: Vec::new(),
+    };
+    for provider in snapshot.providers {
+        plan_provider(provider, &mut plan);
+    }
+    plan
+}
+
+/// 落库阶段：执行一个批次；`report` 只需在调用方持有并跨批累积。
+pub fn apply_batch(
+    index: &mut Index,
+    batch: ScanBatch,
+    report: &mut SessionScanReport,
+) -> Result<(), AppError> {
+    match batch {
+        ScanBatch::File {
+            agent_id,
+            source_path,
+            mtime,
+            size,
+            file_session_id,
+            parsed,
+            keep,
+        } => {
+            report.removed += index.apply_scanned_file(
+                agent_id,
+                &source_path,
+                &parsed,
+                mtime,
+                size,
+                file_session_id.as_deref(),
+                &keep,
+            )?;
+        }
+        ScanBatch::Failure {
+            agent_id,
+            source_path,
+            session_id,
+            mtime,
+            size,
+            reason,
+        } => {
+            index.record_session_file(
+                agent_id,
+                &source_path,
+                session_id.as_deref(),
+                mtime,
+                size,
+                Some(&reason),
+            )?;
+        }
+        ScanBatch::Stale { agent_id, sources } => {
+            report.removed += index.delete_scanned_sources(agent_id, &sources)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn providers_status(
@@ -155,43 +332,38 @@ pub fn providers_status(
 struct Candidate {
     parsed: ParsedSession,
     file: String,
-    mtime: i64,
-    size: i64,
     existed: bool,
 }
 
-fn scan_provider(
-    store: &Store,
-    index: &mut Index,
-    home: &Path,
-    provider: &SessionProvider,
-    report: &mut SessionScanReport,
-) -> Result<(), AppError> {
-    let Some(parse) = provider.parse else {
-        return Ok(());
-    };
-    let base_override = load_state(store, provider.agent_id)?.base_override;
-    let files = discover_provider(provider, home, base_override.as_deref());
-    let discovered: HashSet<String> = files
+/// 单个 provider 的计划：增量判定、解析、重复裁决全部在内存里完成，不碰索引。
+fn plan_provider(snapshot: ProviderSnapshot, plan: &mut ScanPlan) {
+    let ScanPlan { report, batches } = plan;
+    let agent_id = snapshot.provider.agent_id;
+    let discovered: HashSet<String> = snapshot
+        .files
         .iter()
         .map(|path| path.to_string_lossy().into_owned())
         .collect();
-    let stale: Vec<_> = index
-        .session_files_for_agent(provider.agent_id)?
-        .into_iter()
-        .filter(|row| !discovered.contains(&row.source_path))
+    let mut stale: Vec<String> = snapshot
+        .file_rows
+        .keys()
+        .filter(|source| !discovered.contains(*source))
+        .cloned()
         .collect();
+    // 排序让每轮批次顺序稳定，便于日志与测试复现。
+    stale.sort();
 
     let mut chosen: HashMap<String, Candidate> = HashMap::new();
-    let mut parsed_sources: Vec<String> = Vec::new();
+    // 成功解析的文件：源路径、mtime、size、文件行里要记的会话 ID。
+    let mut parsed_files: Vec<(String, i64, i64, Option<String>)> = Vec::new();
 
-    for file in &files {
+    for file in &snapshot.files {
         let source = file.to_string_lossy().into_owned();
         let metadata = match std::fs::metadata(file) {
             Ok(metadata) => metadata,
             Err(error) => {
                 report.failures.push(SessionFileFailure {
-                    agent_id: provider.agent_id.to_string(),
+                    agent_id: agent_id.to_string(),
                     file: source,
                     reason: error.to_string(),
                 });
@@ -205,30 +377,31 @@ fn scan_provider(
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|duration| duration.as_millis() as i64)
             .unwrap_or(0);
-        let previous_row = index.session_file(provider.agent_id, &source)?;
-        if let Some(row) = &previous_row {
+        let previous_row = snapshot.file_rows.get(&source);
+        if let Some(row) = previous_row {
             if row.mtime == mtime && row.size == size && row.parse_error.is_none() {
                 report.unchanged += 1;
                 continue;
             }
         }
 
+        let Some(parse) = snapshot.provider.parse else {
+            continue;
+        };
         let parsed_sessions = match parse(file) {
             Ok(sessions) => sessions,
             Err(error) => {
                 let reason = error.to_string();
-                index.record_session_file(
-                    provider.agent_id,
-                    &source,
-                    previous_row
-                        .as_ref()
-                        .and_then(|row| row.session_id.as_deref()),
+                batches.push(ScanBatch::Failure {
+                    agent_id,
+                    source_path: source.clone(),
+                    session_id: previous_row.and_then(|row| row.session_id.clone()),
                     mtime,
                     size,
-                    Some(&reason),
-                )?;
+                    reason: reason.clone(),
+                });
                 report.failures.push(SessionFileFailure {
-                    agent_id: provider.agent_id.to_string(),
+                    agent_id: agent_id.to_string(),
                     file: source,
                     reason,
                 });
@@ -239,48 +412,43 @@ fn scan_provider(
         for session in &parsed_sessions {
             for warning in &session.warnings {
                 report.warnings.push(SessionFileWarning {
-                    agent_id: provider.agent_id.to_string(),
+                    agent_id: agent_id.to_string(),
                     file: source.clone(),
                     line: warning.line,
                     message: warning.message.clone(),
                 });
             }
         }
-        index.record_session_file(
-            provider.agent_id,
-            &source,
-            parsed_sessions
-                .first()
-                .map(|session| session.session_id.as_str()),
+        parsed_files.push((
+            source.clone(),
             mtime,
             size,
-            None,
-        )?;
-        parsed_sources.push(source.clone());
+            parsed_sessions
+                .first()
+                .map(|session| session.session_id.clone()),
+        ));
 
         for parsed in parsed_sessions {
             let id = parsed.session_id.clone();
             let mut candidate = Candidate {
                 parsed,
                 file: source.clone(),
-                mtime,
-                size,
                 existed: false,
             };
             if let Some(current) = chosen.get(&id) {
                 if candidate_wins(&candidate.parsed, &current.parsed) {
-                    record_duplicate(report, provider.agent_id, &current.file, &id);
+                    record_duplicate(report, agent_id, &current.file, &id);
                     // 同轮替换的候选还没经过索引查询；继承被替换者的
                     // existed，否则老会话会被误报成 added。
                     candidate.existed = current.existed || candidate.existed;
                     chosen.insert(id, candidate);
                 } else {
-                    record_duplicate(report, provider.agent_id, &candidate.file, &id);
+                    record_duplicate(report, agent_id, &candidate.file, &id);
                 }
                 continue;
             }
 
-            if let Some(previous) = index.session_by_id(provider.agent_id, &id)? {
+            if let Some(previous) = snapshot.sessions.get(&id) {
                 candidate.existed = true;
                 if previous.source_path != source
                     && !candidate_wins_values(
@@ -290,11 +458,11 @@ fn scan_provider(
                         previous.message_count as usize,
                     )
                 {
-                    record_duplicate(report, provider.agent_id, &candidate.file, &id);
+                    record_duplicate(report, agent_id, &candidate.file, &id);
                     continue;
                 }
                 if previous.source_path != source {
-                    record_duplicate(report, provider.agent_id, &previous.source_path, &id);
+                    record_duplicate(report, agent_id, &previous.source_path, &id);
                 }
             }
             chosen.insert(id, candidate);
@@ -306,35 +474,42 @@ fn scan_provider(
         (&left.file, &left.parsed.session_id).cmp(&(&right.file, &right.parsed.session_id))
     });
     let mut winners_by_source: HashMap<String, Vec<String>> = HashMap::new();
+    let mut sessions_by_source: HashMap<String, Vec<ParsedSession>> = HashMap::new();
     for candidate in candidates {
         if candidate.existed {
             report.updated += 1;
         } else {
             report.added += 1;
         }
-        index.upsert_session(
-            provider.agent_id,
-            &candidate.parsed,
-            &candidate.file,
-            candidate.mtime,
-            candidate.size,
-        )?;
         winners_by_source
+            .entry(candidate.file.clone())
+            .or_default()
+            .push(candidate.parsed.session_id.clone());
+        sessions_by_source
             .entry(candidate.file)
             .or_default()
-            .push(candidate.parsed.session_id);
+            .push(candidate.parsed);
     }
 
-    for source in parsed_sources {
-        let keep = winners_by_source.remove(&source).unwrap_or_default();
-        report.removed += index.delete_sessions_by_source(provider.agent_id, &source, &keep)?;
+    // 一个文件一批：解析成功的文件即使没赢下任何会话也要写文件行并清理旧会话。
+    for (source, mtime, size, file_session_id) in parsed_files {
+        batches.push(ScanBatch::File {
+            agent_id,
+            source_path: source.clone(),
+            mtime,
+            size,
+            file_session_id,
+            parsed: sessions_by_source.remove(&source).unwrap_or_default(),
+            keep: winners_by_source.remove(&source).unwrap_or_default(),
+        });
     }
-    for row in stale {
-        report.removed +=
-            index.delete_sessions_by_source(provider.agent_id, &row.source_path, &[])?;
-        index.delete_session_file(provider.agent_id, &row.source_path)?;
+
+    for chunk in stale.chunks(STALE_BATCH) {
+        batches.push(ScanBatch::Stale {
+            agent_id,
+            sources: chunk.to_vec(),
+        });
     }
-    Ok(())
 }
 
 fn candidate_wins(candidate: &ParsedSession, current: &ParsedSession) -> bool {

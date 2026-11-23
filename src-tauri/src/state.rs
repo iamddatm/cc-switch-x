@@ -26,6 +26,8 @@ pub struct AppState {
     pub git_ops: Arc<Mutex<()>>,
     /// 项目级扫描/同步串行；自动与手动同步共用。
     pub project_ops: Arc<Mutex<()>>,
+    /// 会话扫描串行；两次扫描交错解析与写库会让增量快照失真。
+    pub session_scan_ops: Arc<Mutex<()>>,
     /// 云备份上传 / 下载 / 状态探测串行，避免两个任务同时替换远端对象。
     pub cloud_ops: Arc<Mutex<()>>,
     /// 云备份连接代次：连接参数变化时自增，旧任务据此放弃回写运行状态。
@@ -154,6 +156,7 @@ impl AppState {
             maintenance: Arc::new(RwLock::new(())),
             git_ops: Arc::new(Mutex::new(())),
             project_ops: Arc::new(Mutex::new(())),
+            session_scan_ops: Arc::new(Mutex::new(())),
             cloud_ops: Arc::new(Mutex::new(())),
             cloud_connection_epoch: AtomicU64::new(0),
             git_tx,

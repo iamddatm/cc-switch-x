@@ -19,13 +19,35 @@ fn lock_index(
 }
 
 /// 全量增量扫描。必须放在阻塞线程里：本机 Claude 主会话约 710 MB。
+///
+/// 解析阶段不持索引锁，落库按批次逐批持锁。这样即使扫描持续几分钟，其它页面
+/// 的索引读取也只会在单个批次上等一小会儿，而不是整页卡死。
 #[tauri::command]
 pub async fn scan_sessions(app: tauri::AppHandle) -> Result<SessionScanReport, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         use tauri::Manager;
+        use std::time::Duration;
         let state = app.state::<AppState>();
-        let mut index = lock_index(&state)?;
-        sessions::scan_all(&state.store, &mut index, &state.home)
+        // 两次扫描排队，避免同一批文件重复解析、交错写入。
+        let _serial = state
+            .session_scan_ops
+            .lock()
+            .map_err(|_| AppError::InvalidInput("会话扫描锁失败".into()))?;
+        let discovered = sessions::discover_files(&state.store, &state.home)?;
+        let snapshot = {
+            let index = lock_index(&state)?;
+            sessions::snapshot_index(&index, discovered)?
+        }; // 快照读完后立刻释放锁，解析阶段只读文件。
+        let (mut report, batches) = sessions::plan_scan(snapshot).into_parts();
+        for batch in batches {
+            {
+                let mut index = lock_index(&state)?;
+                sessions::apply_batch(&mut index, batch, &mut report)?;
+            }
+            // 让出一次调度：排队中的列表读取才有机会在批次之间拿到锁。
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Ok(report)
     })
     .await
     .map_err(|error| AppError::InvalidInput(format!("会话扫描任务失败：{error}")))?

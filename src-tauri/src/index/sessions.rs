@@ -5,7 +5,7 @@ use crate::domain::session::{
     ParsedSession, SessionDetail, SessionMessage, SessionMessageKind, SessionRole, SessionSummary,
     SkillUsageStat,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -58,6 +58,15 @@ pub struct SessionFileRow {
     pub parse_error: Option<String>,
 }
 
+/// 扫描计划用的会话摘要：只取增量判定与重复裁决需要的列。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionIndexRow {
+    pub session_id: String,
+    pub source_path: String,
+    pub updated_at: i64,
+    pub message_count: u32,
+}
+
 const SUMMARY_SELECT: &str = "SELECT s.agent_id,s.session_id,s.title,s.project_path,s.source_path,s.created_at,s.updated_at,s.message_count,f.parse_error, \
      (SELECT m.content FROM session_messages m \
       WHERE m.agent_id=s.agent_id AND m.session_id=s.session_id AND m.kind='text' \
@@ -74,68 +83,58 @@ impl Index {
         size: i64,
     ) -> Result<(), IndexError> {
         let tx = self.conn.transaction()?;
-        delete_session_rows(&tx, agent_id, &parsed.session_id)?;
-        for (seq, message) in parsed.messages.iter().enumerate() {
-            let seq = seq as i64;
-            // 图片是 data URL：截断会得到无法解码的字符串，解析器已单独限制其大小。
-            let content = if message.kind == SessionMessageKind::Image {
-                message.content.clone()
-            } else {
-                cap_content(&message.content)
-            };
-            tx.execute(
-                "INSERT INTO session_messages (agent_id,session_id,seq,role,kind,content,tool_name) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                params![
-                    agent_id,
-                    parsed.session_id,
-                    seq,
-                    message.role.as_db(),
-                    message.kind.as_db(),
-                    content,
-                    message.tool_name.as_deref()
-                ],
-            )?;
-            if message.kind != SessionMessageKind::Image {
-                tx.execute(
-                    "INSERT INTO session_messages_fts (content,agent_id,session_id,seq) \
-                     VALUES (?1,?2,?3,?4)",
-                    params![content, agent_id, parsed.session_id, seq],
-                )?;
-            }
-        }
-        let project_path = parsed
-            .project_path
-            .as_ref()
-            .map(|path| path.to_string_lossy().to_string());
-        let message_count = i64::from(u32::try_from(parsed.messages.len()).unwrap_or(u32::MAX));
-        tx.execute(
-            "INSERT INTO sessions \
-             (agent_id,session_id,title,project_path,source_path,created_at,updated_at,message_count) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8) \
-             ON CONFLICT(agent_id,session_id) DO UPDATE SET \
-             title=excluded.title,project_path=excluded.project_path,source_path=excluded.source_path,\
-             created_at=excluded.created_at,updated_at=excluded.updated_at,message_count=excluded.message_count",
-            params![
-                agent_id,
-                parsed.session_id,
-                parsed.title,
-                project_path,
-                source_path,
-                parsed.created_at,
-                parsed.updated_at,
-                message_count
-            ],
-        )?;
+        upsert_session_in(&tx, agent_id, parsed, source_path, mtime, size)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 扫描落库：一个文件的全部会话与文件行在同一个事务里写入，并清理该源下
+    /// 本轮已不存在的旧会话。扫描命令按文件分批持锁，单批持锁时间受文件大小约束。
+    pub fn apply_scanned_file(
+        &mut self,
+        agent_id: &str,
+        source_path: &str,
+        parsed: &[ParsedSession],
+        mtime: i64,
+        size: i64,
+        file_session_id: Option<&str>,
+        keep: &[String],
+    ) -> Result<usize, IndexError> {
+        let tx = self.conn.transaction()?;
+        // 文件里一个会话都没留下（全被判给别的文件）时也要写文件行，否则下一轮
+        // 还会把这个文件当成待解析。
         tx.execute(
             "INSERT INTO session_files (agent_id,source_path,session_id,mtime,size,parse_error) \
              VALUES (?1,?2,?3,?4,?5,NULL) \
              ON CONFLICT(agent_id,source_path) DO UPDATE SET \
              session_id=excluded.session_id,mtime=excluded.mtime,size=excluded.size,parse_error=NULL",
-            params![agent_id, source_path, parsed.session_id, mtime, size],
+            params![agent_id, source_path, file_session_id, mtime, size],
         )?;
+        for session in parsed {
+            upsert_session_in(&tx, agent_id, session, source_path, mtime, size)?;
+        }
+        let removed = delete_sessions_by_source_in(&tx, agent_id, source_path, keep)?;
         tx.commit()?;
-        Ok(())
+        Ok(removed)
+    }
+
+    /// 删除已从磁盘消失的源文件及其会话；多个源合成一个事务，减少扫描时的提交次数。
+    pub fn delete_scanned_sources(
+        &mut self,
+        agent_id: &str,
+        sources: &[String],
+    ) -> Result<usize, IndexError> {
+        let tx = self.conn.transaction()?;
+        let mut removed = 0;
+        for source in sources {
+            removed += delete_sessions_by_source_in(&tx, agent_id, source, &[])?;
+            tx.execute(
+                "DELETE FROM session_files WHERE agent_id=?1 AND source_path=?2",
+                params![agent_id, source],
+            )?;
+        }
+        tx.commit()?;
+        Ok(removed)
     }
 
     pub fn delete_session(&mut self, agent_id: &str, session_id: &str) -> Result<(), IndexError> {
@@ -152,21 +151,7 @@ impl Index {
         keep: &[String],
     ) -> Result<usize, IndexError> {
         let tx = self.conn.transaction()?;
-        let ids = {
-            let mut stmt =
-                tx.prepare("SELECT session_id FROM sessions WHERE agent_id=?1 AND source_path=?2")?;
-            let rows = stmt.query_map(params![agent_id, source_path], |row| {
-                row.get::<_, String>(0)
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        let mut removed = 0;
-        for id in ids {
-            if !keep.iter().any(|kept| kept == &id) {
-                delete_session_rows(&tx, agent_id, &id)?;
-                removed += 1;
-            }
-        }
+        let removed = delete_sessions_by_source_in(&tx, agent_id, source_path, keep)?;
         tx.commit()?;
         Ok(removed)
     }
@@ -311,6 +296,25 @@ impl Index {
              FROM session_files WHERE agent_id=?1 ORDER BY source_path",
         )?;
         let rows = stmt.query_map([agent_id], row_to_file)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn session_rows_for_agent(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<SessionIndexRow>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id,source_path,updated_at,message_count \
+             FROM sessions WHERE agent_id=?1",
+        )?;
+        let rows = stmt.query_map([agent_id], |row| {
+            Ok(SessionIndexRow {
+                session_id: row.get(0)?,
+                source_path: row.get(1)?,
+                updated_at: row.get(2)?,
+                message_count: u32::try_from(row.get::<_, i64>(3)?).unwrap_or(u32::MAX),
+            })
+        })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -559,15 +563,126 @@ fn skill_name_of_input(content: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
+/// 事务内的单个会话写入：覆盖旧消息与会话摘要，并刷新文件行。
+fn upsert_session_in(
+    tx: &Transaction<'_>,
+    agent_id: &str,
+    parsed: &ParsedSession,
+    source_path: &str,
+    mtime: i64,
+    size: i64,
+) -> Result<(), IndexError> {
+    delete_session_rows(tx, agent_id, &parsed.session_id)?;
+    for (seq, message) in parsed.messages.iter().enumerate() {
+        let seq = seq as i64;
+        // 图片是 data URL：截断会得到无法解码的字符串，解析器已单独限制其大小。
+        let content = if message.kind == SessionMessageKind::Image {
+            message.content.clone()
+        } else {
+            cap_content(&message.content)
+        };
+        tx.execute(
+            "INSERT INTO session_messages (agent_id,session_id,seq,role,kind,content,tool_name) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                agent_id,
+                parsed.session_id,
+                seq,
+                message.role.as_db(),
+                message.kind.as_db(),
+                content,
+                message.tool_name.as_deref()
+            ],
+        )?;
+        if message.kind != SessionMessageKind::Image {
+            // FTS 行的 rowid 必须与消息行一致：删除会话时才能按 rowid 精确删除，
+            // 否则 FTS5 会对整张虚拟表做全扫描（本机 53 万行时约半秒一条）。
+            let rowid = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO session_messages_fts (rowid,content,agent_id,session_id,seq) \
+                 VALUES (?1,?2,?3,?4,?5)",
+                params![rowid, content, agent_id, parsed.session_id, seq],
+            )?;
+        }
+    }
+    let project_path = parsed
+        .project_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string());
+    let message_count = i64::from(u32::try_from(parsed.messages.len()).unwrap_or(u32::MAX));
+    tx.execute(
+        "INSERT INTO sessions \
+         (agent_id,session_id,title,project_path,source_path,created_at,updated_at,message_count) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8) \
+         ON CONFLICT(agent_id,session_id) DO UPDATE SET \
+         title=excluded.title,project_path=excluded.project_path,source_path=excluded.source_path,\
+         created_at=excluded.created_at,updated_at=excluded.updated_at,message_count=excluded.message_count",
+        params![
+            agent_id,
+            parsed.session_id,
+            parsed.title,
+            project_path,
+            source_path,
+            parsed.created_at,
+            parsed.updated_at,
+            message_count
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO session_files (agent_id,source_path,session_id,mtime,size,parse_error) \
+         VALUES (?1,?2,?3,?4,?5,NULL) \
+         ON CONFLICT(agent_id,source_path) DO UPDATE SET \
+         session_id=excluded.session_id,mtime=excluded.mtime,size=excluded.size,parse_error=NULL",
+        params![agent_id, source_path, parsed.session_id, mtime, size],
+    )?;
+    Ok(())
+}
+
+/// 事务内删除某个源文件下不在 `keep` 里的会话。
+fn delete_sessions_by_source_in(
+    tx: &Transaction<'_>,
+    agent_id: &str,
+    source_path: &str,
+    keep: &[String],
+) -> Result<usize, IndexError> {
+    let ids = {
+        let mut stmt =
+            tx.prepare("SELECT session_id FROM sessions WHERE agent_id=?1 AND source_path=?2")?;
+        let rows = stmt.query_map(params![agent_id, source_path], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let mut removed = 0;
+    for id in ids {
+        if !keep.iter().any(|kept| kept == &id) {
+            delete_session_rows(tx, agent_id, &id)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 fn delete_session_rows(
     conn: &Connection,
     agent_id: &str,
     session_id: &str,
 ) -> rusqlite::Result<()> {
-    conn.execute(
-        "DELETE FROM session_messages_fts WHERE agent_id=?1 AND session_id=?2",
-        params![agent_id, session_id],
-    )?;
+    // FTS5 的 WHERE 条件只有 MATCH 与 rowid 能走索引；按 agent/session 删会全表扫描，
+    // 所以先从消息表（主键索引）取出 rowid，再逐行精确删除。
+    let rowids: Vec<i64> = {
+        let mut stmt = conn.prepare(
+            "SELECT rowid FROM session_messages WHERE agent_id=?1 AND session_id=?2",
+        )?;
+        let rows = stmt.query_map(params![agent_id, session_id], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    {
+        let mut stmt = conn.prepare("DELETE FROM session_messages_fts WHERE rowid=?1")?;
+        for rowid in rowids {
+            stmt.execute([rowid])?;
+        }
+    }
     conn.execute(
         "DELETE FROM session_messages WHERE agent_id=?1 AND session_id=?2",
         params![agent_id, session_id],
@@ -902,5 +1017,98 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn fts_rows_share_rowid_with_messages_and_deletions_hit_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut index = Index::open(&dir.path().join("index.db")).unwrap();
+        let parsed = ParsedSession {
+            session_id: "s1".into(),
+            title: "会话".into(),
+            project_path: None,
+            created_at: None,
+            updated_at: 1,
+            messages: vec![
+                crate::domain::session::ParsedMessage {
+                    role: SessionRole::User,
+                    kind: SessionMessageKind::Text,
+                    content: "正文".into(),
+                    tool_name: None,
+                },
+                crate::domain::session::ParsedMessage {
+                    role: SessionRole::Assistant,
+                    kind: SessionMessageKind::ToolCall,
+                    content: "{\"skill\":\"x\"}".into(),
+                    tool_name: Some("Skill".into()),
+                },
+            ],
+            warnings: Vec::new(),
+        };
+        index
+            .upsert_session("claude", &parsed, "D:/s1.jsonl", 1, 1)
+            .unwrap();
+
+        // FTS 行必须与消息行 rowid 一一对应，删除才能按 rowid 命中。
+        let orphans: i64 = index
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_messages_fts f \
+                 WHERE NOT EXISTS (SELECT 1 FROM session_messages m WHERE m.rowid=f.rowid)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0);
+
+        index.delete_session("claude", "s1").unwrap();
+        let left: i64 = index
+            .conn
+            .query_row("SELECT COUNT(*) FROM session_messages_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "删除会话后不能留下 FTS 残留");
+        assert!(index.search_sessions("正文", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn opening_an_old_index_clears_session_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let index = Index::open(&path).unwrap();
+            index
+                .conn
+                .execute(
+                    "INSERT INTO sessions \
+                     (agent_id,session_id,title,source_path,updated_at,message_count) \
+                     VALUES ('claude','old','旧会话','D:/old.jsonl',1,0)",
+                    [],
+                )
+                .unwrap();
+            index
+                .conn
+                .pragma_update(None, "user_version", 1)
+                .unwrap();
+        }
+        let index = Index::open(&path).unwrap();
+        let sessions: i64 = index
+            .conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(sessions, 0, "旧格式会话缓存应被清空，等下一次扫描重建");
+        let version: i64 = index
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, crate::index::schema::SESSION_INDEX_VERSION);
+        // FTS 表已重建，可以继续写入。
+        index
+            .conn
+            .execute(
+                "INSERT INTO session_messages_fts(content,agent_id,session_id,seq) \
+                 VALUES ('工具调用','claude','s1',0)",
+                [],
+            )
+            .unwrap();
     }
 }

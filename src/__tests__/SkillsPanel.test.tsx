@@ -196,6 +196,10 @@ test("shows 30-day usage counts and sorts by them", async () => {
     { name: "Alpha", calls: 7 },
     { name: "Beta", calls: 2 },
   ]);
+  // 只有部署到 agent 的 Skill 才可能被调用，统计值才归它。
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agentStatus({ enabledSkills: ["alpha", "beta"] }),
+  ]);
   render(<SkillsPanel />);
 
   expect(await screen.findByText("近30天 7 次")).toBeInTheDocument();
@@ -204,17 +208,53 @@ test("shows 30-day usage counts and sorts by them", async () => {
     screen
       .getAllByRole("button", { name: /^查看 / })
       .map((button) => button.getAttribute("aria-label"));
-  expect(rowLabels()).toEqual(["查看 Beta", "查看 Alpha"]);
-
-  fireEvent.change(screen.getByLabelText("按调用次数排序"), {
-    target: { value: "usageDesc" },
-  });
+  // 默认就按 30 天调用次数从高到低。
   await waitFor(() => expect(rowLabels()).toEqual(["查看 Alpha", "查看 Beta"]));
 
   fireEvent.change(screen.getByLabelText("按调用次数排序"), {
     target: { value: "usageAsc" },
   });
   await waitFor(() => expect(rowLabels()).toEqual(["查看 Beta", "查看 Alpha"]));
+
+  fireEvent.change(screen.getByLabelText("按调用次数排序"), {
+    target: { value: "usageDesc" },
+  });
+  await waitFor(() => expect(rowLabels()).toEqual(["查看 Alpha", "查看 Beta"]));
+});
+
+test("同一资产的目录名与 frontmatter 名调用合并计数", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([
+    {
+      assetType: "skill",
+      id: "op7418-humanizer-zh",
+      name: "humanizer-zh",
+      updatedAt: 1,
+      hash: "h",
+    },
+  ]);
+  // Claude Code 的会话里两种调用名都会出现，必须相加才是真实次数。
+  vi.mocked(api.skillUsageStats).mockResolvedValue([
+    { name: "humanizer-zh", calls: 26 },
+    { name: "op7418-humanizer-zh", calls: 28 },
+  ]);
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agentStatus({ enabledSkills: ["op7418-humanizer-zh"] }),
+  ]);
+  render(<SkillsPanel />);
+
+  expect(await screen.findByText("近30天 54 次")).toBeInTheDocument();
+});
+
+test("同名内置 Skill 的调用不计入未部署的同名资产", async () => {
+  vi.mocked(api.listAssets).mockResolvedValue([
+    { assetType: "skill", id: "mattpocock-skills-code-review", name: "code-review", updatedAt: 1, hash: "h" },
+  ]);
+  // Claude Code 内置 code-review 被调用 13 次；该资产没有部署给任何 agent。
+  vi.mocked(api.skillUsageStats).mockResolvedValue([{ name: "code-review", calls: 13 }]);
+  render(<SkillsPanel />);
+
+  expect(await screen.findByText("近30天 0 次")).toBeInTheDocument();
+  expect(screen.queryByText("近30天 13 次")).not.toBeInTheDocument();
 });
 
 test("refreshing usage scans sessions before reloading counts", async () => {

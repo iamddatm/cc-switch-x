@@ -101,7 +101,7 @@ export function SkillsPanel() {
   const [dismissedUnmanaged, setDismissedUnmanaged] = useState<number | null>(null);
   const [agentFilter, setAgentFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "on" | "off">("all");
-  const [sortOrder, setSortOrder] = useState<SkillSort>("default");
+  const [sortOrder, setSortOrder] = useState<SkillSort>("usageDesc");
   // 调用次数按 Skill 调用名聚合；详情数据由本地会话索引派生。
   const [usage, setUsage] = useState<Record<string, number>>({});
   const [usageLoading, setUsageLoading] = useState(false);
@@ -253,8 +253,16 @@ export function SkillsPanel() {
         : agentsForType.filter((agent) => agent.id === agentFilter),
     [agentFilter, agentsForType],
   );
-  // Skill 调用名来自 SKILL.md 的 frontmatter；目录 id 只在没有 name 时兜底。
-  const usageCount = (item: AssetSummary) => usage[item.name] ?? usage[item.id] ?? 0;
+  // 会话里的 Skill 调用名有两种：部署目录名（资产 id）和 SKILL.md 的 frontmatter name。
+  // 模型在不同会话里会分别使用，统计要把两者相加；id 与 name 相同时只算一次。
+  // 没部署到任何 agent 的资产不可能被本应用调用，不把同名内置 Skill 的调用算到它头上。
+  const usageCount = (item: AssetSummary) => {
+    const deployed = agentsForType.some((agent) =>
+      enabledFor(agent, "skill").includes(item.id),
+    );
+    if (!deployed) return 0;
+    return (usage[item.id] ?? 0) + (item.name === item.id ? 0 : (usage[item.name] ?? 0));
+  };
 
   // 搜索 / 来源 / 仓库三轴在 useSkillFilters 里；「启用状态」这一轴是用户级特有的。
   // 这条要 memo：每个搜索字符都会带着整张启用表重跑一遍谓词。
@@ -267,11 +275,11 @@ export function SkillsPanel() {
     if (sortOrder === "default") return filtered;
     const direction = sortOrder === "usageDesc" ? -1 : 1;
     return [...filtered].sort((left, right) => {
-      const calls = usage[left.name] ?? usage[left.id] ?? 0;
-      const other = usage[right.name] ?? usage[right.id] ?? 0;
+      const calls = usageCount(left);
+      const other = usageCount(right);
       return calls === other ? left.name.localeCompare(right.name) : direction * (calls - other);
     });
-  }, [matched, statusAgents, statusFilter, sortOrder, usage]);
+  }, [matched, statusAgents, statusFilter, sortOrder, usage, agentsForType]);
   const updateIds = checkReport?.updates.map((update) => update.id) ?? [];
   const updatesCount = updateIds.length;
 
@@ -855,7 +863,7 @@ export function SkillsPanel() {
                         {item.origin?.updateAvailable && <Badge tone="warning">可更新</Badge>}
                         <Badge
                           tone={usageCount(item) > 0 ? "brand" : "neutral"}
-                          title="近 30 天本地会话中的调用次数；在「更多操作 → 刷新调用统计」里更新"
+                          title="近 30 天本地会话中的调用次数（部署目录名 + frontmatter 名合并）；在「更多操作 → 刷新调用统计」里更新"
                         >
                           近30天 {usageCount(item)} 次
                         </Badge>
