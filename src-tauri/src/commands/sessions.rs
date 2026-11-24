@@ -7,7 +7,11 @@ use crate::services::sessions::{self, SessionScanReport};
 use crate::sessions::export::{render_markdown, resume_info, ResumeInfo};
 use crate::state::AppState;
 use std::path::Path;
-use tauri::State;
+use tauri::{Emitter, State};
+
+/// 会话扫描结束事件。扫描按批次落库，其它页面在扫描中途读索引只能拿到半成品；
+/// 前端据此在扫描真正结束后重读派生数据，而不是停在半成品上。
+pub const SESSIONS_SCANNED_EVENT: &str = "sessions-scanned";
 
 fn lock_index(
     state: &AppState,
@@ -24,7 +28,8 @@ fn lock_index(
 /// 的索引读取也只会在单个批次上等一小会儿，而不是整页卡死。
 #[tauri::command]
 pub async fn scan_sessions(app: tauri::AppHandle) -> Result<SessionScanReport, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let emitter = app.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
         use tauri::Manager;
         use std::time::Duration;
         let state = app.state::<AppState>();
@@ -50,7 +55,12 @@ pub async fn scan_sessions(app: tauri::AppHandle) -> Result<SessionScanReport, A
         Ok(report)
     })
     .await
-    .map_err(|error| AppError::InvalidInput(format!("会话扫描任务失败：{error}")))?
+    .map_err(|error| AppError::InvalidInput(format!("会话扫描任务失败：{error}")))?;
+    // 失败时前面的批次也可能已经提交，所以无论成败都通知页面重读派生数据。
+    if let Err(error) = emitter.emit(SESSIONS_SCANNED_EVENT, ()) {
+        eprintln!("发送会话扫描结束事件失败：{error}");
+    }
+    outcome
 }
 
 #[tauri::command]
