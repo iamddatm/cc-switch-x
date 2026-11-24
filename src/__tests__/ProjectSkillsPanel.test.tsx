@@ -11,6 +11,12 @@ import type {
   ProjectView,
 } from "../types";
 
+/** 打开「筛选」下拉并选中一项：渲染目录 / 部署状态 / 来源共用一个入口。 */
+function chooseFilter(name: string) {
+  fireEvent.click(screen.getByRole("button", { name: /^筛选/ }));
+  fireEvent.click(screen.getByRole("menuitemradio", { name }));
+}
+
 vi.mock("../lib/api", () => ({
   api: {
     listProjectSkills: vi.fn(),
@@ -616,16 +622,16 @@ test("搜索、渲染目录与部署状态筛选收窄列表并给出计数", as
   expect(screen.queryByText("alpha")).not.toBeInTheDocument();
 
   fireEvent.change(screen.getByLabelText("搜索 Skill"), { target: { value: "" } });
-  fireEvent.change(screen.getByLabelText("按部署状态筛选"), { target: { value: "edited" } });
+  chooseFilter("已改（待裁决）");
   expect(screen.getByText("1 / 3 个 Skill")).toBeInTheDocument();
   expect(screen.queryByText("alpha")).not.toBeInTheDocument();
   expect(screen.queryByText("gamma")).not.toBeInTheDocument();
 
   // 目录筛选改的是「看哪个目录的状态」：beta 被改过的那格在 qoder，换到 claude 就不再命中。
-  fireEvent.change(screen.getByLabelText("按渲染目录筛选"), { target: { value: "claude" } });
+  chooseFilter("Claude Code");
   expect(screen.getByText("0 / 3 个 Skill")).toBeInTheDocument();
   // 同一目录上 alpha 与 beta 都是已同步，说明目录筛选本身不额外删行。
-  fireEvent.change(screen.getByLabelText("按部署状态筛选"), { target: { value: "present" } });
+  chooseFilter("已同步");
   expect(screen.getByText("2 / 3 个 Skill")).toBeInTheDocument();
 });
 
@@ -726,7 +732,8 @@ test("项目里没有 cc-switch 导入这条来源", async () => {
   expect(await screen.findByRole("menuitem", { name: "打开文件夹" })).toBeInTheDocument();
   expect(screen.queryByRole("menuitem", { name: /cc-switch/i })).not.toBeInTheDocument();
 
-  expect(screen.getByLabelText("按来源筛选")).not.toHaveTextContent(/cc-switch/);
+  fireEvent.click(screen.getByRole("button", { name: /^筛选/ }));
+  expect(screen.queryByRole("menuitemradio", { name: /cc-switch/i })).not.toBeInTheDocument();
 });
 
 test("检查更新与更新走项目命令：只换真源，渲染留给同步", async () => {

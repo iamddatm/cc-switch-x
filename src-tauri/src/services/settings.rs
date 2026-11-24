@@ -2,10 +2,15 @@ use crate::domain::agent::builtin_agents;
 use crate::domain::secret::SecretRef;
 use crate::error::AppError;
 use crate::net::{parse_github_input, webdav, ProxyConfig};
-use crate::settings::{self, AppSettings, BackupSettings, CloudProvider, SkillRepo, Theme};
+use crate::services::skill_discovery::{installed_metas, suggested_repos};
+use crate::settings::{
+    self, effective_skill_repos, AppSettings, BackupSettings, CloudProvider, SkillRepo, Theme,
+};
 use crate::store::secrets::Secrets;
+use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::path::Path;
 
 /// 代理密码与 MCP 等资产用同一套本地密钥文件分开存放。
 pub const PROXY_SECRET_SCOPE: &str = "proxy";
@@ -436,14 +441,77 @@ pub fn set_skill_repos(repos: Vec<SkillRepo>) -> Result<AppSettings, AppError> {
 }
 
 pub fn set_skill_repos_at(
-    config_path: &std::path::Path,
+    config_path: &Path,
     repos: Vec<SkillRepo>,
 ) -> Result<AppSettings, AppError> {
     let normalized = validate_skill_repos(repos)?;
     let mut current = settings::load_from(config_path)?;
+    // 从列表里消失的仓库记入忽略名单：否则已安装来源的自动登记会让用户删掉的仓库复活。
+    let previous = effective_skill_repos(&current);
+    let mut ignored = current.skill_repos_ignored.clone().unwrap_or_default();
+    let kept: HashSet<String> = normalized
+        .iter()
+        .map(|repo| repo.slug().to_lowercase())
+        .collect();
+    for repo in previous {
+        let key = repo.slug().to_lowercase();
+        if !kept.contains(&key) && !ignored.iter().any(|item| item == &key) {
+            ignored.push(key);
+        }
+    }
+    // 用户手动加回来的仓库不再算「删过」。
+    ignored.retain(|key| !kept.contains(key));
+    current.skill_repos_ignored = if ignored.is_empty() {
+        None
+    } else {
+        Some(ignored)
+    };
     current.skill_repos = Some(normalized);
     settings::save_to(config_path, &current)?;
     Ok(current)
+}
+
+/// 把已安装 Skill 的来源仓库并入发现仓库列表（跳过用户删过的与已配置的）。
+/// 仅在确有新增时落盘；返回 `None` 表示无需改动。
+pub fn auto_register_installed_repos_at(
+    config_path: &Path,
+    store: &Store,
+) -> Result<Option<AppSettings>, AppError> {
+    let mut current = settings::load_from(config_path)?;
+    let configured = effective_skill_repos(&current);
+    let ignored: HashSet<String> = current
+        .skill_repos_ignored
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|key| key.to_lowercase())
+        .collect();
+    let mut repos = configured.clone();
+    let mut changed = false;
+    for repo in suggested_repos(&installed_metas(store), &configured) {
+        if repos.len() >= MAX_SKILL_REPOS {
+            break;
+        }
+        if ignored.contains(&repo.slug().to_lowercase()) {
+            continue;
+        }
+        // 来源元数据来自磁盘、可能被手改；非法坐标跳过，不让整次登记失败。
+        if parse_github_input(&repo.slug(), Some(repo.branch.clone())).is_err() {
+            continue;
+        }
+        repos.push(repo);
+        changed = true;
+    }
+    if !changed {
+        return Ok(None);
+    }
+    current.skill_repos = Some(validate_skill_repos(repos)?);
+    settings::save_to(config_path, &current)?;
+    Ok(Some(current))
+}
+
+pub fn auto_register_installed_repos(store: &Store) -> Result<Option<AppSettings>, AppError> {
+    auto_register_installed_repos_at(&settings::settings_path()?, store)
 }
 
 pub fn get() -> Result<AppSettings, AppError> {
@@ -1239,6 +1307,93 @@ mod tests {
             },
         ])
         .is_err());
+    }
+
+    #[test]
+    fn skill_repo_deletions_are_remembered() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        // 首次把默认列表改成一个仓库，其余默认仓库就是用户删掉的，必须记住。
+        let updated = set_skill_repos_at(
+            &config,
+            vec![SkillRepo {
+                owner: "acme".into(),
+                name: "skills".into(),
+                branch: "main".into(),
+                enabled: true,
+            }],
+        )
+        .unwrap();
+        let ignored = updated.skill_repos_ignored.unwrap_or_default();
+        assert!(ignored.contains(&"anthropics/skills".to_string()));
+        assert!(!ignored.contains(&"acme/skills".to_string()));
+
+        // 手动加回来即解除忽略。
+        let updated = set_skill_repos_at(
+            &config,
+            vec![
+                SkillRepo {
+                    owner: "acme".into(),
+                    name: "skills".into(),
+                    branch: "main".into(),
+                    enabled: true,
+                },
+                SkillRepo {
+                    owner: "anthropics".into(),
+                    name: "skills".into(),
+                    branch: "main".into(),
+                    enabled: true,
+                },
+            ],
+        )
+        .unwrap();
+        assert!(
+            !updated
+                .skill_repos_ignored
+                .unwrap_or_default()
+                .contains(&"anthropics/skills".to_string())
+        );
+    }
+
+    #[test]
+    fn auto_register_installed_repos_skips_deleted_ones() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let store = Store::init(dir.path().join("store")).unwrap();
+        for (id, owner, name) in [("one", "acme", "one"), ("gone", "gone", "repo")] {
+            let skill_dir = store.root().join("assets/skills").join(id);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            crate::domain::skill_meta::write_meta(
+                &skill_dir,
+                &crate::domain::skill_meta::SkillMeta {
+                    repo_owner: Some(owner.into()),
+                    repo_name: Some(name.into()),
+                    repo_branch: Some("dev".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let initial = AppSettings {
+            store_root: store.root().to_path_buf(),
+            skill_repos: Some(Vec::new()),
+            skill_repos_ignored: Some(vec!["gone/repo".into()]),
+            ..AppSettings::default()
+        };
+        settings::save_to(&config, &initial).unwrap();
+
+        let updated = auto_register_installed_repos_at(&config, &store)
+            .unwrap()
+            .expect("应并入新的来源仓库");
+        let repos = updated.skill_repos.unwrap_or_default();
+        assert!(repos
+            .iter()
+            .any(|repo| repo.slug() == "acme/one" && repo.branch == "dev"));
+        assert!(!repos.iter().any(|repo| repo.slug() == "gone/repo"));
+        // 已并入后再次调用不应改写文件。
+        assert!(auto_register_installed_repos_at(&config, &store)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

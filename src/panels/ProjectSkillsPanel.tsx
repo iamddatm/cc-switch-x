@@ -9,7 +9,11 @@ import { ProjectConflictDialog } from "../components/projects/ProjectConflictDia
 import { ProjectMigrationDialog } from "../components/projects/ProjectMigrationDialog";
 import { SkillBatchBar } from "../components/skills/SkillBatchBar";
 import { SkillDetailSheet } from "../components/skills/SkillDetailSheet";
-import { SkillDiscoveryPanel } from "../components/skills/SkillDiscoveryPanel";
+import {
+  SkillDiscoveryPanel,
+  type SkillDiscoveryHandle,
+  type SkillDiscoverySource,
+} from "../components/skills/SkillDiscoveryPanel";
 import { SkillFormSheet } from "../components/skills/SkillFormSheet";
 import { SkillInstallSheet } from "../components/skills/SkillInstallSheet";
 import { SkillSourceBadge } from "../components/skills/SkillSourceBadge";
@@ -25,11 +29,11 @@ import { Checkbox } from "../components/ui/Checkbox";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { FeedbackBar } from "../components/ui/FeedbackBar";
+import { FilterMenu } from "../components/ui/FilterMenu";
 import { Menu, type MenuItem } from "../components/ui/Menu";
 import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
 import { SearchField } from "../components/ui/SearchField";
-import { Select } from "../components/ui/Select";
 import { useAgents } from "../hooks/useAgents";
 import { useProjectSkills } from "../hooks/useProjectSkills";
 import { api } from "../lib/api";
@@ -191,6 +195,10 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
   // 项目级没有「未纳管」页签（那里的内容来自用户级落点扫描），但视图类型与标签组件共用一份。
   const [view, setView] = useState<SkillView>("installed");
   const [discoverMounted, setDiscoverMounted] = useState(false);
+  // 与用户级一致：发现页的搜索框也放在页签行右侧，关键词/来源各视图独立。
+  const [discoverSource, setDiscoverSource] = useState<SkillDiscoverySource>("repos");
+  const [discoverQuery, setDiscoverQuery] = useState("");
+  const discoveryRef = useRef<SkillDiscoveryHandle>(null);
   const [dirFilter, setDirFilter] = useState("all");
   const [stateFilter, setStateFilter] = useState<"all" | ProjectDirState>("all");
   const [viewing, setViewing] = useState<{ row: ProjectRow; form: SkillForm } | null>(null);
@@ -698,58 +706,78 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
           setView(next);
           if (next === "discover") setDiscoverMounted(true);
         }}
+        trailing={
+          view === "installed" ? (
+            <SearchField
+              className="w-[240px]"
+              value={query}
+              onValueChange={setQuery}
+              placeholder="搜索名称、描述、来源或仓库…"
+              ariaLabel="搜索 Skill"
+            />
+          ) : view === "discover" && discoverSource !== "trend" ? (
+            <SearchField
+              className="w-[240px]"
+              value={discoverQuery}
+              onValueChange={setDiscoverQuery}
+              placeholder={
+                discoverSource === "skillssh" ? "搜索 skills.sh…" : "搜索 Skill 或仓库…"
+              }
+              ariaLabel="搜索可发现的 Skill"
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && discoverSource === "skillssh") {
+                  discoveryRef.current?.submitSearch();
+                }
+              }}
+            />
+          ) : null
+        }
       />
 
       <div className={view === "installed" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
         <div className="flex h-12 shrink-0 items-center gap-2 px-6">
-          <SearchField
-            className="w-[240px]"
-            value={query}
-            onValueChange={setQuery}
-            placeholder="搜索名称、描述、来源或仓库…"
-            ariaLabel="搜索 Skill"
-          />
           <SkillRepoFilter
+            variant="quiet"
             repoChoices={repoChoices}
             repoKeys={activeRepoKeys}
             allReposSelected={allReposSelected}
             onToggleRepo={toggleRepo}
             onToggleAllRepos={toggleAllRepos}
           />
-          <Select
-            aria-label="按渲染目录筛选"
-            value={dirFilter}
-            onChange={(event) => setDirFilter(event.target.value)}
-          >
-            <option value="all">全部目录</option>
-            {dirs.map((dir) => (
-              <option key={dir.key} value={dir.key}>
-                {dirLabel(dir)}
-              </option>
-            ))}
-          </Select>
-          <Select
-            aria-label="按部署状态筛选"
-            value={stateFilter}
-            onChange={(event) => setStateFilter(event.target.value as "all" | ProjectDirState)}
-          >
-            {STATE_FILTERS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </Select>
-          <Select
-            aria-label="按来源筛选"
-            value={sourceFilter}
-            onChange={(event) => setSourceFilter(event.target.value)}
-          >
-            {SOURCE_FILTERS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </Select>
+          <FilterMenu
+            groups={[
+              {
+                key: "dir",
+                title: "渲染目录",
+                value: dirFilter,
+                active: dirFilter !== "all",
+                options: [
+                  { value: "all", label: "全部目录" },
+                  ...dirs.map((dir) => ({ value: dir.key, label: dirLabel(dir) })),
+                ],
+                onChange: setDirFilter,
+              },
+              {
+                key: "state",
+                title: "部署状态",
+                value: stateFilter,
+                active: stateFilter !== "all",
+                options: STATE_FILTERS,
+                onChange: (value) => setStateFilter(value as "all" | ProjectDirState),
+              },
+              {
+                key: "source",
+                title: "来源",
+                value: sourceFilter,
+                active: sourceFilter !== "all",
+                options: SOURCE_FILTERS.map((option) => ({
+                  value: option.value,
+                  label: option.label,
+                })),
+                onChange: setSourceFilter,
+              },
+            ]}
+          />
           <span className="ml-auto text-caption text-fg-3">
             {visible.length} / {rows.length} 个 Skill
           </span>
@@ -1075,6 +1103,7 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
       {discoverMounted && (
         <div className={view === "discover" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
           <SkillDiscoveryPanel
+            ref={discoveryRef}
             installedItems={rows}
             scope={scope}
             targets={{
@@ -1088,6 +1117,12 @@ export function ProjectSkillsPanel({ project }: { project: ProjectView }) {
                       ? "未选择目录"
                       : chosen.map((target) => target.label).join("、"),
               emptyHint: "没有已实测的项目落点，装完只落在项目真源里。",
+            }}
+            search={{
+              source: discoverSource,
+              onSourceChange: setDiscoverSource,
+              query: discoverQuery,
+              onQueryChange: setDiscoverQuery,
             }}
             onInstalled={() => void refresh()}
             onShowInstalled={() => setView("installed")}

@@ -28,6 +28,10 @@ pub struct AppSettings {
     /// Skill 发现用的仓库；None = 内置默认仓库。
     #[serde(default)]
     pub skill_repos: Option<Vec<SkillRepo>>,
+    /// 用户从仓库列表里删掉过的仓库（小写 `owner/name`）。已安装 Skill 的来源仓库
+    /// 自动并入列表时跳过它们，避免删掉的仓库下次启动又被加回来。
+    #[serde(default)]
+    pub skill_repos_ignored: Option<Vec<String>>,
     /// 备份策略与 Git 备份；旧设置文件缺少该字段时整套取默认值。
     #[serde(default)]
     pub backup: BackupSettings,
@@ -377,6 +381,7 @@ impl Default for AppSettings {
             close_to_tray: true,
             proxy: ProxySettings::default(),
             skill_repos: None,
+            skill_repos_ignored: None,
             backup: BackupSettings::default(),
             cloud: CloudBackupSettings::default(),
         }
@@ -462,6 +467,7 @@ mod tests {
                 branch: "dev".into(),
                 enabled: false,
             }]),
+            skill_repos_ignored: Some(vec!["gone/repo".into()]),
             backup: BackupSettings {
                 interval_hours: 12,
                 retain_count: 5,

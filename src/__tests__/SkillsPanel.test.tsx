@@ -1,11 +1,41 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import { open } from "@tauri-apps/plugin-dialog";
-import { SKILL_USAGE_REFRESH_DAY_KEY, SkillsPanel } from "../panels/SkillsPanel";
+import {
+  SESSIONS_SCANNED_EVENT,
+  SKILL_USAGE_REFRESH_DAY_KEY,
+  SkillsPanel,
+} from "../panels/SkillsPanel";
 import { api } from "../lib/api";
 import { resetSkillUpdateCheck } from "../hooks/useSkillUpdateCheck";
 import { agentStatus, capabilities } from "../test/agents";
 import type { SkillCheckReport, UnmanagedSkillReport } from "../types";
+
+/** 打开「筛选」下拉并选中一项：多个单选组共用同一个入口。 */
+function chooseFilter(name: string) {
+  fireEvent.click(screen.getByRole("button", { name: /^筛选/ }));
+  fireEvent.click(screen.getByRole("menuitemradio", { name }));
+}
+
+/** 排序下拉的触发器显示当前选项，按它打开再选下一项。 */
+function chooseSort(current: string, next: string) {
+  fireEvent.click(screen.getByRole("button", { name: current }));
+  fireEvent.click(screen.getByRole("menuitemradio", { name: next }));
+}
+
+// jsdom 里没有 Tauri 事件桥：按事件名记录回调，供「扫描结束」用例手动触发。
+const eventBridge = vi.hoisted(() => ({
+  handlers: new Map<string, (event: { payload: unknown }) => void>(),
+}));
+vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(
+    async (name: string, handler: (event: { payload: unknown }) => void) => {
+      eventBridge.handlers.set(name, handler);
+      return () => {};
+    },
+  ),
+}));
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -55,6 +85,7 @@ function todayKey(): string {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  eventBridge.handlers.clear();
   resetSkillUpdateCheck();
   // 默认模拟「今天已经自动刷新过」，避免每个用例都触发会话扫描。
   localStorage.clear();
@@ -211,14 +242,10 @@ test("shows 30-day usage counts and sorts by them", async () => {
   // 默认就按 30 天调用次数从高到低。
   await waitFor(() => expect(rowLabels()).toEqual(["查看 Alpha", "查看 Beta"]));
 
-  fireEvent.change(screen.getByLabelText("按调用次数排序"), {
-    target: { value: "usageAsc" },
-  });
+  chooseSort("调用次数从高到低", "调用次数从低到高");
   await waitFor(() => expect(rowLabels()).toEqual(["查看 Beta", "查看 Alpha"]));
 
-  fireEvent.change(screen.getByLabelText("按调用次数排序"), {
-    target: { value: "usageDesc" },
-  });
+  chooseSort("调用次数从低到高", "调用次数从高到低");
   await waitFor(() => expect(rowLabels()).toEqual(["查看 Alpha", "查看 Beta"]));
 });
 
@@ -259,7 +286,7 @@ test("同名内置 Skill 的调用不计入未部署的同名资产", async () =
 
 test("refreshing usage scans sessions before reloading counts", async () => {
   render(<SkillsPanel />);
-  await screen.findByLabelText("按调用次数排序");
+  await screen.findByRole("button", { name: "调用次数从高到低" });
   fireEvent.click(screen.getByRole("button", { name: "Skills 的更多操作" }));
   fireEvent.click(await screen.findByRole("menuitem", { name: "刷新调用统计" }));
   await waitFor(() => expect(api.scanSessions).toHaveBeenCalledTimes(1));
@@ -392,7 +419,7 @@ test("the unassigned filter ignores deployments of disabled agents", async () =>
   ]);
   render(<SkillsPanel />);
   await screen.findByText(/还没有启用任何 Agent/);
-  fireEvent.change(screen.getByLabelText("按启用状态筛选"), { target: { value: "off" } });
+  chooseFilter("未启用");
   expect(screen.getByRole("button", { name: "查看 demo" })).toBeInTheDocument();
 });
 
@@ -410,23 +437,23 @@ test("splits the agent and status filters", async () => {
   expect(screen.getByRole("button", { name: "查看 other" })).toBeInTheDocument();
 
   // 选中具体 Agent + 已启用：只剩该 Agent 启用的项。
-  fireEvent.change(screen.getByLabelText("按 Agent 筛选"), { target: { value: "qoder" } });
-  fireEvent.change(screen.getByLabelText("按启用状态筛选"), { target: { value: "on" } });
+  chooseFilter("Qoder CN");
+  chooseFilter("已启用");
   expect(screen.queryByRole("button", { name: "查看 demo" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "查看 other" })).toBeInTheDocument();
 
   // 该 Agent 的未启用项。
-  fireEvent.change(screen.getByLabelText("按启用状态筛选"), { target: { value: "off" } });
+  chooseFilter("未启用");
   expect(screen.getByRole("button", { name: "查看 demo" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "查看 other" })).not.toBeInTheDocument();
 
   // 全部 Agent 的未启用项（当前两个都被某个 Agent 启用，应该都隐藏）。
-  fireEvent.change(screen.getByLabelText("按 Agent 筛选"), { target: { value: "all" } });
+  chooseFilter("全部 Agent");
   expect(screen.queryByRole("button", { name: "查看 demo" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "查看 other" })).not.toBeInTheDocument();
 
   // 默认就是「全部 Agent + 全部状态」，回到初始时两项都在。
-  fireEvent.change(screen.getByLabelText("按启用状态筛选"), { target: { value: "all" } });
+  chooseFilter("全部状态");
   expect(screen.getByRole("button", { name: "查看 demo" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "查看 other" })).toBeInTheDocument();
 });
@@ -573,7 +600,9 @@ test("adds a repository from the manager sheet", async () => {
   render(<SkillsPanel />);
   fireEvent.click(await screen.findByRole("tab", { name: /发现/ }));
   await screen.findByText("pdf");
-  fireEvent.click(screen.getByRole("button", { name: "管理仓库" }));
+  // 管理仓库收进了发现页仓库下拉的底部（已安装面板藏在 DOM 里，labels 不同）。
+  fireEvent.click(screen.getByRole("button", { name: "选择仓库：1/1" }));
+  fireEvent.click(screen.getByRole("button", { name: /管理仓库/ }));
 
   fireEvent.change(await screen.findByLabelText("仓库地址"), {
     target: { value: "https://github.com/new/skills" },
@@ -746,7 +775,7 @@ test("installed-source repos are offered but only fetched when checked", async (
 
   // 默认只读配置仓库；已安装来源出现在候选列表里，但未勾选、未下载。
   expect(await screen.findByRole("button", { name: "仓库 · 1" })).toBeInTheDocument();
-  fireEvent.click(await screen.findByRole("button", { name: "仓库：1/2" }));
+  fireEvent.click(await screen.findByRole("button", { name: "选择仓库：1/2" }));
   const checkbox = await screen.findByRole("checkbox", { name: "iamddatm/skills" });
   expect(checkbox).not.toBeChecked();
   expect(api.discoverSkills).toHaveBeenLastCalledWith({ force: false, extraRepos: [] });
@@ -759,7 +788,7 @@ test("installed-source repos are offered but only fetched when checked", async (
       extraRepos: [{ owner: "iamddatm", name: "skills", branch: "main", enabled: true }],
     }),
   );
-  expect(screen.getByRole("button", { name: "仓库：2/2" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "选择仓库：2/2" })).toBeInTheDocument();
 });
 
 test("discovery rows can open the matching repo directory on github", async () => {
@@ -874,7 +903,7 @@ test("source filter hides skills from other origins", async () => {
   ]);
   render(<SkillsPanel />);
   await screen.findByRole("button", { name: "查看 demo" });
-  fireEvent.change(screen.getByLabelText("按来源筛选"), { target: { value: "zip" } });
+  chooseFilter("ZIP 安装");
   expect(screen.getByRole("button", { name: "查看 demo" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "查看 other" })).not.toBeInTheDocument();
 });
@@ -1266,4 +1295,34 @@ test("an unverified skill column exposes no bulk action", async () => {
 
   await screen.findByText("demo");
   expect(screen.queryByRole("button", { name: /点击批量开关/ })).not.toBeInTheDocument();
+});
+
+test("refreshing usage updates the displayed counts", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agentStatus({ enabledSkills: ["demo"] }),
+  ]);
+  const stats = vi.mocked(api.skillUsageStats);
+  stats.mockResolvedValueOnce([{ name: "demo", calls: 1 }]);
+  stats.mockResolvedValue([{ name: "demo", calls: 9 }]);
+  render(<SkillsPanel />);
+  expect(await screen.findByText("近30天 1 次")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Skills 的更多操作" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "刷新调用统计" }));
+  await waitFor(() => expect(api.scanSessions).toHaveBeenCalledTimes(1));
+  expect(await screen.findByText("近30天 9 次")).toBeInTheDocument();
+});
+
+test("reloads counts when a session scan finishes in the background", async () => {
+  vi.mocked(api.listAgents).mockResolvedValue([
+    agentStatus({ enabledSkills: ["demo"] }),
+  ]);
+  const stats = vi.mocked(api.skillUsageStats);
+  stats.mockResolvedValueOnce([{ name: "demo", calls: 1 }]);
+  stats.mockResolvedValue([{ name: "demo", calls: 4 }]);
+  render(<SkillsPanel />);
+  expect(await screen.findByText("近30天 1 次")).toBeInTheDocument();
+  // 扫描由会话页（或上一次挂载）发起：完成事件到达时本页必须重读，不能停在半成品上。
+  await waitFor(() => expect(eventBridge.handlers.get(SESSIONS_SCANNED_EVENT)).toBeTruthy());
+  act(() => eventBridge.handlers.get(SESSIONS_SCANNED_EVENT)?.({ payload: null }));
+  expect(await screen.findByText("近30天 4 次")).toBeInTheDocument();
 });

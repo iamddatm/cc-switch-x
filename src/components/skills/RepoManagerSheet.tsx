@@ -189,7 +189,7 @@ export function RepoManagerSheet({
             </ul>
           )}
           <p className="text-caption text-fg-3">
-            停用的仓库不参与发现；删除只影响发现列表，不会卸载已安装的 Skill。
+            停用的仓库不参与发现；删除不会卸载已安装的 Skill，也不会被已安装来源自动加回。
           </p>
         </section>
       </div>

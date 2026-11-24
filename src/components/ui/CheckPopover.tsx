@@ -1,60 +1,26 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ChevronDown } from "lucide-react";
+import type { ReactNode } from "react";
 import { Checkbox } from "./Checkbox";
+import { Popover } from "./Popover";
 
 /**
- * 多选筛选的下拉层。与 Select 共用同一套触发器样式；
- * 点选选项不收起（方便连续勾选），点外部或 Esc 才关闭。
+ * 多选筛选的下拉层。点选选项不收起（方便连续勾选），点外部或 Esc 才关闭。
+ * 外壳与交互由 `Popover` 提供；`quiet` 变体用于紧凑的筛选行。
  */
 export function CheckPopover({
   label,
   children,
+  variant,
+  active,
 }: {
   label: ReactNode;
   children: ReactNode;
+  variant?: "boxed" | "quiet";
+  active?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: PointerEvent) => {
-      if (rootRef.current?.contains(event.target as Node)) return;
-      setOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.stopPropagation();
-      setOpen(false);
-      triggerRef.current?.focus();
-    };
-    document.addEventListener("pointerdown", onPointerDown, true);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown, true);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
-
   return (
-    <div ref={rootRef} className="relative shrink-0">
-      <button
-        ref={triggerRef}
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-        className="flex h-8 cursor-pointer items-center gap-1.5 rounded-control border border-border bg-surface px-2.5 text-sm text-fg-1 transition-colors duration-150 hover:bg-subtle focus:border-action focus:outline-none"
-      >
-        {label}
-        <ChevronDown size={12} aria-hidden />
-      </button>
-      {open && (
-        <div className="absolute end-0 z-30 mt-1 max-h-72 w-64 overflow-auto rounded-panel border border-border bg-surface p-2 shadow-v7-md">
-          {children}
-        </div>
-      )}
-    </div>
+    <Popover label={label} variant={variant} active={active}>
+      {children}
+    </Popover>
   );
 }
 

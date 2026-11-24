@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useState,
+} from "react";
 import { Download, ExternalLink, RefreshCw, Sparkles } from "lucide-react";
 import { api } from "../../lib/api";
 import type {
@@ -16,7 +23,7 @@ import { CheckOption, CheckPopover } from "../ui/CheckPopover";
 import { EmptyState } from "../ui/EmptyState";
 import { IconButton } from "../ui/IconButton";
 import { Notice } from "../ui/Notice";
-import { SearchField } from "../ui/SearchField";
+import { Popover } from "../ui/Popover";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { RepoManagerSheet } from "./RepoManagerSheet";
 
@@ -24,7 +31,23 @@ import { RepoManagerSheet } from "./RepoManagerSheet";
  * 发现视图的三个页签。趋势榜单独占一个：它要真的去抓 skills.sh，
  * 不能因为是「默认视图」就在用户只是想搜索时被拉一次。
  */
-type Source = "repos" | "skillssh" | "trend";
+export type SkillDiscoverySource = "repos" | "skillssh" | "trend";
+
+/**
+ * 搜索框属于视图级操作，由面板放在页签行右侧统一渲染；
+ * 发现页只持有来源页签与关键词，便于搜索框在已安装/发现两处位置一致。
+ */
+export interface SkillDiscoverySearch {
+  source: SkillDiscoverySource;
+  onSourceChange: (source: SkillDiscoverySource) => void;
+  query: string;
+  onQueryChange: (query: string) => void;
+}
+
+/** 搜索框在页签行、提交在组件内：按 Enter 时由面板转发到这里。 */
+export interface SkillDiscoveryHandle {
+  submitSearch: () => void;
+}
 
 function repoKey(repo: SkillRepo): string {
   return `${repo.owner}/${repo.name}`.toLowerCase();
@@ -55,26 +78,27 @@ function mergeShPage(
   return [...previous, ...page.filter((item) => !seen.has(item.key))];
 }
 
-export function SkillDiscoveryPanel({
-  installedItems,
-  scope,
-  targets,
-  onInstalled,
-  onShowInstalled,
-}: {
-  installedItems: AssetSummary[];
-  /** 装到哪、怎么铺开、落点选择器怎么措辞，都由作用域适配器给；组件不判断全局还是项目。 */
-  scope: SkillScope;
-  targets: {
-    options: SkillDeployTarget[];
-    /** 触发器上的已选摘要。 */
-    label: (selected: SkillDeployTarget[]) => string;
-    emptyHint: string;
-  };
-  onInstalled: () => void;
-  onShowInstalled: () => void;
-}) {
-  const [source, setSource] = useState<Source>("repos");
+export const SkillDiscoveryPanel = forwardRef<
+  SkillDiscoveryHandle,
+  {
+    installedItems: AssetSummary[];
+    /** 装到哪、怎么铺开、落点选择器怎么措辞，都由作用域适配器给；组件不判断全局还是项目。 */
+    scope: SkillScope;
+    targets: {
+      options: SkillDeployTarget[];
+      /** 触发器上的已选摘要。 */
+      label: (selected: SkillDeployTarget[]) => string;
+      emptyHint: string;
+    };
+    search: SkillDiscoverySearch;
+    onInstalled: () => void;
+    onShowInstalled: () => void;
+  }
+>(function SkillDiscoveryPanel(
+  { installedItems, scope, targets, search, onInstalled, onShowInstalled },
+  ref,
+) {
+  const { source, onSourceChange, query } = search;
   const [repos, setRepos] = useState<SkillRepo[]>([]);
   const [reposLoading, setReposLoading] = useState(true);
   const [reposError, setReposError] = useState<string | null>(null);
@@ -85,7 +109,6 @@ export function SkillDiscoveryPanel({
   const [report, setReport] = useState<SkillDiscoveryReport | null>(null);
   const [discoveryLoading, setDiscoveryLoading] = useState(false);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
   const [onlyUninstalled, setOnlyUninstalled] = useState(false);
   const [installingKey, setInstallingKey] = useState<string | null>(null);
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
@@ -158,10 +181,11 @@ export function SkillDiscoveryPanel({
    * 切页签。趋势榜只有点进来才抓：已有内容或正在抓的时候不重复发请求，
    * 失败交给空态里的「重试」按钮，不自动重试轰炸。
    */
-  const selectSource = (next: Source) => {
-    setSource(next);
-    if (next === "trend" && shTrending.length === 0 && !shTrendingLoading) void loadTrending(0);
-  };
+  useEffect(() => {
+    if (source === "trend" && shTrending.length === 0 && !shTrendingLoading) void loadTrending(0);
+    // 只在切换页签时触发；失败后的重试由空态按钮负责，不随其他状态变化重发。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source]);
 
   // 配置仓库以设置列表为准；设置还没读回来时先用报告兜底。
   // 不能只看“数组是否为空”：用户可以把仓库全删掉，显式空列表必须原样生效。
@@ -241,11 +265,11 @@ export function SkillDiscoveryPanel({
   );
   const failures = report?.failures ?? [];
 
-  const changeShQuery = (value: string) => {
-    setQuery(value);
-    // 清空关键词回到「请先搜索」的空态；趋势榜已经是独立页签，不作兜底。
-    if (value.trim() === "") setShQueryDone(null);
-  };
+  // 关键词由页签行的搜索框控制：清空后回到「请先搜索」的空态；
+  // 趋势榜已经是独立页签，不作兜底。
+  useEffect(() => {
+    if (query.trim() === "") setShQueryDone(null);
+  }, [query]);
 
   const submitSh = async (offset: number) => {
     const trimmed = query.trim();
@@ -273,6 +297,9 @@ export function SkillDiscoveryPanel({
       setShLoading(false);
     }
   };
+
+  // 搜索框在页签行（面板外），Enter 提交由此转发；保持提交逻辑与结果状态都在本组件内。
+  useImperativeHandle(ref, () => ({ submitSearch: () => void submitSh(0) }));
 
   const runInstall = async (
     skill: { key: string; name: string },
@@ -446,7 +473,7 @@ export function SkillDiscoveryPanel({
             actions={
               <>
                 <Button onClick={() => setRepoManagerOpen(true)}>管理仓库</Button>
-                <Button onClick={() => setSource("skillssh")}>去 skills.sh 搜索</Button>
+                <Button onClick={() => onSourceChange("skillssh")}>去 skills.sh 搜索</Button>
               </>
             }
           />
@@ -693,11 +720,11 @@ export function SkillDiscoveryPanel({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 flex-wrap items-center gap-2 px-6 py-2">
-        <SegmentedControl<Source>
+        <SegmentedControl<SkillDiscoverySource>
           ariaLabel="Skill 发现来源"
           size="sm"
           value={source}
-          onValueChange={selectSource}
+          onValueChange={onSourceChange}
           items={[
             { value: "repos", label: `仓库 · ${selectedRepoKeys.size}` },
             { value: "skillssh", label: "skills.sh" },
@@ -706,49 +733,68 @@ export function SkillDiscoveryPanel({
         />
         {source === "repos" && (
           <>
-            <CheckPopover
-              label={`仓库：${selectedRepoKeys.size}/${candidateRepos.length}`}
+            {/* 页签已叫「仓库」，这里强调是具体仓库的勾选，避免两个同名入口。 */}
+            <Popover
+              variant="quiet"
+              label={`选择仓库：${selectedRepoKeys.size}/${candidateRepos.length}`}
             >
-              <CheckOption
-                label="全部仓库"
-                checked={
-                  candidateRepos.length > 0 &&
-                  selectedRepoKeys.size === candidateRepos.length
-                }
-                onChange={toggleAllRepos}
-              />
-              {enabledConfiguredRepos.map((repo) => {
-                const key = repoKey(repo);
-                return (
-                  <CheckOption
-                    key={key}
-                    mono
-                    label={`${repo.owner}/${repo.name}`}
-                    checked={selectedRepoKeys.has(key)}
-                    onChange={(checked) => toggleRepo(key, checked)}
-                  />
-                );
-              })}
-              {suggestedRepos.length > 0 && (
+              {(close) => (
                 <>
-                  <p className="px-1.5 pb-0.5 pt-2 text-caption text-fg-3">
-                    来自已安装 Skill（勾选后读取）
-                  </p>
-                  {suggestedRepos.map((repo) => {
+                  <CheckOption
+                    label="全部仓库"
+                    checked={
+                      candidateRepos.length > 0 &&
+                      selectedRepoKeys.size === candidateRepos.length
+                    }
+                    onChange={toggleAllRepos}
+                  />
+                  {enabledConfiguredRepos.map((repo) => {
                     const key = repoKey(repo);
                     return (
                       <CheckOption
-                        key={`suggested:${key}`}
+                        key={key}
                         mono
                         label={`${repo.owner}/${repo.name}`}
-                        checked={extraRepoKeys.has(key)}
-                        onChange={(checked) => toggleSuggestedRepo(repo, checked)}
+                        checked={selectedRepoKeys.has(key)}
+                        onChange={(checked) => toggleRepo(key, checked)}
                       />
                     );
                   })}
+                  {suggestedRepos.length > 0 && (
+                    <>
+                      <p className="px-1.5 pb-0.5 pt-2 text-caption text-fg-3">
+                        来自已安装 Skill（勾选后读取）
+                      </p>
+                      {suggestedRepos.map((repo) => {
+                        const key = repoKey(repo);
+                        return (
+                          <CheckOption
+                            key={`suggested:${key}`}
+                            mono
+                            label={`${repo.owner}/${repo.name}`}
+                            checked={extraRepoKeys.has(key)}
+                            onChange={(checked) => toggleSuggestedRepo(repo, checked)}
+                          />
+                        );
+                      })}
+                    </>
+                  )}
+                  {/* 管理仓库是低频维护入口，收进列表底部，避免工具栏再占一个按钮。 */}
+                  <div className="mt-1 border-t border-border pt-1">
+                    <button
+                      type="button"
+                      className="w-full rounded-control px-1.5 py-1 text-left text-sm text-fg-1 hover:bg-subtle focus:bg-subtle focus:outline-none"
+                      onClick={() => {
+                        setRepoManagerOpen(true);
+                        close();
+                      }}
+                    >
+                      管理仓库…
+                    </button>
+                  </div>
                 </>
               )}
-            </CheckPopover>
+            </Popover>
             <IconButton
               label="刷新发现"
               size="md"
@@ -771,7 +817,7 @@ export function SkillDiscoveryPanel({
           只看未安装
         </label>
         <div className="flex-1" />
-        <CheckPopover label={`安装到：${targetLabel}`}>
+        <CheckPopover variant="quiet" label={`安装到：${targetLabel}`}>
           {targets.options.length === 0 ? (
             <p className="px-1.5 py-1 text-caption text-fg-3">{targets.emptyHint}</p>
           ) : (
@@ -785,30 +831,9 @@ export function SkillDiscoveryPanel({
             ))
           )}
         </CheckPopover>
-        {source !== "trend" && (
-          <SearchField
-            className="w-[240px] shrink-0"
-            value={query}
-            onValueChange={changeShQuery}
-            placeholder={
-              source === "skillssh" ? "搜索 skills.sh…" : "搜索 Skill 或仓库…"
-            }
-            ariaLabel="搜索可发现的 Skill"
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && source === "skillssh") {
-                void submitSh(0);
-              }
-            }}
-          />
-        )}
         {source === "skillssh" && (
           <Button size="sm" loading={shLoading} onClick={() => void submitSh(0)}>
             搜索
-          </Button>
-        )}
-        {source === "repos" && (
-          <Button size="sm" onClick={() => setRepoManagerOpen(true)}>
-            管理仓库
           </Button>
         )}
       </div>
@@ -887,5 +912,5 @@ export function SkillDiscoveryPanel({
       )}
     </div>
   );
-}
+});
 

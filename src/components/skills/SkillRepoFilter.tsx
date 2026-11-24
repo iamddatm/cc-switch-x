@@ -11,16 +11,21 @@ export function SkillRepoFilter({
   allReposSelected,
   onToggleRepo,
   onToggleAllRepos,
+  variant,
 }: {
   repoChoices: RepoOptions;
   repoKeys: Set<string>;
   allReposSelected: boolean;
   onToggleRepo: (key: string, checked: boolean) => void;
   onToggleAllRepos: (checked: boolean) => void;
+  /** 紧凑筛选行传 `quiet`，与「筛选」入口统一成无框文字按钮。 */
+  variant?: "boxed" | "quiet";
 }) {
   if (repoChoices.allKeys.length === 0) return null;
   return (
     <CheckPopover
+      variant={variant}
+      active={!allReposSelected}
       label={
         allReposSelected
           ? `仓库：全部（${repoChoices.allKeys.length}）`

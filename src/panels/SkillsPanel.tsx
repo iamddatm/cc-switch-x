@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderInput, Plus, RefreshCw, Sparkles } from "lucide-react";
 import { AgentColumnCells } from "../components/assets/AgentColumnCells";
@@ -7,7 +9,11 @@ import { AssetRow } from "../components/assets/AssetRow";
 import { ImportDialog } from "../components/ImportDialog";
 import { SkillBatchBar } from "../components/skills/SkillBatchBar";
 import { SkillDetailSheet } from "../components/skills/SkillDetailSheet";
-import { SkillDiscoveryPanel } from "../components/skills/SkillDiscoveryPanel";
+import {
+  SkillDiscoveryPanel,
+  type SkillDiscoveryHandle,
+  type SkillDiscoverySource,
+} from "../components/skills/SkillDiscoveryPanel";
 import { SkillDeploymentNotice } from "../components/skills/SkillDeploymentNotice";
 import { SkillInstallSheet } from "../components/skills/SkillInstallSheet";
 import { SkillUnmanagedPanel } from "../components/skills/SkillUnmanagedPanel";
@@ -25,11 +31,11 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { ContextMenu } from "../components/ui/ContextMenu";
 import { EmptyState } from "../components/ui/EmptyState";
 import { FeedbackBar } from "../components/ui/FeedbackBar";
+import { FilterMenu } from "../components/ui/FilterMenu";
 import { Menu, type MenuItem } from "../components/ui/Menu";
 import { Notice } from "../components/ui/Notice";
 import { PageHeader } from "../components/ui/PageHeader";
 import { SearchField } from "../components/ui/SearchField";
-import { Select } from "../components/ui/Select";
 import { useAgents } from "../hooks/useAgents";
 import { useAssets } from "../hooks/useAssets";
 import { useDrift } from "../hooks/useDrift";
@@ -60,6 +66,9 @@ const SORT_OPTIONS: { value: SkillSort; label: string }[] = [
 
 /** 当日是否已经自动刷新过调用统计；存本地日期，跨天首次进入再刷一次。 */
 export const SKILL_USAGE_REFRESH_DAY_KEY = "cc-switch-x:skill-usage:lastAutoRefreshDay";
+
+/** 后端会话扫描结束事件：扫描分批落库，中途读索引只能拿到半成品。 */
+export const SESSIONS_SCANNED_EVENT = "sessions-scanned";
 
 function localDayKey(date = new Date()): string {
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -93,6 +102,10 @@ export function SkillsPanel() {
   const deployment = useDrift();
   const [view, setView] = useState<SkillView>("installed");
   const [discoverMounted, setDiscoverMounted] = useState(false);
+  // 发现页的搜索框与已安装同在页签行右侧；关键词与来源各视图独立，避免切页签时互相干扰。
+  const [discoverSource, setDiscoverSource] = useState<SkillDiscoverySource>("repos");
+  const [discoverQuery, setDiscoverQuery] = useState("");
+  const discoveryRef = useRef<SkillDiscoveryHandle>(null);
   const [unmanagedMounted, setUnmanagedMounted] = useState(false);
   // 未纳管扫描是只读的本地目录遍历：进面板时扫一次即可，结果同时供页签计数与横幅使用。
   const [unmanaged, setUnmanaged] = useState<UnmanagedSkillReport | null>(null);
@@ -212,6 +225,24 @@ export function SkillsPanel() {
       setUsageLoading(false);
     }
   };
+
+  // 扫描可能由会话页或上一次挂载在后台发起；本页在扫描中途读到的是半成品索引，
+  // 扫描真正结束后必须再重读一次统计，否则次数会停在旧值直到重进页面。
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    let unlisten: UnlistenFn | undefined;
+    void listen(SESSIONS_SCANNED_EVENT, () => {
+      void loadUsage();
+    }).then((stop) => {
+      if (cancelled) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   // StrictMode 会重复执行挂载 effect；用 ref 保证一次进入只自动刷一次。
   const autoUsageChecked = useRef(false);
@@ -613,74 +644,103 @@ export function SkillsPanel() {
           if (next === "discover") setDiscoverMounted(true);
           if (next === "unmanaged") setUnmanagedMounted(true);
         }}
+        trailing={
+          view === "installed" ? (
+            <SearchField
+              className="w-[240px]"
+              value={query}
+              onValueChange={setQuery}
+              placeholder="搜索名称、描述、来源或仓库…"
+              ariaLabel="搜索 Skill"
+            />
+          ) : view === "discover" && discoverSource !== "trend" ? (
+            <SearchField
+              className="w-[240px]"
+              value={discoverQuery}
+              onValueChange={setDiscoverQuery}
+              placeholder={
+                discoverSource === "skillssh" ? "搜索 skills.sh…" : "搜索 Skill 或仓库…"
+              }
+              ariaLabel="搜索可发现的 Skill"
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && discoverSource === "skillssh") {
+                  discoveryRef.current?.submitSearch();
+                }
+              }}
+            />
+          ) : null
+        }
       />
 
       <div className={view === "installed" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
         <div className="flex h-12 shrink-0 items-center gap-2 px-6">
-          <SearchField
-            className="w-[240px]"
-            value={query}
-            onValueChange={setQuery}
-            placeholder="搜索名称、描述、来源或仓库…"
-            ariaLabel="搜索 Skill"
-          />
           <SkillRepoFilter
+            variant="quiet"
             repoChoices={repoChoices}
             repoKeys={repoKeys}
             allReposSelected={allReposSelected}
             onToggleRepo={toggleRepo}
             onToggleAllRepos={toggleAllRepos}
           />
-          <Select
-            aria-label="按 Agent 筛选"
-            value={agentFilter}
-            onChange={(event) => setAgentFilter(event.target.value)}
-          >
-            <option value="all">全部 Agent</option>
-            {agentsForType.map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {agent.displayName}
-              </option>
-            ))}
-          </Select>
-          <Select
-            aria-label="按启用状态筛选"
-            value={statusFilter}
-            onChange={(event) =>
-              setStatusFilter(event.target.value as "all" | "on" | "off")
-            }
-          >
-            <option value="all">全部状态</option>
-            <option value="on">已启用</option>
-            <option value="off">未启用</option>
-          </Select>
-          <Select
-            aria-label="按来源筛选"
-            value={sourceFilter}
-            onChange={(event) => setSourceFilter(event.target.value)}
-          >
-            {SOURCE_FILTERS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </Select>
-          <Select
-            aria-label="按调用次数排序"
-            className="ml-auto"
-            value={sortOrder}
-            onChange={(event) => setSortOrder(event.target.value as SkillSort)}
-          >
-            {SORT_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </Select>
-          <span className="text-caption text-fg-3">
-            {visible.length} / {items.length} 个 Skill
-            {usageLoading && " · 统计刷新中…"}
-          </span>
+          <FilterMenu
+            groups={[
+              {
+                key: "agent",
+                title: "Agent",
+                value: agentFilter,
+                active: agentFilter !== "all",
+                options: [
+                  { value: "all", label: "全部 Agent" },
+                  ...agentsForType.map((agent) => ({
+                    value: agent.id,
+                    label: agent.displayName,
+                  })),
+                ],
+                onChange: setAgentFilter,
+              },
+              {
+                key: "status",
+                title: "启用状态",
+                value: statusFilter,
+                active: statusFilter !== "all",
+                options: [
+                  { value: "all", label: "全部状态" },
+                  { value: "on", label: "已启用" },
+                  { value: "off", label: "未启用" },
+                ],
+                onChange: (value) => setStatusFilter(value as "all" | "on" | "off"),
+              },
+              {
+                key: "source",
+                title: "来源",
+                value: sourceFilter,
+                active: sourceFilter !== "all",
+                options: SOURCE_FILTERS.map((option) => ({
+                  value: option.value,
+                  label: option.label,
+                })),
+                onChange: setSourceFilter,
+              },
+            ]}
+          />
+          <div className="ml-auto flex items-center gap-2">
+            <FilterMenu
+              triggerLabel={SORT_OPTIONS.find((option) => option.value === sortOrder)?.label}
+              groups={[
+                {
+                  key: "sort",
+                  title: "排序",
+                  value: sortOrder,
+                  options: SORT_OPTIONS,
+                  onChange: (value) => setSortOrder(value as SkillSort),
+                },
+              ]}
+            />
+            <span className="text-caption text-fg-3">
+              {visible.length} / {items.length} 个 Skill
+              {usageLoading && " · 统计刷新中…"}
+            </span>
+          </div>
         </div>
 
       <SkillDeploymentNotice
@@ -926,6 +986,7 @@ export function SkillsPanel() {
       {discoverMounted && (
         <div className={view === "discover" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
           <SkillDiscoveryPanel
+            ref={discoveryRef}
             installedItems={items}
             scope={scope}
             targets={{
@@ -939,6 +1000,12 @@ export function SkillsPanel() {
                       ? "未选择 Agent"
                       : selected.map((target) => target.label).join("、"),
               emptyHint: "没有启用支持 Skills 的 Agent。",
+            }}
+            search={{
+              source: discoverSource,
+              onSourceChange: setDiscoverSource,
+              query: discoverQuery,
+              onQueryChange: setDiscoverQuery,
             }}
             onInstalled={refreshAll}
             onShowInstalled={() => setView("installed")}

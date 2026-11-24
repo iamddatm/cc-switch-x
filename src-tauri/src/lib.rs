@@ -32,6 +32,16 @@ pub fn run() {
         }
     };
     let state = state::AppState::init(settings).expect("初始化应用状态失败");
+    // 已安装 Skill 的来源仓库自动并入发现列表（跳过用户删过的）；失败只提示，不拦启动。
+    match services::settings::auto_register_installed_repos(&state.store) {
+        Ok(Some(updated)) => {
+            if let Ok(mut current) = state.settings.lock() {
+                *current = updated;
+            }
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!("自动登记已安装 Skill 来源仓库失败：{error}"),
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())

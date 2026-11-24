@@ -139,8 +139,22 @@ pub async fn install_skill(
     })
     .await?;
     rebuild_index(&state)?;
+    register_installed_repos(state.inner());
     state.notify_git("skill: install");
     Ok(report)
+}
+
+/// 新装的 Skill 可能来自尚未配置的仓库：顺手把来源仓库并入发现列表。
+fn register_installed_repos(state: &AppState) {
+    match settings_service::auto_register_installed_repos(&state.store) {
+        Ok(Some(updated)) => {
+            if let Ok(mut current) = state.settings.lock() {
+                *current = updated;
+            }
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!("自动登记已安装 Skill 来源仓库失败：{error}"),
+    }
 }
 
 #[tauri::command]
@@ -372,6 +386,7 @@ pub async fn install_discovered_skill(
     })
     .await?;
     rebuild_index(&state)?;
+    register_installed_repos(state.inner());
     state.notify_git(format!("skill: install {}", outcome.id));
     Ok(outcome)
 }

@@ -64,7 +64,7 @@ pub struct SkillDiscoveryReport {
 ///
 /// 索引只是缓存，来源信息以真源的 `.meta.json` 为准；读不到的 Skill 直接跳过。
 /// 发现流程每次只扫一遍磁盘，避免按仓库重复读取。
-fn installed_metas(store: &Store) -> Vec<SkillMeta> {
+pub(crate) fn installed_metas(store: &Store) -> Vec<SkillMeta> {
     let Ok(ids) = store.list_ids(AssetType::Skill) else {
         return Vec::new();
     };
@@ -80,7 +80,7 @@ pub fn merge_installed_repos(store: &Store, configured: &[SkillRepo]) -> Vec<Ski
     suggested_repos(&installed_metas(store), configured)
 }
 
-fn suggested_repos(installed: &[SkillMeta], configured: &[SkillRepo]) -> Vec<SkillRepo> {
+pub(crate) fn suggested_repos(installed: &[SkillMeta], configured: &[SkillRepo]) -> Vec<SkillRepo> {
     let mut repos = Vec::new();
     let mut seen: HashSet<String> = configured
         .iter()

@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { cn } from "../../lib/cn";
 
 /**
@@ -15,12 +16,15 @@ export function SkillViewTabs({
   installedCount,
   unmanagedCount,
   onSelect,
+  trailing,
 }: {
   view: SkillView;
   installedCount: number;
   /** 传了才渲染「未纳管」页签；数字是本次扫描的待处理条数。 */
   unmanagedCount?: number;
   onSelect: (next: SkillView) => void;
+  /** 视图级操作（主要是搜索）：放在页签行右侧，切换视图时位置不变。 */
+  trailing?: ReactNode;
 }) {
   const tabClass = (active: boolean) =>
     cn(
@@ -67,6 +71,7 @@ export function SkillViewTabs({
           <span className="ms-1.5 text-caption text-fg-3">{unmanagedCount}</span>
         </button>
       )}
+      {trailing && <div className="ms-auto flex items-center gap-2">{trailing}</div>}
     </div>
   );
 }
