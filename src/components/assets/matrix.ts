@@ -29,6 +29,8 @@ export async function callToggle(
       return api.setRuleEnabled(id, agentId, enabled);
     case "subagent":
       return api.setSubagentEnabled(id, agentId, enabled);
+    case "command":
+      return api.setCommandEnabled(id, agentId, enabled);
     case "hook":
       return api.setHookEnabled(id, agentId, enabled);
   }

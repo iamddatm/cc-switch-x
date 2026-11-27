@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-CC Switch X 是 Tauri 2 + React 的桌面应用，用纯文本文件作为唯一真源，统一管理 MCP / Skills / Prompts / Rules / Subagents / Hooks 六类 AI 编程资产，并把它们分发到 Claude Code、Codex、Qoder CN 等 agent 的用户级配置；另提供只读的本地会话浏览、搜索与导出。
+CC Switch X 是 Tauri 2 + React 的桌面应用，用纯文本文件作为唯一真源，统一管理 MCP / Skills / Prompts / Rules / Subagents / Hooks / Commands 七类 AI 编程资产，并把它们分发到 Claude Code、Codex、Qoder CN 等 agent 的用户级配置；另提供只读的本地会话浏览、搜索与导出。
 
 技术栈：Rust（`domain` / `store` / `index` / `adapters` / `services` / `commands`）+ React 18 + TypeScript + Vite + Tailwind + Vitest。Windows 优先。
 设计文档：`docs/superpowers/specs/2026-10-22-cc-switch-x-design.md`；实现计划：`docs/superpowers/plans/`。代码与测试是最终事实。
@@ -42,7 +42,7 @@ node scripts/check-release-version.mjs
 
 ## 前端（src）
 
-- `components/shell/AppShell.tsx` 按 `Pane` 切换面板。`panels/` 一类资产一个面板（Mcp / Rules / Prompts / Subagents / Hooks / Skills / ProjectSkills / Agents / Network / Backups / Sessions / Settings）；`components/` 下 `ui/` 是无业务原语、`shell/` 是骨架与 scope 切换、`assets/` 是共用的行与矩阵单元（`AssetRow` / `AgentColumnCells`）、其余按功能分（`skills` / `projects` / `prompts` / `mcp` / `sessions` / `agents` / `settings`）。
+- `components/shell/AppShell.tsx` 按 `Pane` 切换面板。`panels/` 一类资产一个面板（Mcp / Rules / Prompts / Commands / Subagents / Hooks / Skills / ProjectSkills / Agents / Network / Backups / Sessions / Settings）；`components/` 下 `ui/` 是无业务原语、`shell/` 是骨架与 scope 切换、`assets/` 是共用的行与矩阵单元（`AssetRow` / `AgentColumnCells`）、其余按功能分（`skills` / `projects` / `prompts` / `mcp` / `sessions` / `agents` / `settings`）。
 - 用户级与项目级是两套真源与两套面板：`SkillsPanel` + `components/skills/` 管 `assets/skills/`，`ProjectSkillsPanel` + `components/projects/` 管 `<project>/.ccswitchx/`；改一边不会同步另一边，动手前先确认改的是哪一层。
 - 所有后端调用集中在 `lib/api.ts`（`invoke`），参数用 camelCase；`types.ts` 是前后端类型的单一来源。数据获取在 `hooks/`，mutation 后手动 `refresh()`，没有全局状态库。
 - 面板测试 mock `../lib/api`；能力表用 `test/agents.ts` 的 `capabilities()` 构造。用户可见文案用中文。
@@ -50,7 +50,7 @@ node scripts/check-release-version.mjs
 ## 真源与数据目录
 
 默认根为 `~/.ccswitchx/`（可在设置中改）：
-- `assets/{mcp,skills,prompts,rules,subagents,hooks}/`：文本真源；Skill 是包含 `SKILL.md` 的目录。
+- `assets/{mcp,skills,prompts,rules,subagents,hooks,commands}/`：文本真源；Skill 是包含 `SKILL.md` 的目录；Command 是逐字保留的 markdown（按文件名调用，如 `review.md` → `/review`）。
 - `agents/<agent-id>.json`：跨设备同步的启用矩阵与 `activePrompt`。
 - `local/agents/<agent-id>.json`：本机专属 `baseOverride`、实测链接方式，不参与同步。
 - `state/applied/<agent-id>.json`：落盘归属台账；`state/import.json`：导入记录。

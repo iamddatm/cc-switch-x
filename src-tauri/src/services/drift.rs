@@ -4,7 +4,7 @@
 //! `rescan` **只报告不动盘**；改动要么被采纳进真源（AdoptDisk），要么被真源重刷
 //! （RepushSource），两者都由用户点出来，绝不在写入路径上偷偷做。
 
-use crate::adapters::{ledger, prompt, rules, subagents};
+use crate::adapters::{commands, ledger, prompt, rules, subagents};
 use crate::domain::agent::{builtin_agents, AgentDescriptor, AssetKind};
 use crate::domain::prompt::{parse_prompt, render_prompt, Prompt};
 use crate::domain::rule::parse_rule;
@@ -134,6 +134,8 @@ fn disk_matches_expectation(
             // 提示词是整文件接管，没有派生 frontmatter，按字节比
             disk_text == parsed.body
         }
+        // 命令逐字落盘，没有派生产物：盘上这份与真源必须完全一致。
+        AssetKind::Command => disk_text == canonical,
         other => {
             return Err(AppError::InvalidInput(format!(
                 "{} 不该出现在落盘台账里，无法判断漂移",
@@ -319,6 +321,8 @@ pub fn resolve(
                         body: disk_text,
                     })
                 }
+                // 命令没有派生物，磁盘原文就是新真源。
+                AssetKind::Command => disk_text,
                 other => {
                     return Err(AppError::Unsupported(format!(
                         "{} 的采纳磁盘没有可靠的落点格式，未做任何改动",
@@ -361,6 +365,11 @@ pub fn resolve(
                         home,
                         base_override,
                     )?;
+                    (report.written, report.skipped)
+                }
+                AssetKind::Command => {
+                    let report =
+                        commands::repush(store, index, &agent, &row.asset_id, home, base_override)?;
                     (report.written, report.skipped)
                 }
                 AssetKind::Prompt => {
@@ -422,6 +431,7 @@ fn set_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::commands::target_path as command_target;
     use crate::adapters::rules::{deploy as deploy_rule, render_rule, target_path as rule_target};
     use crate::adapters::subagents::{deploy as deploy_subagent, target_path as subagent_target};
     use crate::domain::agent::builtin_agents;
@@ -549,6 +559,29 @@ mod tests {
             let text =
                 String::from_utf8(self.store.read(AssetType::Rule, "style").unwrap()).unwrap();
             crate::domain::rule::parse_rule("style", &text).unwrap()
+        }
+
+        fn seed_command(&self, text: &str) {
+            self.store
+                .write(AssetType::Command, "review", text.as_bytes())
+                .unwrap();
+        }
+
+        fn command_target(&self) -> PathBuf {
+            command_target(&self.agent("claude"), "review", &self.home, None).unwrap()
+        }
+
+        fn deploy_command(&mut self) {
+            let agent = self.agent("claude");
+            crate::adapters::commands::deploy(
+                &self.store,
+                &mut self.index,
+                &agent,
+                "review",
+                &self.home,
+                None,
+            )
+            .unwrap();
         }
 
         fn resolve(
@@ -841,6 +874,46 @@ mod tests {
         // 真源被删掉：没有期望可比，只能跳过（清理是另一件事，这里不假装成没漂移也没法比对）
         fx.store.delete(AssetType::Rule, "style").unwrap();
         assert!(fx.rescan().is_empty());
+    }
+
+    #[test]
+    fn command_drift_round_trips_both_ways() {
+        let mut fx = fixture();
+        fx.seed_command("---\ndescription: 审查\n---\n\n正文\n");
+        fx.deploy_command();
+        std::fs::write(fx.command_target(), "用户改过的命令\n").unwrap();
+
+        let drifts = fx.rescan();
+        assert_eq!(drifts.len(), 1, "{drifts:?}");
+        assert_eq!(drifts[0].asset_type, AssetType::Command);
+        assert!(
+            matches!(
+                ensure_no_open_drift(&fx.index, AssetKind::Command, "review", "claude"),
+                Err(AppError::DriftUnresolved(_))
+            ),
+            "未解决漂移必须挡住再次落盘"
+        );
+
+        // 采纳磁盘：真源变成磁盘原文，落盘文件一个字节不动
+        fx.resolve(drifts[0].id, ResolveAction::AdoptDisk).unwrap();
+        assert_eq!(
+            String::from_utf8(fx.store.read(AssetType::Command, "review").unwrap()).unwrap(),
+            "用户改过的命令\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fx.command_target()).unwrap(),
+            "用户改过的命令\n"
+        );
+        assert!(fx.rescan().is_empty());
+
+        // 再手改一次，然后重刷真源
+        std::fs::write(fx.command_target(), "又一次手改\n").unwrap();
+        let drift_id = fx.rescan()[0].id;
+        fx.resolve(drift_id, ResolveAction::RepushSource).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(fx.command_target()).unwrap(),
+            "用户改过的命令\n"
+        );
     }
 
     #[test]

@@ -13,17 +13,19 @@ pub enum AssetKind {
     Rule,
     Subagent,
     Hook,
+    Command,
     Session,
 }
 
 impl AssetKind {
-    pub const ALL: [AssetKind; 7] = [
+    pub const ALL: [AssetKind; 8] = [
         Self::Mcp,
         Self::Skill,
         Self::Prompt,
         Self::Rule,
         Self::Subagent,
         Self::Hook,
+        Self::Command,
         Self::Session,
     ];
 
@@ -35,6 +37,7 @@ impl AssetKind {
             AssetType::Rule => Self::Rule,
             AssetType::Subagent => Self::Subagent,
             AssetType::Hook => Self::Hook,
+            AssetType::Command => Self::Command,
         }
     }
 
@@ -46,6 +49,7 @@ impl AssetKind {
             Self::Rule => Ok(AssetType::Rule),
             Self::Subagent => Ok(AssetType::Subagent),
             Self::Hook => Ok(AssetType::Hook),
+            Self::Command => Ok(AssetType::Command),
             Self::Session => Err(self),
         }
     }
@@ -64,6 +68,7 @@ impl AssetKind {
             Self::Rule => "rule",
             Self::Subagent => "subagent",
             Self::Hook => "hook",
+            Self::Command => "command",
             Self::Session => "session",
         }
     }
@@ -166,6 +171,8 @@ pub struct AgentPaths {
     /// None 表示该 agent 没有可映射的 markdown 规则目录（例如 Codex 的 rules 是执行策略 DSL）。
     pub rules_dir: Option<String>,
     pub agents_dir: Option<String>,
+    /// 自定义斜杠命令目录；None 表示该 agent 没有可映射的命令落点。
+    pub commands_dir: Option<String>,
     pub hooks: HooksTarget,
 }
 
@@ -256,6 +263,8 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
                 (AssetKind::Prompt, AssetSupport::VERIFIED),
                 (AssetKind::Hook, AssetSupport::VERIFIED),
                 (AssetKind::Subagent, AssetSupport::UNVERIFIED),
+                // 本机 ~/.claude/commands 真实存在且带命令文件；沙箱 e2e 也会实际写入
+                (AssetKind::Command, AssetSupport::VERIFIED),
                 (AssetKind::Session, AssetSupport::UNVERIFIED),
             ]),
             paths: AgentPaths {
@@ -268,6 +277,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
                 // 本机不存在 ~/.claude/rules，官方落点未确认，按不支持处理
                 rules_dir: None,
                 agents_dir: Some(declared("~/.claude", "agents")),
+                commands_dir: Some(declared("~/.claude", "commands")),
                 hooks: HooksTarget::Json {
                     file: declared("~/.claude", "settings.json"),
                     key: "hooks".into(),
@@ -301,6 +311,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
                 // rules/default.rules 是 `prefix_rule(...)` 执行策略 DSL，不是 markdown 规则
                 rules_dir: None,
                 agents_dir: Some(declared("~/.codex", "agents")),
+                commands_dir: None,
                 hooks: HooksTarget::Json {
                     file: declared("~/.codex", "hooks.json"),
                     key: "hooks".into(),
@@ -336,6 +347,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
                 prompt_file: declared("~/.gemini", "GEMINI.md"),
                 rules_dir: None,
                 agents_dir: None,
+                commands_dir: None,
                 hooks: HooksTarget::Unsupported,
             },
             mcp_needs_restart: None,
@@ -364,6 +376,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
                 prompt_file: declared("~/.qoder", "AGENTS.md"),
                 rules_dir: Some(declared("~/.qoder", "rules")),
                 agents_dir: Some(declared("~/.qoder", "agents")),
+                commands_dir: None,
                 hooks: HooksTarget::Json {
                     file: declared("~/.qoder", "settings.json"),
                     key: "hooks".into(),
@@ -400,6 +413,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
                 prompt_file: declared("~/.qoder-cn", "AGENTS.md"),
                 rules_dir: Some(declared("~/.qoder-cn", "rules")),
                 agents_dir: Some(declared("~/.qoder-cn", "agents")),
+                commands_dir: None,
                 hooks: HooksTarget::Json {
                     file: declared("~/.qoder-cn", "settings.json"),
                     key: "hooks".into(),
@@ -434,6 +448,7 @@ pub fn builtin_agents() -> Vec<AgentDescriptor> {
                 // pi 不读 ~/.pi/agent/rules（teamai 的 LEGACY_RULE_DIRS 明写），规则走 AGENTS.md
                 rules_dir: None,
                 agents_dir: None,
+                commands_dir: None,
                 hooks: HooksTarget::Unsupported,
             },
             mcp_needs_restart: None,
@@ -518,6 +533,20 @@ mod support_tests {
                     .all(|c| !c.verified || c.supported),
                 "verified 不能脱离 supported 单独出现：{}",
                 descriptor.id
+            );
+        }
+    }
+
+    #[test]
+    fn commands_are_only_declared_for_claude() {
+        assert!(
+            agent("claude").switchable(AssetKind::Command),
+            "本机 ~/.claude/commands 有真实命令文件，属 B 档实物证据"
+        );
+        for id in ["codex", "gemini", "qoder", "qoder-cn", "pi"] {
+            assert!(
+                !agent(id).supported(AssetKind::Command),
+                "{id} 没有命令落点，不能给开关"
             );
         }
     }

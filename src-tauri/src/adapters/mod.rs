@@ -1,6 +1,7 @@
 use crate::services::apply::ApplyReport;
 
 pub mod cli;
+pub mod commands;
 pub mod hooks;
 pub mod ledger;
 pub mod mcp;

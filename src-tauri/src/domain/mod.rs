@@ -92,6 +92,15 @@ pub fn parse_and_validate(
             hook::parse_hook(as_text(bytes)?)?;
             Ok(())
         }
+        // 命令是逐字保留的 markdown：frontmatter 可有可无，不重排、不补字段，
+        // 只要求是 UTF-8 且不是空白文件。
+        AssetType::Command => {
+            let text = as_text(bytes)?;
+            if text.trim().is_empty() {
+                return Err(DomainError::EmptyCommand);
+            }
+            Ok(())
+        }
         AssetType::Skill => Ok(()),
     }
 }
@@ -163,7 +172,26 @@ pub fn describe(asset_type: AssetType, id: &str, bytes: &[u8]) -> AssetDetails {
             },
             Err(_) => AssetDetails::default(),
         },
+        // 命令按文件名调用，名字就是 id；副标题取 frontmatter 的 description，
+        // 没有就退到正文第一行（与提示词同一口径）。
+        AssetType::Command => AssetDetails {
+            name: None,
+            description: command_description(text).or_else(|| {
+                frontmatter::split_frontmatter(text)
+                    .ok()
+                    .and_then(|parts| first_line(&parts.body))
+            }),
+            transport: None,
+        },
     }
+}
+
+fn command_description(text: &str) -> Option<String> {
+    let parts = frontmatter::split_frontmatter(text).ok()?;
+    let yaml = parts.yaml?;
+    let value: serde_yaml::Value = serde_yaml::from_str(&yaml).ok()?;
+    let description = value.get("description")?.as_str()?.trim().to_string();
+    non_empty(description)
 }
 
 fn mcp_summary(server: &mcp::McpServer) -> String {
@@ -214,6 +242,8 @@ pub fn display_name(asset_type: AssetType, id: &str, bytes: &[u8]) -> Result<Str
         AssetType::Rule => Ok(rule::parse_rule(id, as_text(bytes)?)?.meta.name),
         AssetType::Subagent => Ok(subagent::parse_subagent(as_text(bytes)?)?.name),
         AssetType::Hook => Ok(hook::parse_hook(as_text(bytes)?)?.name),
+        // 命令的调用名来自文件名，不随 frontmatter 变化。
+        AssetType::Command => Ok(id.to_string()),
         AssetType::Skill => Ok(id.to_string()),
     }
 }
@@ -248,6 +278,41 @@ mod tests {
         let prompt = prompt::parse_prompt("team", raw).unwrap();
         assert_eq!(prompt.meta.title.as_deref(), Some("团队提示词"));
         assert_eq!(prompt.body, "正文\n");
+    }
+
+    #[test]
+    fn a_command_is_verbatim_markdown_and_may_omit_frontmatter() {
+        // 没有 frontmatter 的命令也合法；名字沿用文件名
+        assert!(parse_and_validate(AssetType::Command, "review", "# 审查\n".as_bytes()).is_ok());
+        assert_eq!(
+            display_name(AssetType::Command, "review", "# 审查\n".as_bytes()).unwrap(),
+            "review"
+        );
+        // 空白命令拒绝
+        assert_eq!(
+            parse_and_validate(AssetType::Command, "empty", b"  \n"),
+            Err(DomainError::EmptyCommand)
+        );
+    }
+
+    #[test]
+    fn command_description_comes_from_frontmatter_then_the_first_body_line() {
+        let details = describe(
+            AssetType::Command,
+            "review",
+            "---\ndescription: 审查并合并\n---\n\n正文\n".as_bytes(),
+        );
+        assert_eq!(details.description.as_deref(), Some("审查并合并"));
+
+        let details = describe(
+            AssetType::Command,
+            "review",
+            "\n\n没有 frontmatter 的第一行\n".as_bytes(),
+        );
+        assert_eq!(
+            details.description.as_deref(),
+            Some("没有 frontmatter 的第一行")
+        );
     }
 
     #[test]

@@ -5,8 +5,8 @@ import type { AssetSummary } from "../../types";
 import type { SourceScanState } from "./useSourceScan";
 
 /**
- * 整文件资产（Rules / Subagents / Hooks）编辑面板共用的骨架。
- * 三者只有「表单字段、脚注、有没有扫描 / 漂移」不同，容器与左右两栏的形状是一样的；
+ * 整文件资产（Rules / Subagents / Hooks / Commands）编辑面板共用的骨架。
+ * 它们只有「表单字段、脚注、有没有扫描 / 漂移」不同，容器与左右两栏的形状是一样的；
  * 把形状收在这里，改布局时只动一处，也不会再出现同一个 bug 修两遍。
  */
 export function AssetEditorLayout({ children }: { children: ReactNode }) {

@@ -473,6 +473,7 @@ fn asset_type_key(asset_type: AssetType) -> &'static str {
         AssetType::Rule => "rule",
         AssetType::Subagent => "subagent",
         AssetType::Hook => "hook",
+        AssetType::Command => "command",
     }
 }
 
@@ -484,6 +485,7 @@ fn asset_type_from_key(key: &str) -> Result<AssetType, rusqlite::Error> {
         "rule" => Ok(AssetType::Rule),
         "subagent" => Ok(AssetType::Subagent),
         "hook" => Ok(AssetType::Hook),
+        "command" => Ok(AssetType::Command),
         other => Err(rusqlite::Error::InvalidColumnName(format!(
             "索引里出现未知资产类型：{other}"
         ))),

@@ -123,6 +123,8 @@ pub fn run() {
             commands::cloud::get_cloud_status_cached,
             commands::cloud::set_cloud_settings,
             commands::cloud::test_cloud_connection,
+            commands::commands::scan_commands,
+            commands::commands::set_command_enabled,
             commands::drift::list_drifts,
             commands::drift::rescan_drift,
             commands::drift::resolve_drift,

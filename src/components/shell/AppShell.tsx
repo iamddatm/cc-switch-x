@@ -14,6 +14,7 @@ import { Sidebar } from "./Sidebar";
 import { TitleBar } from "./TitleBar";
 import { AgentsPanel } from "../../panels/AgentsPanel";
 import { BackupsPanel } from "../../panels/BackupsPanel";
+import { CommandsPanel } from "../../panels/CommandsPanel";
 import { HooksPanel } from "../../panels/HooksPanel";
 import { McpPanel } from "../../panels/McpPanel";
 import { NetworkPanel } from "../../panels/NetworkPanel";
@@ -28,7 +29,14 @@ import { SubagentsPanel } from "../../panels/SubagentsPanel";
 const SCOPE_STORAGE_KEY = "ccswitchx.scope";
 
 /** 项目范围只有 Skills 是项目级资产；停在这些 pane 上时自动跳到 Skills。会话仍可见，但按当前项目过滤。 */
-const GLOBAL_ONLY_PANES = new Set<Pane>(["mcp", "prompt", "rule", "subagent", "hook"]);
+const GLOBAL_ONLY_PANES = new Set<Pane>([
+  "mcp",
+  "prompt",
+  "command",
+  "rule",
+  "subagent",
+  "hook",
+]);
 
 function ProjectEmptyState({ onAdd }: { onAdd: () => void }) {
   return (
@@ -93,6 +101,7 @@ export function AppShell() {
         <SkillsPanel />
       ),
     prompt: <PromptsPanel />,
+    command: <CommandsPanel />,
     rule: <RulesPanel />,
     subagent: <SubagentsPanel />,
     hook: <HooksPanel />,

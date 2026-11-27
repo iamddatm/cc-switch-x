@@ -1,4 +1,11 @@
-export type AssetType = "mcp" | "skill" | "prompt" | "rule" | "subagent" | "hook";
+export type AssetType =
+  | "mcp"
+  | "skill"
+  | "prompt"
+  | "rule"
+  | "subagent"
+  | "hook"
+  | "command";
 export type Pane = AssetType | "sessions" | "agents" | "network" | "backup" | "settings";
 export type Theme = "light" | "dark" | "system";
 
@@ -369,6 +376,7 @@ export interface AgentStatus {
   enabledRules: string[];
   enabledSubagents: string[];
   enabledHooks: string[];
+  enabledCommands: string[];
   activePrompt: string | null;
 }
 
@@ -415,6 +423,8 @@ export function enabledFor(agent: AgentStatus, kind: AssetType): string[] {
       return agent.enabledSubagents;
     case "hook":
       return agent.enabledHooks;
+    case "command":
+      return agent.enabledCommands;
     default:
       // prompts 同时只能激活一份，走 activePrompt，不在这张表里
       return [];

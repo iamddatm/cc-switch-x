@@ -280,6 +280,10 @@ export const api = {
     invoke<string>("set_subagent_enabled", { id, agentId, enabled }),
   scanSubagents: (agentId: string) =>
     invoke<ScanReport>("scan_subagents", { agentId }),
+  setCommandEnabled: (id: string, agentId: string, enabled: boolean) =>
+    invoke<string>("set_command_enabled", { id, agentId, enabled }),
+  scanCommands: (agentId: string) =>
+    invoke<ScanReport>("scan_commands", { agentId }),
   setHookEnabled: (id: string, agentId: string, enabled: boolean) =>
     invoke<ApplyReport>("set_hook_enabled", { id, agentId, enabled }),
   /** 该 agent 的 hook 文件里不是本工具写的条目数 */

@@ -3,8 +3,8 @@ import { api } from "../../lib/api";
 import type { AssetSummary, AssetType } from "../../types";
 
 /**
- * 整文件资产（Rules / Subagents / Hooks）的编辑状态机：选中 → 读真源 → 新建 / 保存 / 删除。
- * 三者只有表单形状与删除文案不同，其余逐字一样，收在这里才不会同一个 bug 修三遍。
+ * 整文件资产（Rules / Subagents / Hooks / Commands）的编辑状态机：选中 → 读真源 → 新建 / 保存 / 删除。
+ * 它们只有表单形状与删除文案不同，其余逐字一样，收在这里才不会同一个 bug 修三遍。
  */
 export function useFileAssetEditor<TForm extends { name: string }>({
   assetType,

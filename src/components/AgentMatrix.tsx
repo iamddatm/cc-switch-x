@@ -11,7 +11,7 @@ import { useAssetToggles } from "./assets/useAssetToggles";
 export type MatrixAsset = Exclude<AssetType, "prompt">;
 
 /**
- * 「资产 × agent」开关（纵向列表，Rules/Subagents/Hooks 使用）。
+ * 「资产 × agent」开关（纵向列表，Rules/Subagents/Hooks/Commands 使用）。
  * 能力按资产类型逐格判定：该 agent 没有这一类落点 → 整行不出现；
  * 有落点但没实测 → 只说明、不给开关。全局禁用的 agent 不出现在这里。
  */

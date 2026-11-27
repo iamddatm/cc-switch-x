@@ -5,6 +5,7 @@ const ASSET_LABELS: Record<string, string> = {
   prompt: "提示词",
   rule: "规则",
   subagent: "子代理",
+  command: "命令",
 };
 
 /**

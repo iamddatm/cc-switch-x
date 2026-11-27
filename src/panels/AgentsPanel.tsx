@@ -21,6 +21,7 @@ const CAPABILITIES: { kind: AssetKind; label: string }[] = [
   { kind: "rule", label: "规则" },
   { kind: "subagent", label: "子代理" },
   { kind: "hook", label: "Hooks" },
+  { kind: "command", label: "命令" },
 ];
 
 export function AgentsPanel() {

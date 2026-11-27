@@ -7,6 +7,7 @@ import type { MatrixAsset } from "./matrix";
 const KIND_LABEL: Partial<Record<MatrixAsset, string>> = {
   rule: "规则",
   subagent: "子代理",
+  command: "命令",
 };
 
 export interface SourceScanState {

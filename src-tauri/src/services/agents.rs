@@ -45,6 +45,7 @@ pub struct AgentStatus {
     pub enabled_rules: Vec<String>,
     pub enabled_subagents: Vec<String>,
     pub enabled_hooks: Vec<String>,
+    pub enabled_commands: Vec<String>,
     pub active_prompt: Option<String>,
 }
 
@@ -182,6 +183,7 @@ pub fn detect_all(store: &Store, home: &Path) -> Result<Vec<AgentStatus>, AppErr
             enabled_rules: matrix.enabled_for(AssetType::Rule),
             enabled_subagents: matrix.enabled_for(AssetType::Subagent),
             enabled_hooks: matrix.enabled_for(AssetType::Hook),
+            enabled_commands: matrix.enabled_for(AssetType::Command),
             active_prompt: matrix.active_prompt,
         });
     }
@@ -360,6 +362,7 @@ mod tests {
                 "detected",
                 "displayName",
                 "enabled",
+                "enabledCommands",
                 "enabledHooks",
                 "enabledMcp",
                 "enabledRules",

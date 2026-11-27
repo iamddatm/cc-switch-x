@@ -543,6 +543,7 @@ mod tests {
             enabled_rules: Vec::new(),
             enabled_subagents: Vec::new(),
             enabled_hooks: Vec::new(),
+            enabled_commands: Vec::new(),
             active_prompt: None,
         }
     }

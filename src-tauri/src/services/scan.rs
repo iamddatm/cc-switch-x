@@ -3,7 +3,7 @@
 //! 与导入器的区别：导入读的是 cc-switch 的库，扫描读的是工具自己的落点，
 //! 而且必须**幂等**——刚 deploy 完再扫一遍应当什么都不变，否则会造出假 diff。
 
-use crate::adapters::{rules, subagents};
+use crate::adapters::{commands, rules, subagents};
 use crate::domain::agent::AgentDescriptor;
 use crate::domain::rule::{parse_rule, render_canonical as render_rule_canonical};
 use crate::domain::subagent::{parse_subagent, render_canonical as render_subagent_canonical};
@@ -181,6 +181,52 @@ impl FileAsset for SubagentAsset {
     }
 }
 
+/// 命令是逐字保留的 markdown：扫描就是把工具文件原样收进真源，
+/// 不做字段反推、也不重排 frontmatter。
+struct CommandAsset;
+
+impl FileAsset for CommandAsset {
+    const LABEL: &'static str = "命令";
+    const ASSET_TYPE: AssetType = AssetType::Command;
+
+    fn kind(&self) -> AssetKind {
+        AssetKind::Command
+    }
+
+    fn directory(
+        &self,
+        agent: &AgentDescriptor,
+        home: &Path,
+        base_override: Option<&Path>,
+    ) -> Result<PathBuf, AppError> {
+        commands::commands_dir(agent, home, base_override)
+    }
+
+    fn extension(&self, _agent: &AgentDescriptor) -> &'static str {
+        ".md"
+    }
+
+    fn canonical_text(
+        &self,
+        _agent: &AgentDescriptor,
+        _id: &str,
+        text: &str,
+        _existing: Option<&str>,
+    ) -> Result<String, DomainError> {
+        Ok(text.to_string())
+    }
+
+    fn matches_existing(
+        &self,
+        _agent: &AgentDescriptor,
+        _id: &str,
+        text: &str,
+        existing: &str,
+    ) -> Result<bool, DomainError> {
+        Ok(text == existing)
+    }
+}
+
 fn scan_assets<M: FileAsset>(
     mapping: &M,
     store: &Store,
@@ -329,6 +375,17 @@ pub fn subagents(
     base_override: Option<&Path>,
 ) -> Result<ScanReport, AppError> {
     scan_assets(&SubagentAsset, store, index, agent, home, base_override)
+}
+
+/// 扫 `<commands_dir>/*.md`：工具文件逐字收进真源，内容相同就计 unchanged。
+pub fn commands(
+    store: &Store,
+    index: &mut Index,
+    agent: &AgentDescriptor,
+    home: &Path,
+    base_override: Option<&Path>,
+) -> Result<ScanReport, AppError> {
+    scan_assets(&CommandAsset, store, index, agent, home, base_override)
 }
 
 #[cfg(test)]
@@ -559,6 +616,100 @@ mod tests {
         // 没被覆盖时读的是真实 home，那边是空的
         let untouched = rules(&fx.store, &mut fx.index, &fx.agent, &fx.home, None).unwrap();
         assert_eq!(untouched, ScanReport::default());
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    use crate::adapters::commands::deploy;
+    use crate::domain::agent::builtin_agents;
+    use crate::index::Index;
+    use crate::store::Store;
+    use tempfile::tempdir;
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        store: Store,
+        index: Index,
+        home: PathBuf,
+        agent: AgentDescriptor,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempdir().unwrap();
+        let store = Store::init(dir.path().join("store")).unwrap();
+        let index = Index::open(&dir.path().join("index.db")).unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".claude/commands")).unwrap();
+        Fixture {
+            _dir: dir,
+            store,
+            index,
+            home,
+            agent: builtin_agents()
+                .into_iter()
+                .find(|a| a.id == "claude")
+                .unwrap(),
+        }
+    }
+
+    impl Fixture {
+        fn commands_dir(&self) -> PathBuf {
+            self.home.join(".claude/commands")
+        }
+
+        fn scan(&mut self) -> Result<ScanReport, AppError> {
+            super::commands(&self.store, &mut self.index, &self.agent, &self.home, None)
+        }
+    }
+
+    #[test]
+    fn scanning_adopts_the_tool_file_verbatim() {
+        let mut fx = fixture();
+        let text = "---\ndescription: 审查\n---\n\n正文\n";
+        std::fs::write(fx.commands_dir().join("review.md"), text).unwrap();
+
+        let report = fx.scan().unwrap();
+        assert_eq!(report.imported, 1, "{report:?}");
+        assert_eq!(
+            String::from_utf8(fx.store.read(AssetType::Command, "review").unwrap()).unwrap(),
+            text,
+            "真源必须是工具文件的逐字副本"
+        );
+        assert_eq!(
+            fx.index
+                .list(Some(AssetType::Command))
+                .unwrap()
+                .iter()
+                .map(|asset| asset.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["review"]
+        );
+    }
+
+    #[test]
+    fn scanning_is_idempotent_right_after_a_deploy() {
+        let mut fx = fixture();
+        fx.store
+            .write(AssetType::Command, "review", "正文\n".as_bytes())
+            .unwrap();
+        deploy(
+            &fx.store,
+            &mut fx.index,
+            &fx.agent,
+            "review",
+            &fx.home,
+            None,
+        )
+        .unwrap();
+
+        let report = fx.scan().unwrap();
+        assert_eq!(
+            (report.imported, report.updated, report.unchanged),
+            (0, 0, 1),
+            "{report:?}"
+        );
     }
 }
 

@@ -9,16 +9,20 @@ pub enum AssetType {
     Rule,
     Subagent,
     Hook,
+    /// 工具侧的自定义斜杠命令（Claude Code 的 `~/.claude/commands/<id>.md`）。
+    /// 真源是逐字保留原文的 markdown，不重排 frontmatter。
+    Command,
 }
 
 impl AssetType {
-    pub const ALL: [AssetType; 6] = [
+    pub const ALL: [AssetType; 7] = [
         Self::Mcp,
         Self::Skill,
         Self::Prompt,
         Self::Rule,
         Self::Subagent,
         Self::Hook,
+        Self::Command,
     ];
 
     /// 能力表键回到真源资产类型：Session 不是真源资产，返回 Err 让调用方必须处理。
@@ -36,6 +40,7 @@ impl AssetType {
             Self::Rule => "rules",
             Self::Subagent => "subagents",
             Self::Hook => "hooks",
+            Self::Command => "commands",
         }
     }
 
@@ -44,7 +49,7 @@ impl AssetType {
         match self {
             Self::Mcp => Some("json"),
             Self::Skill => None,
-            Self::Prompt | Self::Rule => Some("md"),
+            Self::Prompt | Self::Rule | Self::Command => Some("md"),
             Self::Subagent | Self::Hook => Some("yaml"),
         }
     }

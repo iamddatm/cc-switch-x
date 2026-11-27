@@ -9,6 +9,7 @@ import {
   Server,
   Settings,
   Sparkles,
+  Terminal,
   Webhook,
   type LucideIcon,
 } from "lucide-react";
@@ -26,6 +27,7 @@ const ASSET_ITEMS: SidebarItem[] = [
   { pane: "skill", label: "Skills", icon: Sparkles },
   { pane: "mcp", label: "MCP", icon: Server },
   { pane: "prompt", label: "提示词", icon: BookOpen },
+  { pane: "command", label: "命令", icon: Terminal },
   { pane: "rule", label: "Rules", icon: ScrollText },
   { pane: "subagent", label: "Subagents", icon: Bot },
   { pane: "hook", label: "Hooks", icon: Webhook },
@@ -112,7 +114,14 @@ function SidebarGroup({
 }
 
 /** 资产里项目范围只支持 Skills；其余资产保持入口但禁用，提示它只在全局可用。 */
-const PROJECT_DISABLED_PANES = new Set<Pane>(["mcp", "prompt", "rule", "subagent", "hook"]);
+const PROJECT_DISABLED_PANES = new Set<Pane>([
+  "mcp",
+  "prompt",
+  "command",
+  "rule",
+  "subagent",
+  "hook",
+]);
 
 export function Sidebar({
   pane,

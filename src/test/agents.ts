@@ -1,6 +1,15 @@
 import type { AgentStatus, AssetKind, CapabilityStatus } from "../types";
 
-const KINDS: AssetKind[] = ["mcp", "skill", "prompt", "rule", "subagent", "hook", "session"];
+const KINDS: AssetKind[] = [
+  "mcp",
+  "skill",
+  "prompt",
+  "rule",
+  "subagent",
+  "hook",
+  "command",
+  "session",
+];
 
 /**
  * 造能力表。没在 `on` 里点亮的格子一律 supported=false，与后端 `supports()` 的补 OFF 行为一致；
@@ -34,6 +43,7 @@ export function agentStatus(overrides: Partial<AgentStatus> = {}): AgentStatus {
     enabledRules: [],
     enabledSubagents: [],
     enabledHooks: [],
+    enabledCommands: [],
     activePrompt: null,
     ...overrides,
   };

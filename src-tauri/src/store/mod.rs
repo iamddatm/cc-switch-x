@@ -31,7 +31,15 @@ impl Store {
     /// `local/projects/` 是项目级真源与台账的落点，靠 `local/` 这一行保持**不被同步**；
     /// 拉取或恢复带回旧版 .gitignore 时，`git_sync::ensure_layout` 会重新走这个函数补回来。
     pub fn init(root: PathBuf) -> Result<Self, StoreError> {
-        for name in ["mcp", "skills", "prompts", "rules", "subagents", "hooks"] {
+        for name in [
+            "mcp",
+            "skills",
+            "prompts",
+            "rules",
+            "subagents",
+            "hooks",
+            "commands",
+        ] {
             fs::create_dir_all(root.join("assets").join(name))?;
         }
         for name in [
@@ -369,7 +377,15 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join(".gitignore"), "node_modules/\n").unwrap();
         let store = Store::init(dir.path().to_path_buf()).unwrap();
-        for name in ["mcp", "skills", "prompts", "rules", "subagents", "hooks"] {
+        for name in [
+            "mcp",
+            "skills",
+            "prompts",
+            "rules",
+            "subagents",
+            "hooks",
+            "commands",
+        ] {
             assert!(store.root().join("assets").join(name).is_dir());
         }
         let ignore = std::fs::read_to_string(store.root().join(".gitignore")).unwrap();
